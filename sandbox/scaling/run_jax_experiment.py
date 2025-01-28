@@ -245,9 +245,9 @@ def train_and_evaluate(
   samples_seen = 0
   all_train_losses = []
   all_test_losses = []
-  samples_per_epoch = len(train_ds)
-  progress_bar = tqdm(total=config.train.total_samples, unit='samples')
   first_key = list(train_ds.keys())[0]
+  samples_per_epoch = len(train_ds[first_key])
+  progress_bar = tqdm(total=config.train.total_samples, unit='samples')
 
   # Process dataset in chunks of log_freq batches
   batch_idx = 0
