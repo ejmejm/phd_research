@@ -7,9 +7,9 @@ device: cuda  # or cpu
 
 data:
   dataset: mnist  # or cifar10
-  num_workers: 4
+  num_workers: 0
   download: true  # Only set to true when first downloading the dataset
-  eval_samples: null  # null means use full test set, otherwise specify number
+  eval_samples: 300  # null means use full test set, otherwise specify number
 
 model:
   width: 128  # hidden layer width

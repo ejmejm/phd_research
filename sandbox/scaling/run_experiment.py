@@ -222,7 +222,6 @@ def train_and_evaluate(
       step += 1
       samples_seen += batch_size
       current_epoch = samples_seen / samples_per_epoch
-      progress_bar.update(batch_size)
       
       # Logging
       if step % config.train.log_freq == 0:
@@ -245,6 +244,8 @@ def train_and_evaluate(
           acc=f'{train_acc:.4f}',
           epoch=f'{current_epoch:.2f}'
         )
+        
+        progress_bar.update(batch_size * config.train.log_freq)
         
         all_train_losses.append(train_loss)
         running_loss = 0
