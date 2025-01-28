@@ -1,6 +1,9 @@
+import os
 import math
+import pickle
 from typing import Dict, Tuple, Optional, Any, Callable
 import random
+import tempfile
 
 import hydra
 import numpy as np
@@ -25,18 +28,41 @@ def set_seed(seed: int) -> None:
   """Set random seeds for reproducibility."""
   random.seed(seed)
   np.random.seed(seed)
-  # JAX handles PRNG differently - we'll create a key in the main function
 
 
-def get_datasets(config: DictConfig) -> Tuple[Any, Any, int, int, int]:
+def get_datasets(config: DictConfig) -> Tuple[Any, Any, int, int]:
   """Initialize train and test datasets.
   
   Args:
     config: Configuration object containing dataset parameters
     
   Returns:
-    Tuple of (train_dataset, test_dataset, input_dimension, num_classes, train_size)
+    Tuple of (train_dataset, test_dataset, input_dimension, num_classes)
   """
+  # Set dimensions based on dataset type
+  if config.data.dataset == 'mnist':
+    input_dim = 28 * 28
+    num_classes = 10
+  else:  # cifar10
+    input_dim = 32 * 32 * 3
+    num_classes = 10
+
+  if config.data.preload:
+    # Create cache paths
+    cache_dir = tempfile.gettempdir()
+    train_cache = os.path.join(cache_dir, f'train_cache_{config.data.dataset}.pkl')
+    test_cache = os.path.join(cache_dir, f'test_cache_{config.data.dataset}.pkl')
+    
+    # Try loading from cache first
+    if os.path.exists(train_cache) and os.path.exists(test_cache):
+      print('Loading dataset from cache')
+      with open(train_cache, 'rb') as f:
+        train_loader = pickle.load(f)
+      with open(test_cache, 'rb') as f:
+        test_loader = pickle.load(f)
+      return train_loader, test_loader, input_dim, num_classes
+
+  # If no cache exists or preload is disabled, load the original dataset
   class JaxTransform:
     def __call__(self, x):
       return jnp.array(x)
@@ -51,8 +77,6 @@ def get_datasets(config: DictConfig) -> Tuple[Any, Any, int, int, int]:
       './data', train=True, download=config.data.download, transform=transform)
     test_dataset = torchvision.datasets.MNIST(
       './data', train=False, download=config.data.download, transform=transform)
-    input_dim = 28 * 28
-    num_classes = 10
   else:  # cifar10
     transform = transforms.Compose([
       transforms.ToTensor(), 
@@ -63,8 +87,6 @@ def get_datasets(config: DictConfig) -> Tuple[Any, Any, int, int, int]:
       './data', train=True, download=config.data.download, transform=transform)
     test_dataset = torchvision.datasets.CIFAR10(
       './data', train=False, download=config.data.download, transform=transform)
-    input_dim = 32 * 32 * 3
-    num_classes = 10
 
   # If eval_samples is specified, take a subset of the test dataset
   if config.data.eval_samples is not None:
@@ -75,7 +97,7 @@ def get_datasets(config: DictConfig) -> Tuple[Any, Any, int, int, int]:
     train_dataset,
     batch_size=config.train.batch_size,
     shuffle=True,
-    num_workers=config.data.num_workers
+    num_workers=config.data.num_workers,
   )
   test_loader = DataLoader(
     test_dataset,
@@ -83,7 +105,6 @@ def get_datasets(config: DictConfig) -> Tuple[Any, Any, int, int, int]:
     shuffle=False,
     num_workers=config.data.num_workers
   )
-  print(len(test_dataset), len(test_loader))
 
   # Convert labels to JAX arrays
   def collate_fn(batch):
@@ -95,6 +116,17 @@ def get_datasets(config: DictConfig) -> Tuple[Any, Any, int, int, int]:
 
   train_loader.collate_fn = collate_fn
   test_loader.collate_fn = collate_fn
+  
+  if config.data.preload:
+    print('Preprocessing and caching dataset')
+    # Convert to lists and cache
+    train_loader = list(train_loader)
+    test_loader = list(test_loader)
+    
+    with open(train_cache, 'wb') as f:
+      pickle.dump(train_loader, f)
+    with open(test_cache, 'wb') as f:
+      pickle.dump(test_loader, f)
   
   return train_loader, test_loader, input_dim, num_classes
 
@@ -195,81 +227,75 @@ def train_and_evaluate(
   config: DictConfig,
 ) -> Dict[str, float]:
   """Run training loop and return summary metrics."""
+  # Validate logging frequencies
+  assert config.train.validation_freq % config.train.log_freq == 0, (
+    'validation_freq must be a multiple of log_freq'
+  )
+
   step = 0
   samples_seen = 0
-  running_loss = 0
-  running_correct = 0
-  running_total = 0
-  
-  # For computing early/late statistics
   all_train_losses = []
   all_test_losses = []
-  
-  # Calculate total samples for epoch tracking
   samples_per_epoch = len(train_ds)
-  
   progress_bar = tqdm(total=config.train.total_samples, unit='samples')
-  
-  while samples_seen < config.train.total_samples:
-    for batch in train_ds:
-      if samples_seen >= config.train.total_samples:
-        break
-        
-      batch_size = len(batch['image'])
-      state, metrics = train_step(state, batch)
+
+  # Process dataset in chunks of log_freq batches
+  for batch_idx in range(0, len(train_ds), config.train.log_freq):
+    if samples_seen >= config.train.total_samples:
+      break
       
-      # Update running statistics
-      running_loss += metrics['loss'].item()
-      running_correct += (metrics['accuracy'] * batch_size)
-      running_total += batch_size
+    # Get next chunk of batches - handle both preloaded and DataLoader cases
+    if config.data.preload:
+      batches = train_ds[batch_idx:batch_idx + config.train.log_freq]
+    else:
+      batch_slice = slice(batch_idx, batch_idx + config.train.log_freq)
+      batches = [train_ds[i] for i in range(*batch_slice.indices(len(train_ds)))]
+    
+    running_samples = len(batches) * config.train.batch_size
+    
+    batches = jax.tree.map(lambda *x: jnp.stack(x), *batches)
+    
+    state, metrics = train_step_multiple(state, batches)
+    
+    train_loss = metrics['loss'].mean().item()
+    train_acc = metrics['accuracy'].mean().item()
+    
+    all_train_losses.append(train_loss)
+    step += config.train.log_freq
+    samples_seen += running_samples
+    current_epoch = samples_seen / samples_per_epoch
+    
+    if config.wandb.enabled:
+      wandb.log({
+        'train/loss': train_loss,
+        'train/accuracy': train_acc,
+        'train/step': step,
+        'train/samples': samples_seen,
+        'train/epoch': current_epoch
+      })
+    
+    progress_bar.set_postfix(
+      loss=f'{train_loss:.4f}',
+      acc=f'{train_acc:.4f}',
+      epoch=f'{current_epoch:.2f}'
+    )
+    
+    progress_bar.update(running_samples)
+    
+    # Validation (will align with log_freq due to assertion)
+    if step % config.train.validation_freq == 0:
+      test_metrics = evaluate(state, test_ds)
+      all_test_losses.append(test_metrics['loss'].item())
       
-      step += 1
-      samples_seen += batch_size
-      current_epoch = samples_seen / samples_per_epoch
-      
-      # Logging
-      if step % config.train.log_freq == 0:
-        train_loss = running_loss / config.train.log_freq
-        train_acc = running_correct / running_total
-        
-        all_train_losses.append(train_loss)
-        
-        if config.wandb.enabled:
-          wandb.log({
-            'train/loss': train_loss,
-            'train/accuracy': train_acc,
-            'train/step': step,
-            'train/samples': samples_seen,
-            'train/epoch': current_epoch
-          })
-        
-        progress_bar.set_postfix(
-          loss=f'{train_loss:.4f}',
-          acc=f'{train_acc:.4f}',
-          epoch=f'{current_epoch:.2f}'
-        )
-        
-        progress_bar.update(batch_size * config.train.log_freq)
-        
-        # Reset running statistics
-        running_loss = 0
-        running_correct = 0
-        running_total = 0
-      
-      # Validation
-      if step % config.train.validation_freq == 0:
-        test_metrics = evaluate(state, test_ds)
-        all_test_losses.append(test_metrics['loss'].item())
-        
-        if config.wandb.enabled:
-          wandb.log({
-            'test/loss': test_metrics['loss'],
-            'test/accuracy': test_metrics['accuracy'],
-            'test/step': step,
-            'test/samples': samples_seen,
-            'test/epoch': current_epoch
-          })
-  
+      if config.wandb.enabled:
+        wandb.log({
+          'test/loss': test_metrics['loss'],
+          'test/accuracy': test_metrics['accuracy'],
+          'test/step': step,
+          'test/samples': samples_seen,
+          'test/epoch': current_epoch
+        })
+
   progress_bar.close()
   
   # Compute summary statistics
@@ -324,6 +350,30 @@ def create_train_state(
     tx=tx,
     key=key,
   )
+
+
+@jax.jit
+def train_step_multiple(
+  state: TrainState,
+  batches: Dict[str, jnp.ndarray]
+) -> Tuple[TrainState, Dict[str, jnp.ndarray]]:
+  """Performs training steps on multiple batches sequentially.
+  
+  Args:
+    state: Current training state
+    batches: List of batch dictionaries containing 'image' and 'label'
+    
+  Returns:
+    Updated state and metrics for all batches
+  """
+  def _step(state, batch):
+    state, metrics = train_step(state, batch)
+    return state, metrics
+
+  # Run training steps sequentially
+  state, metrics = jax.lax.scan(_step, state, batches)
+  
+  return state, metrics
 
 
 @jax.jit

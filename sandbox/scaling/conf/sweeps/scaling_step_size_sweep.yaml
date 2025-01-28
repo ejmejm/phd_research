@@ -1,7 +1,7 @@
 program: run_jax_experiment.py
 method: grid
 project: sandbox-model-scaling
-name: width-depth-sparsity-sweep
+name: scaling_step_size_sweep
 
 command:
   - ${env}
@@ -11,10 +11,10 @@ command:
 
 metric:
   name: test/final_test_loss
-  goal: maximize
+  goal: minimize
 
 parameters:
-  wandb:
+  wandb.enabled:
     value: true
   
   data.preload:
@@ -35,7 +35,6 @@ parameters:
   
   # model.sparsity:
   #   values: [0.0, 0.25, 0.5, 0.75, 0.9]
-
 
   seed:
     value: 1

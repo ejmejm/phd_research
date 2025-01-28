@@ -3,11 +3,12 @@ wandb:
   project: sandbox-model-scaling
   entity: null  # Set your wandb entity here
 
-device: cuda  # or cpu
+device: cpu  # or cpu
 
 data:
   dataset: mnist  # or cifar10
   num_workers: 0
+  preload: false
   download: true  # Only set to true when first downloading the dataset
   eval_samples: 300  # null means use full test set, otherwise specify number
 
