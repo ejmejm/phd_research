@@ -1,0 +1,33 @@
+program: run_experiment.py
+method: grid
+project: sandbox-model-scaling
+name: width-depth-sparsity-sweep
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}
+
+metric:
+  name: test/final_accuracy
+  goal: maximize
+
+parameters:
+  wandb:
+    value: true
+  
+  model.width:
+    values: [32, 64, 128, 256, 512]
+  
+  model.depth:
+    values: [2, 3, 4, 5, 6]
+  
+  model.sparsity:
+    values: [0.0, 0.25, 0.5, 0.75, 0.9]
+  
+  seed:
+    values: [1, 2, 3, 4, 5]
+
+  data.dataset:
+    values: [mnist, cifar10] 

@@ -1,0 +1,29 @@
+wandb:
+  enabled: false
+  project: sandbox-model-scaling
+  entity: null  # Set your wandb entity here
+
+device: cuda  # or cpu
+
+data:
+  dataset: mnist  # or cifar10
+  num_workers: 4
+  download: true  # Only set to true when first downloading the dataset
+  eval_samples: null  # null means use full test set, otherwise specify number
+
+model:
+  width: 128  # hidden layer width
+  depth: 3    # number of hidden layers
+  sparsity: 0.0  # fraction of weights to mask (0.0 = dense)
+  activation: relu
+
+train:
+  batch_size: 1
+  eval_batch_size: 1000  # Large batch size for faster evaluation
+  total_samples: 3000000  # 3M samples total
+  learning_rate: 0.001
+  optimizer: rmsprop
+  log_freq: 100  # steps between logging
+  validation_freq: 2000  # steps between validation
+  
+seed: 42
