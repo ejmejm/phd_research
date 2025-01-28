@@ -123,6 +123,9 @@ def get_datasets(config: DictConfig) -> Tuple[Any, Any, int, int]:
     train_loader = list(train_loader)
     test_loader = list(test_loader)
     
+    train_loader = jax.tree.map(lambda *x: jnp.stack(x), *train_loader)
+    test_loader = jax.tree.map(lambda *x: jnp.stack(x), *test_loader)
+    
     with open(train_cache, 'wb') as f:
       pickle.dump(train_loader, f)
     with open(test_cache, 'wb') as f:
@@ -200,7 +203,7 @@ def count_active_params(state: TrainState) -> int:
   return count_mask(state.params)
 
 
-def evaluate(state: TrainState, test_ds: Any) -> Dict[str, float]:
+def evaluate(state: TrainState, test_ds: Any, config: DictConfig) -> Dict[str, float]:
   """Run evaluation and return metrics.
   
   Args:
@@ -211,7 +214,13 @@ def evaluate(state: TrainState, test_ds: Any) -> Dict[str, float]:
     Dictionary of evaluation metrics averaged across batches
   """
   test_metrics = []
-  for test_batch in test_ds:
+  for batch_idx in range(0, len(test_ds)):
+    # Get next chunk of batches - handle both preloaded and DataLoader cases
+    if config.data.preload:
+      test_batch = jax.tree.map(lambda x: x[batch_idx], test_ds)
+    else:
+      test_batch = test_ds[batch_idx]
+    
     metrics = eval_step(state, test_batch)
     test_metrics.append(metrics)
   
@@ -238,23 +247,28 @@ def train_and_evaluate(
   all_test_losses = []
   samples_per_epoch = len(train_ds)
   progress_bar = tqdm(total=config.train.total_samples, unit='samples')
+  first_key = list(train_ds.keys())[0]
 
   # Process dataset in chunks of log_freq batches
-  for batch_idx in range(0, len(train_ds), config.train.log_freq):
+  batch_idx = 0
+  while True:
     if samples_seen >= config.train.total_samples:
       break
       
     # Get next chunk of batches - handle both preloaded and DataLoader cases
     if config.data.preload:
-      batches = train_ds[batch_idx:batch_idx + config.train.log_freq]
+      batches = jax.tree.map(lambda x: x[batch_idx:batch_idx + config.train.log_freq], train_ds)
     else:
       batch_slice = slice(batch_idx, batch_idx + config.train.log_freq)
       batches = [train_ds[i] for i in range(*batch_slice.indices(len(train_ds)))]
+      batches = jax.tree.map(lambda *x: jnp.stack(x), *batches)
+        
+    batch_idx += config.train.log_freq
+    if batch_idx >= len(train_ds):
+      batch_idx = 0
     
-    running_samples = len(batches) * config.train.batch_size
-    
-    batches = jax.tree.map(lambda *x: jnp.stack(x), *batches)
-    
+    running_samples = np.prod(batches[first_key].shape[:2])
+
     state, metrics = train_step_multiple(state, batches)
     
     train_loss = metrics['loss'].mean().item()
@@ -284,7 +298,7 @@ def train_and_evaluate(
     
     # Validation (will align with log_freq due to assertion)
     if step % config.train.validation_freq == 0:
-      test_metrics = evaluate(state, test_ds)
+      test_metrics = evaluate(state, test_ds, config)
       all_test_losses.append(test_metrics['loss'].item())
       
       if config.wandb.enabled:
@@ -304,7 +318,7 @@ def train_and_evaluate(
   late_train_loss = np.mean(all_train_losses[-len(all_train_losses)//10:])
   late_test_loss = np.mean(all_test_losses[-len(all_test_losses)//10:])
   
-  final_metrics = evaluate(state, test_ds)
+  final_metrics = evaluate(state, test_ds, config)
   
   return {
     'summary/early_train_loss': early_train_loss,
@@ -428,8 +442,13 @@ def main(config: DictConfig) -> None:
   
   # Data
   train_ds, test_ds, input_dim, num_classes = get_datasets(config)
-  print(f'Train size: {len(train_ds)}')
-  print(f'Test size: {len(test_ds)}')
+  if config.data.preload:
+    first_key = list(train_ds.keys())[0]
+    print(f'Train size: {len(train_ds[first_key])}')
+    print(f'Test size: {len(test_ds[first_key])}')
+  else:
+    print(f'Train size: {len(train_ds)}')
+    print(f'Test size: {len(test_ds)}')
   
   # Model
   model = MLP(
