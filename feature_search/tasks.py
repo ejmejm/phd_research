@@ -110,6 +110,7 @@ class NonlinearGEOFFTask:
         weight_scale: float = 1.0,
         activation: str = 'relu',
         sparsity: float = 0.0,
+        weight_init: str = 'binary',
         seed: Optional[int] = None
     ):
         """
@@ -121,13 +122,17 @@ class NonlinearGEOFFTask:
             weight_scale: Scale factor for weights (weights will be ±scale)
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             sparsity: Percentage of weights (other than the last layer) to set to zero
+            weight_init: Weight initialization method ('binary' or 'kaiming_uniform')
             seed: Random seed for reproducibility
         """
+        assert weight_init in ['binary', 'kaiming_uniform'], f"Unsupported weight initialization: {weight_init}"
+        
         self.n_features = n_features
         self.n_layers = n_layers
         self.hidden_dim = hidden_dim
         self.weight_scale = weight_scale
         self.flip_rate = flip_rate
+        self.weight_init = weight_init
         self.flip_accumulators = []  # Accumulate flip probability for each layer
         
         if seed is not None:
@@ -148,12 +153,12 @@ class NonlinearGEOFFTask:
         
         if n_layers == 1:
             # For linear case, single layer mapping input to output
-            layer_weights = (torch.randint(0, 2, (n_features, 1)) * 2 - 1).float() * weight_scale
+            layer_weights = self._initialize_weights(n_features, 1)
             self.weights.append(layer_weights)
             self.flip_accumulators.append(flip_rate * n_features)
         else:
             # Input layer
-            layer_weights = (torch.randint(0, 2, (n_features, hidden_dim)) * 2 - 1).float() * weight_scale
+            layer_weights = self._initialize_weights(n_features, hidden_dim)
             self._sparsify_weights(layer_weights, sparsity)
             self.weights.append(layer_weights)
             
@@ -163,7 +168,7 @@ class NonlinearGEOFFTask:
             
             # Hidden layers
             for i in range(n_layers - 2):
-                layer_weights = (torch.randint(0, 2, (hidden_dim, hidden_dim)) * 2 - 1).float() * weight_scale
+                layer_weights = self._initialize_weights(hidden_dim, hidden_dim)
                 self._sparsify_weights(layer_weights, sparsity)
                 self.weights.append(layer_weights)
                 
@@ -172,13 +177,33 @@ class NonlinearGEOFFTask:
                 self.flip_accumulators.append(flip_rate * n_flippable)
             
             # Output layer
-            output_weights = (torch.randint(0, 2, (hidden_dim, 1)) * 2 - 1).float() * weight_scale
+            output_weights = self._initialize_weights(hidden_dim, 1)
             self.weights.append(output_weights)
             
             # Output layer flippable weights
             n_flippable = hidden_dim
             self.flip_accumulators.append(flip_rate * n_flippable)
+    
+    def _initialize_weights(self, in_features: int, out_features: int) -> torch.Tensor:
+        """Initialize weights based on specified initialization method.
+        
+        Args:
+            in_features: Number of input features
+            out_features: Number of output features
             
+        Returns:
+            Initialized weight tensor
+        """
+        if self.weight_init == 'binary':
+            weights = (torch.randint(0, 2, (in_features, out_features)) * 2 - 1).float()
+        else:  # kaiming_uniform
+            weights = torch.nn.init.kaiming_uniform_(
+                torch.empty(in_features, out_features),
+                mode='fan_in',
+                nonlinearity='relu'
+            )
+        return weights * self.weight_scale
+    
     def _sparsify_weights(self, weights: torch.Tensor, sparsity: float):
         """Set a percentage of weights to zero."""
         if sparsity == 0:

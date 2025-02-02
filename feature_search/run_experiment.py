@@ -156,7 +156,7 @@ class FeatureRecycler:
     
     def _generate_feature_values(self, batch_size: int, real_features: torch.Tensor) -> torch.Tensor:
         """Generate feature values for the current feature set."""
-        values = torch.zeros(batch_size, self.n_features)
+        values = torch.zeros(batch_size, self.n_features, device=real_features.device)
         
         # Initialize arrays for distractor indices
         uniform_indices = []
@@ -165,12 +165,15 @@ class FeatureRecycler:
         uniform_highs = []
         normal_means = []
         normal_stds = []
+        real_feature_sources = []
+        real_feature_targets = []
         
         # Single loop to handle all features
         for i in range(self.n_features):
             if self.features[i].is_real:
                 feature_idx = self.features[i].distribution_params['feature_idx']
-                values[:, i] = real_features[:, feature_idx]
+                real_feature_sources.append(feature_idx)
+                real_feature_targets.append(i)
             else:
                 params = self.features[i].distribution_params
                 if params['distribution'] == 'uniform':
@@ -181,7 +184,9 @@ class FeatureRecycler:
                     normal_indices.append(i)
                     normal_means.append(params['mean'])
                     normal_stds.append(params['std'])
+        values[:, real_feature_targets] = real_features[:, real_feature_sources]
         
+
         # Handle uniform distractors in batch
         if uniform_indices:
             lows = torch.tensor(uniform_lows)
@@ -412,6 +417,7 @@ def prepare_task(cfg: DictConfig):
             weight_scale=cfg.task.weight_scale,
             activation=cfg.task.activation,
             sparsity=cfg.task.sparsity,
+            weight_init=cfg.task.weight_init,
         )
 
 
