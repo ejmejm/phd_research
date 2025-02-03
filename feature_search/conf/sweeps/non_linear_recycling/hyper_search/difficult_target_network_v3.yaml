@@ -1,0 +1,77 @@
+program: run_experiment.py
+method: grid
+project: feature_recycling-non_linear_recycling-hyper_search
+name: difficult_target_network_v3
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=nonlinear_geoff.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  wandb:
+    value: True
+  device:
+    value: cuda
+
+  
+  task.n_real_features:
+    value: 100
+  task.n_features:
+    value: 100
+  task.flip_rate:
+    value: 0.0
+  task.n_layers:
+    value: 3
+  task.weight_scale:
+    value: 1.0
+  task.weight_init:
+    value: binary
+  task.activation:
+    value: ltu
+
+  feature_recycling.use_cbp_utility:
+    value: False
+  feature_recycling.distractor_chance:
+    value: 0.0
+  feature_recycling.recycle_rate:
+    value: 0.0
+
+  train.total_steps:
+    value: 40000
+  train.log_freq:
+    value: 100
+  train.batch_size:
+    value: 16
+  train.optimizer:
+    value: adam
+  train.standardize_cumulants:
+    value: True
+  train.learning_rate:
+    value: 0.05
+
+  model.n_layers:
+    value: 3
+  model.weight_init_method:
+    value: kaiming_uniform
+  model.hidden_dim:
+    value: 50
+  model.activation:
+    value: 'relu'
+
+  task.sparsity:
+    values: [0.0, 0.8, 0.95, 0.99]
+  task.hidden_dim:
+    values: [5, 10, 25, 100, 500, 1000]
+
+  seed:
+    values: [1, 2, 3, 4, 5]

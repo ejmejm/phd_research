@@ -30,6 +30,7 @@ train:
   learning_rate: 0.001
   total_steps: 10000
   log_freq: 100
+  standardize_cumulants: false
 
 # Model parameters
 model:

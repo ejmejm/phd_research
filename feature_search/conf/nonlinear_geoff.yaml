@@ -15,3 +15,4 @@ task:
   weight_scale: 1.0
   activation: tanh
   sparsity: 0.00
+  weight_init: binary
