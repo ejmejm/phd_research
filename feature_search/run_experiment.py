@@ -516,6 +516,26 @@ def get_model_statistics(model: MLP, features: torch.Tensor, param_inputs: Dict[
     return stats
 
 
+def standardize_targets(
+    targets: torch.Tensor,
+    cumulant_mean: float,
+    cumulant_square_mean: float,
+    cumulant_gamma: float,
+    step: int,
+) -> torch.Tensor:
+    """Standardize targets using a running mean and variance."""
+    cumulant_mean = cumulant_gamma * cumulant_mean + (1 - cumulant_gamma) * targets.mean()
+    cumulant_square_mean = cumulant_gamma * cumulant_square_mean + (1 - cumulant_gamma) * targets.square().mean()
+    bias_correction = 1 / (1 - cumulant_gamma ** (step + 1))
+    curr_mean = cumulant_mean * bias_correction
+    curr_square_mean = cumulant_square_mean * bias_correction
+    std_dev = (curr_square_mean - curr_mean.square()).sqrt()
+    std_dev = 1 if std_dev == 0 else std_dev
+    targets = (targets - curr_mean) / std_dev
+    return targets, cumulant_mean, cumulant_square_mean
+
+
+
 @hydra.main(config_path='conf', config_name='defaults')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
@@ -569,6 +589,9 @@ def main(cfg: DictConfig) -> None:
     loss_acc = 0.0
     accuracy_acc = 0.0
     n_steps_since_log = 0
+    cumulant_mean = 0.0
+    cumulant_square_mean = 0.0
+    cumulant_gamma = 0.999
     target_buffer = []
     
     while step < cfg.train.total_steps:
@@ -584,6 +607,11 @@ def main(cfg: DictConfig) -> None:
             first_layer_weights=model.get_first_layer_weights(),
             step_num=step
         )
+        
+        if cfg.train.standardize_cumulants:
+            with torch.no_grad():
+                targets, cumulant_mean, cumulant_square_mean = standardize_targets(
+                    targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
 
         # Reset weights and optimizer states for recycled features
         reset_feature_weights(recycled_features, model, optimizer, cfg)
@@ -591,7 +619,7 @@ def main(cfg: DictConfig) -> None:
         # Forward pass
         outputs, param_inputs = model(features)
         loss = criterion(outputs, targets)
-        
+
         # Backward pass
         optimizer.zero_grad()
         if isinstance(optimizer, RMSPropIDBD):
