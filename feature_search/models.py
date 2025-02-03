@@ -44,7 +44,7 @@ class MLP(nn.Module):
             for _ in range(n_layers - 2):
                 self.layers.append(nn.Linear(hidden_dim, hidden_dim))
             self.layers.append(nn.Linear(hidden_dim, output_dim))
-            
+        
         self.activation = ACTIVATION_MAP[activation]
         
         # Initialize weights
@@ -63,7 +63,7 @@ class MLP(nn.Module):
                 nn.init.zeros_(layer.bias)
         else:
             raise ValueError(f'Invalid weight initialization method: {method}')
-        
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         param_inputs = {}
         for layer in self.layers[:-1]:

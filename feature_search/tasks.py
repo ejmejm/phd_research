@@ -2,7 +2,9 @@ import random
 from typing import Iterator, Optional, Tuple
 
 import torch
+from torch import nn
 import numpy as np
+
 
 
 class DummyTask:
@@ -98,6 +100,15 @@ class GEOFFTask:
             yield inputs, targets.unsqueeze(1)
 
 
+class LTU(nn.Module):
+    def __init__(self, threshold: float = 0.0):
+        super().__init__()
+        self.threshold = threshold
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x > self.threshold).to(x.dtype)
+
+
 class NonlinearGEOFFTask:
     """Non-linear version of GEOFF task with configurable depth and activation."""
     
@@ -111,7 +122,7 @@ class NonlinearGEOFFTask:
         activation: str = 'relu',
         sparsity: float = 0.0,
         weight_init: str = 'binary',
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         """
         Args:
@@ -132,6 +143,8 @@ class NonlinearGEOFFTask:
         self.hidden_dim = hidden_dim
         self.weight_scale = weight_scale
         self.flip_rate = flip_rate
+        self.activation = activation
+        self.sparsity = sparsity
         self.weight_init = weight_init
         self.flip_accumulators = []  # Accumulate flip probability for each layer
         
@@ -145,15 +158,18 @@ class NonlinearGEOFFTask:
             self.activation_fn = torch.nn.Tanh()
         elif activation == 'sigmoid':
             self.activation_fn = torch.nn.Sigmoid()
+        elif activation == 'ltu':
+            self.activation_fn = LTU()
         else:
             raise ValueError(f"Unsupported activation: {activation}")
             
+
         # Initialize network weights
         self.weights = []
         
         if n_layers == 1:
             # For linear case, single layer mapping input to output
-            layer_weights = self._initialize_weights(n_features, 1)
+            layer_weights = self._initialize_weights(n_features, 1, is_last_layer=True)
             self.weights.append(layer_weights)
             self.flip_accumulators.append(flip_rate * n_features)
         else:
@@ -177,14 +193,14 @@ class NonlinearGEOFFTask:
                 self.flip_accumulators.append(flip_rate * n_flippable)
             
             # Output layer
-            output_weights = self._initialize_weights(hidden_dim, 1)
+            output_weights = self._initialize_weights(hidden_dim, 1, is_last_layer=True)
             self.weights.append(output_weights)
             
             # Output layer flippable weights
             n_flippable = hidden_dim
             self.flip_accumulators.append(flip_rate * n_flippable)
     
-    def _initialize_weights(self, in_features: int, out_features: int) -> torch.Tensor:
+    def _initialize_weights(self, in_features: int, out_features: int, is_last_layer: bool = False) -> torch.Tensor:
         """Initialize weights based on specified initialization method.
         
         Args:
@@ -212,15 +228,18 @@ class NonlinearGEOFFTask:
         flat_idx = torch.randperm(weights.numel())[:n_zero]
         weights.view(-1)[flat_idx] = 0
     
+    
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the target network."""
-        if self.n_layers == 1:
-            return x @ self.weights[0]
-            
-        for i in range(self.n_layers - 1):
-            x = x @ self.weights[i]
-            x = self.activation_fn(x)
-        return x @ self.weights[-1]
+        with torch.no_grad():
+            if self.n_layers == 1:
+                return x @ self.weights[0]
+                
+            for i in range(self.n_layers - 1):
+                x = x @ self.weights[i]
+                x = self.activation_fn(x)
+            return x @ self.weights[-1]
+
     
     def _flip_signs(self):
         """Flip signs of weights based on accumulated probabilities."""
