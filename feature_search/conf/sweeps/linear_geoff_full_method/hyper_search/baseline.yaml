@@ -31,11 +31,11 @@ parameters:
   task.n_real_features:
     value: 10
 
-  feature_recycling.distractor_chance:
+  input_recycling.distractor_chance:
     value: 0.95
-  feature_recycling.recycle_rate:
+  input_recycling.recycle_rate:
     value: 0.5
-  feature_recycling.use_cbp_utility:
+  input_recycling.use_cbp_utility:
     value: false
 
   train.optimizer:

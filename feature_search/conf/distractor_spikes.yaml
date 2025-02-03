@@ -23,7 +23,7 @@ train:
   normalize_loss: false # Distractor spikes experiment only
   force_real_weight_val: null # Distractor spikes experiment only
 
-feature_recycling:
+input_recycling:
   distractor_chance: 0.0
   recycle_rate: 0.0
   use_cbp_utility: false

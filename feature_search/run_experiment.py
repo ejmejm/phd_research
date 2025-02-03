@@ -33,7 +33,7 @@ class FeatureInfo:
     creation_step: int
 
 
-class FeatureRecycler:
+class InputRecycler:
     def __init__(
         self,
         n_features: int,
@@ -568,15 +568,15 @@ def main(cfg: DictConfig) -> None:
     optimizer = prepare_optimizer(model, cfg)
     
     # Initialize feature recycler
-    recycler = FeatureRecycler(
+    recycler = InputRecycler(
         n_features=cfg.task.n_features,
         n_real_features=cfg.task.n_real_features,
-        distractor_chance=cfg.feature_recycling.distractor_chance,
-        recycle_rate=cfg.feature_recycling.recycle_rate,
-        utility_decay=cfg.feature_recycling.utility_decay,
-        use_cbp_utility=cfg.feature_recycling.use_cbp_utility,
-        feature_protection_steps=cfg.feature_recycling.feature_protection_steps,
-        n_start_real_features=cfg.feature_recycling.get('n_start_real_features', -1),
+        distractor_chance=cfg.input_recycling.distractor_chance,
+        recycle_rate=cfg.input_recycling.recycle_rate,
+        utility_decay=cfg.input_recycling.utility_decay,
+        use_cbp_utility=cfg.input_recycling.use_cbp_utility,
+        feature_protection_steps=cfg.input_recycling.feature_protection_steps,
+        n_start_real_features=cfg.input_recycling.get('n_start_real_features', -1),
         device=cfg.device,
     )
     

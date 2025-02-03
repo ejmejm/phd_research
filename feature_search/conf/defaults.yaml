@@ -14,7 +14,7 @@ task:
   n_real_features: 10
 
 # Feature recycling parameters
-feature_recycling:
+input_recycling:
   distractor_chance: 0.5
   recycle_rate: 0.1
   use_cbp_utility: false

@@ -22,7 +22,7 @@ parameters:
 
   task.n_features:
     value: 1
-  feature_recycling.distractor_chance:
+  input_recycling.distractor_chance:
     value: 1.0
 
   train.normalize_loss:

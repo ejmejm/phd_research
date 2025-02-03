@@ -31,11 +31,11 @@ parameters:
   task.n_real_features:
     value: 10
 
-  feature_recycling.distractor_chance:
+  input_recycling.distractor_chance:
     value: 0.95
-  feature_recycling.recycle_rate:
+  input_recycling.recycle_rate:
     value: 0.5
-  feature_recycling.use_cbp_utility:
+  input_recycling.use_cbp_utility:
     value: true
 
   train.optimizer:
@@ -52,9 +52,9 @@ parameters:
   model.weight_init_method:
     value: kaiming_uniform
 
-  feature_recycling.feature_protection_steps:
+  input_recycling.feature_protection_steps:
     value: 100
-  feature_recycling.utility_decay:
+  input_recycling.utility_decay:
     value: 0.999
   idbd.meta_learning_rate:
     value: 0.01

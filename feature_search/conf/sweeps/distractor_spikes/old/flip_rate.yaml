@@ -33,11 +33,11 @@ parameters:
   task.sparsity:
     value: 0.0
 
-  feature_recycling.distractor_chance:
+  input_recycling.distractor_chance:
     value: 0.0
-  feature_recycling.recycle_rate:
+  input_recycling.recycle_rate:
     value: 0.0
-  feature_recycling.use_cbp_utility:
+  input_recycling.use_cbp_utility:
     value: false
 
   train.optimizer:

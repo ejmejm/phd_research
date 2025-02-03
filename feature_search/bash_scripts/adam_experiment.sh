@@ -10,11 +10,11 @@ task.n_layers=2 \
 task.hidden_dim=20 \
 task.sparsity=0.8 \
 \
-feature_recycling.distractor_chance=0.0 \
-feature_recycling.recycle_rate=0.0 \
-feature_recycling.use_cbp_utility=true \
-feature_recycling.feature_protection_steps=100 \
-feature_recycling.utility_decay=0.999 \
+input_recycling.distractor_chance=0.0 \
+input_recycling.recycle_rate=0.0 \
+input_recycling.use_cbp_utility=true \
+input_recycling.feature_protection_steps=100 \
+input_recycling.utility_decay=0.999 \
 \
 train.optimizer=adam \
 train.batch_size=16 \

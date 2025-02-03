@@ -37,11 +37,11 @@ parameters:
   task.weight_scale:
     value: 0.5
 
-  feature_recycling.use_cbp_utility:
+  input_recycling.use_cbp_utility:
     value: False
-  feature_recycling.distractor_chance:
+  input_recycling.distractor_chance:
     value: 0.0
-  feature_recycling.recycle_rate:
+  input_recycling.recycle_rate:
     value: 0.0
 
   train.total_steps:
