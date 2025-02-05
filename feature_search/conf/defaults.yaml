@@ -13,14 +13,21 @@ task:
   n_features: 20
   n_real_features: 10
 
-# Feature recycling parameters
+# Input recycling parameters
 input_recycling:
+  use_cbp_utility: false
   distractor_chance: 0.5
   recycle_rate: 0.1
-  use_cbp_utility: false
   utility_decay: 0.99
   feature_protection_steps: 100
   n_start_real_features: -1
+
+# Feature recycling parameters
+feature_recycling:
+  use_cbp_utility: false
+  recycle_rate: 0.0001
+  utility_decay: 0.99
+  feature_protection_steps: 100
 
 # Train parameters
 train:

@@ -3,9 +3,9 @@ import torch.nn as nn
 
 
 ACTIVATION_MAP = {
-    'relu': nn.ReLU(),
-    'tanh': nn.Tanh(),
-    'sigmoid': nn.Sigmoid(),
+    'relu': nn.ReLU,
+    'tanh': nn.Tanh,
+    'sigmoid': nn.Sigmoid,
 }
 
 
@@ -35,17 +35,19 @@ class MLP(nn.Module):
         self.output_dim = output_dim
         self.device = device
         
+        activation_cls = ACTIVATION_MAP[activation]
+        
         # Build layers
         self.layers = nn.ModuleList()
         if n_layers == 1:
             self.layers.append(nn.Linear(input_dim, output_dim, bias=False))
         else:
             self.layers.append(nn.Linear(input_dim, hidden_dim, bias=False))
+            self.layers.append(activation_cls())
             for _ in range(n_layers - 2):
                 self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+                self.layers.append(activation_cls())
             self.layers.append(nn.Linear(hidden_dim, output_dim))
-        
-        self.activation = ACTIVATION_MAP[activation]
         
         # Initialize weights
         self._initialize_weights(weight_init_method)
@@ -66,9 +68,11 @@ class MLP(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         param_inputs = {}
-        for layer in self.layers[:-1]:
-            param_inputs[layer.weight] = x
-            x = self.activation(layer(x))
+        for i in range(0, len(self.layers) - 2, 2):
+            param_inputs[self.layers[i].weight] = x
+            x = self.layers[i](x) # Linear layer
+            x = self.layers[i + 1](x) # Activation
+
         param_inputs[self.layers[-1].weight] = x
         return self.layers[-1](x), param_inputs
     

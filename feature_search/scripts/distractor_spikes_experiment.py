@@ -32,7 +32,8 @@ def get_model_statistics(model: MLP, param_inputs: Dict[str, torch.Tensor]) -> D
     stats = {}
     
     # Compute statistics for each layer
-    for i, layer in enumerate(model.layers):
+    linear_layers = [layer for layer in model.layers if isinstance(layer, nn.Linear)]
+    for i, layer in enumerate(linear_layers):
         # Individual weights
         for in_idx in range(layer.weight.shape[1]):
             for out_idx in range(layer.weight.shape[0]):
@@ -51,15 +52,15 @@ def get_model_statistics(model: MLP, param_inputs: Dict[str, torch.Tensor]) -> D
             stats[f'layer_{i}/input_{idx}'] = layer_inputs[idx].item()
     
     # Compute total influence paths for first layer inputs only if 2-layer network with 1 output
-    if len(model.layers) == 2 and model.layers[1].weight.shape[0] == 1:
-        n_inputs = model.layers[0].weight.shape[1]
+    if len(linear_layers) == 2 and linear_layers.weight.shape[0] == 1:
+        n_inputs = linear_layers[0].weight.shape[1]
         for input_idx in range(n_inputs):
             total_influence = 0.0
             # For each hidden unit in first layer
-            for hidden_idx in range(model.layers[0].weight.shape[0]):
-                path_product = model.layers[0].weight[hidden_idx, input_idx].item()
+            for hidden_idx in range(linear_layers[0].weight.shape[0]):
+                path_product = linear_layers[0].weight[hidden_idx, input_idx].item()
                 # Multiply by weight to output (assuming 1 output)
-                path_product *= model.layers[1].weight[0, hidden_idx].item()
+                path_product *= linear_layers[1].weight[0, hidden_idx].item()
                 total_influence += path_product
             stats[f'input_{input_idx}_influence'] = total_influence
     
