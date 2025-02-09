@@ -1,7 +1,7 @@
 defaults:
   - nonlinear_geoff
 
-wandb: false
+wandb: true
 seed: 20
 device: cuda
 
@@ -23,12 +23,12 @@ task:
   weight_scale: 1
 
 train:
-  batch_size: 3
+  batch_size: 1
   learning_rate: 0.005
   log_freq: 100
   optimizer: adam
   standardize_cumulants: true
-  total_steps: 50000
+  total_steps: 30000
 
 input_recycling:
   use_cbp_utility: false
@@ -37,12 +37,10 @@ input_recycling:
 
 feature_recycling:
   use_cbp_utility: true
-  recycle_rate: 0.0001
+  recycle_rate: 0.00001
   utility_decay: 0.99
-  feature_protection_steps: 100
+  feature_protection_steps: 200
 
 
 # TODO:
-#   - Change how CBP handles resetting otpimzier states
-#   - Log number of features recycled
 #   - Step through everything to make sure it's working as expected

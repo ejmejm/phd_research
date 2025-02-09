@@ -1,0 +1,16 @@
+defaults:
+  - nonlinear_geoff
+
+# Task parameters
+task:
+  name: nonlinear_geoff
+  type: regression
+  n_real_features: 100
+  n_features: 100
+  flip_rate: 0.0
+  weight_scale: 1.0
+  n_layers: 3
+  hidden_dim: 100
+  weight_init: binary
+  activation: ltu
+  sparsity: 0.98

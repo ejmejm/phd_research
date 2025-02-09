@@ -1,14 +1,14 @@
 program: run_experiment.py
 method: grid
 project: feature_recycling-non_linear_recycling-hyper_search
-name: batch_adam
+name: online_adam_large_predictor
 
 
 command:
   - ${env}
   - python
   - ${program}
-  - --config-name=nonlinear_geoff.yaml
+  - --config-name=sparse_binary_geoff.yaml
   - ${args_no_hyphens}
 
 
@@ -23,26 +23,6 @@ parameters:
   device:
     value: cuda
 
-  
-  task.n_real_features:
-    value: 100
-  task.n_features:
-    value: 100
-  task.flip_rate:
-    value: 0.0
-  task.weight_scale:
-    value: 1.0
-  task.n_layers:
-    value: 3
-  task.hidden_dim:
-    value: 100
-  task.weight_init:
-    value: binary
-  task.activation:
-    value: ltu
-  task.sparsity:
-    value: 0.98
-
   input_recycling.use_cbp_utility:
     value: False
   input_recycling.distractor_chance:
@@ -55,19 +35,23 @@ parameters:
   train.log_freq:
     value: 100
   train.batch_size:
-    value: 16
+    value: 1
   train.optimizer:
     value: adam
+  train.standardize_cumulants:
+    value: True
 
   model.n_layers:
     value: 3
   model.weight_init_method:
     value: kaiming_uniform
   model.hidden_dim:
-    value: 50
+    value: 1000
+  model.activation:
+    value: relu
 
   train.learning_rate:
-    values: [0.01, 0.05, 0.1]
+    values: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
   
   seed:
     values: [1, 2, 3]
