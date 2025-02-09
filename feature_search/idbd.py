@@ -32,6 +32,7 @@ class IDBD(Optimizer):
         defaults = dict(meta_lr=meta_lr)
         super().__init__(params, defaults)
         self.weight_decay = weight_decay
+        self.init_lr = init_lr
         self.version = version
         
         assert self.version in ['squared_inputs', 'squared_grads', 'hvp', 'hessian_diagonal'], \

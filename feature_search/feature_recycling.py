@@ -423,7 +423,7 @@ class CBPTracker():
         if layer.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            layer.bias.data[idxs] = torch.rand(len(idxs)) * 2 * bound - bound
+            layer.bias.data[idxs] = torch.rand(len(idxs), device=layer.bias.device) * 2 * bound - bound
 
     def _reset_input_optim_state(self, layer, idxs):
         """
@@ -442,6 +442,9 @@ class CBPTracker():
                     f"parameter: {layer.weight.shape}, state value: {value.shape}"
                 )
                 
+        if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
+            optim_state['beta'][idxs, :] = math.log(self.optimizer.init_lr)
+                
         if layer.bias is not None:
             optim_state = self.optimizer.state[layer.bias]
             
@@ -454,6 +457,9 @@ class CBPTracker():
                         f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
                         f"parameter: {layer.bias.shape}, state value: {value.shape}"
                     )
+            
+            if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
+                optim_state['beta'][idxs] = math.log(self.optimizer.init_lr)
 
     def _reinit_output_weights(self, layer, idxs, weight_init='zeros'):
         """Reinitialize the weights that take in features at the given indices."""
@@ -484,6 +490,10 @@ class CBPTracker():
                     f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
                     f"parameter: {layer.weight.shape}, state value: {value.shape}"
                 )
+        
+        # TODO: Consider making different variables for initial step-size of reset outgoing and incoming weights
+        if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
+            optim_state['beta'][:, idxs] = math.log(self.optimizer.init_lr)
 
     def _get_hook(self, layer):
         """Return a hook function for a given layer."""

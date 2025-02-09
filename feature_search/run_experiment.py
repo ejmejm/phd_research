@@ -259,7 +259,7 @@ def main(cfg: DictConfig) -> None:
             optimizer = optimizer,
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate=cfg.feature_recycling.utility_decay,
-            maturity_threshold = cfg.input_recycling.feature_protection_steps,
+            maturity_threshold = cfg.feature_recycling.feature_protection_steps,
         )
         cbp_tracker.track_sequential(model.layers)
     else:
@@ -277,6 +277,7 @@ def main(cfg: DictConfig) -> None:
     n_steps_since_log = 0
     cumulant_mean = 0.0
     cumulant_square_mean = 0.0
+    total_pruned = 0
     cumulant_gamma = 0.999
     target_buffer = []
     
@@ -302,7 +303,8 @@ def main(cfg: DictConfig) -> None:
         # Reset weights and optimizer states for recycled features
         reset_feature_weights(recycled_features, model, optimizer, cfg)
         if cbp_tracker is not None:
-            cbp_tracker.prune_features()
+            pruned_idxs = cbp_tracker.prune_features()
+            total_pruned += sum([len(idxs) for idxs in pruned_idxs.values()])
 
         # Forward pass
         outputs, param_inputs = model(features)
@@ -343,6 +345,7 @@ def main(cfg: DictConfig) -> None:
                 'cumulative_loss': cumulative_loss,
                 'accuracy': accuracy_acc / n_steps_since_log if isinstance(criterion, nn.CrossEntropyLoss) else None,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
+                'units_pruned': total_pruned,
             }
             # Add recycler statistics
             metrics.update(recycler.get_statistics(step, model, optimizer))
