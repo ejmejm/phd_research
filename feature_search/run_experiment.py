@@ -84,6 +84,7 @@ def prepare_task(cfg: DictConfig):
             n_features=cfg.task.n_real_features,
             flip_rate=cfg.task.flip_rate,
             n_layers=cfg.task.n_layers,
+            n_stationary_layers=cfg.task.n_stationary_layers,
             hidden_dim=cfg.task.hidden_dim if cfg.task.n_layers > 1 else 0,
             weight_scale=cfg.task.weight_scale,
             activation=cfg.task.activation,

@@ -11,6 +11,7 @@ task:
   n_real_features: 10
   flip_rate: 0.005
   n_layers: 2
+  n_stationary_layers: 0 # Starts from the first layer
   hidden_dim: 20
   weight_scale: 1.0
   activation: tanh

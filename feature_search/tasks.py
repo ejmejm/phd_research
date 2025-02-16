@@ -117,6 +117,7 @@ class NonlinearGEOFFTask:
         n_features: int,
         flip_rate: float,  # Percentage of weights to flip per step
         n_layers: int = 2,
+        n_stationary_layers: int = 0,
         hidden_dim: int = 64,
         weight_scale: float = 1.0,
         activation: str = 'relu',
@@ -129,6 +130,7 @@ class NonlinearGEOFFTask:
             n_features: Number of input features
             flip_rate: Percentage of weights to flip per step (accumulates if < 1 weight)
             n_layers: Number of layers in the target network (1 = linear)
+            n_stationary_layers: Number of layers that do not flip
             hidden_dim: Hidden dimension size for intermediate layers
             weight_scale: Scale factor for weights (weights will be ±scale)
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
@@ -140,6 +142,7 @@ class NonlinearGEOFFTask:
         
         self.n_features = n_features
         self.n_layers = n_layers
+        self.n_stationary_layers = n_stationary_layers
         self.hidden_dim = hidden_dim
         self.weight_scale = weight_scale
         self.flip_rate = flip_rate
@@ -243,7 +246,9 @@ class NonlinearGEOFFTask:
     
     def _flip_signs(self):
         """Flip signs of weights based on accumulated probabilities."""
-        for layer_idx, (weights, accumulator) in enumerate(zip(self.weights, self.flip_accumulators)):
+        for layer_idx, (weights, accumulator) in enumerate(
+            zip(self.weights, self.flip_accumulators), start=self.n_stationary_layers,
+        ):
             n_flips = int(accumulator)
             if n_flips > 0:
                 # Randomly select weights to flip
