@@ -408,13 +408,16 @@ def n_kaiming_uniform(tensor, shape, a=0, mode='fan_in', nonlinearity='relu'):
 class CBPTracker():
     """Perform CBP for recycling features."""
     
+    # TODO: Reimplement weight initialization between model, cbp, and input recycler
+    # so that they share the same initialization methods
     def __init__(
         self,
         optimizer = None,
         replace_rate = 1e-4,
         decay_rate = 0.99,
         maturity_threshold = 100,
-        incoming_weight_init = 'kaiming_uniform',
+        incoming_weight_init = 'kaiming_uniform', # {'kaiming_uniform', 'binary'}
+        outgoing_weight_init = 'zeros', # {'zeros', 'kaiming_uniform'}
     ):
         assert optimizer is None or isinstance(optimizer, (Adam, IDBD, torch.optim.SGD))
         
@@ -428,6 +431,8 @@ class CBPTracker():
         self.replace_rate = replace_rate
         self.decay_rate = decay_rate
         self.maturity_threshold = maturity_threshold
+        self.incoming_weight_init = incoming_weight_init
+        self.outgoing_weight_init = outgoing_weight_init
 
     def track(self, previous, current, next):
         """Track a list of layers used for CBP calculations."""
@@ -517,18 +522,18 @@ class CBPTracker():
             if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
                 optim_state['beta'][idxs] = math.log(self.optimizer.init_lr)
 
-    def _reinit_output_weights(self, layer, idxs, weight_init='zeros'):
+    def _reinit_output_weights(self, layer, idxs):
         """Reinitialize the weights that take in features at the given indices."""
         # This is how linear layers are initialized in PyTorch
         weight_data = layer.weight.data
         
-        if weight_init == 'zeros':
+        if self.outgoing_weight_init == 'zeros':
             layer.weight.data[:, idxs] = torch.zeros_like(weight_data[:, idxs])
-        elif weight_init == 'kaiming_uniform':
+        elif self.outgoing_weight_init == 'kaiming_uniform':
             layer.weight.data[:, idxs] = n_kaiming_uniform(
                 weight_data, weight_data[:, idxs].shape, a=math.sqrt(5))
         else:
-            raise ValueError(f'Invalid weight initialization: {weight_init}')
+            raise ValueError(f'Invalid weight initialization: {self.outgoing_weight_init}')
     
     def _reset_output_optim_state(self, layer, idxs):
         """
