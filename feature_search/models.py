@@ -3,11 +3,10 @@ import torch.nn as nn
 
 
 class LTU(nn.Module):
-    def __init__(self, threshold: float = 0.0, scale: float = 1.0):
+    def __init__(self, threshold: float = 0.0):
         """Linear threshold unit with sigmoid-like gradient."""
         super().__init__()
         self.threshold = threshold
-        self.scale = scale
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass applies step function but backward pass uses sigmoid gradient.
@@ -23,7 +22,7 @@ class LTU(nn.Module):
             @staticmethod
             def forward(ctx, input):
                 ctx.save_for_backward(input)
-                return (input > self.threshold).float() * self.scale
+                return (input > self.threshold).float()
 
             @staticmethod
             def backward(ctx, grad_output):
