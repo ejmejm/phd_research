@@ -258,7 +258,7 @@ def main(cfg: DictConfig) -> None:
         cbp_tracker = CBPTracker(
             optimizer = optimizer,
             replace_rate = cfg.feature_recycling.recycle_rate,
-            decay_rate=cfg.feature_recycling.utility_decay,
+            decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
         )
         cbp_tracker.track_sequential(model.layers)
