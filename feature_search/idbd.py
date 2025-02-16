@@ -19,6 +19,10 @@ class IDBD(Optimizer):
         params: Iterable of parameters to optimize
         meta_lr: Meta learning rate (default: 0.01)
         init_lr: Initial learning rate (default: 0.01)
+        weight_decay: Weight decay (default: 0.0)
+        version: Version of IDBD to use (default: squared_inputs)
+        autostep: Whether to use autostep (default: False)
+        tau: Tau parameter for autostep (default: 1e4)
     """
     
     def __init__(
@@ -28,15 +32,28 @@ class IDBD(Optimizer):
         init_lr: float = 0.01,
         weight_decay: float = 0.0,
         version: str = 'squared_inputs', # squared_inputs, squared_grads, hvp, hessian_diagonal,
+        autostep: bool = False,
+        tau: float = 1e4,
     ):
-        defaults = dict(meta_lr=meta_lr)
-        super().__init__(params, defaults)
+        param_list = list(params)
+        defaults = dict(meta_lr=meta_lr, tau=tau)
+        super().__init__(param_list, defaults)
         self.weight_decay = weight_decay
         self.init_lr = init_lr
         self.version = version
+        self.autostep = autostep
+        self.tau = tau
         
         assert self.version in ['squared_inputs', 'squared_grads', 'hvp', 'hessian_diagonal'], \
             f"Invalid version: {self.version}. Must be one of: squared_inputs, squared_grads, hvp, hessian_diagonal."
+        
+        if autostep:
+            # Check that parameters match a linear layer structure
+            weights = [p for p in param_list if len(p.shape) == 2]
+            biases = [p for p in param_list if len(p.shape) == 1]
+            
+            assert len(weights) == 1, 'AutoStep optimizer expects exactly one weight matrix (2D tensor)'
+            assert len(biases) <= 1, 'AutoStep optimizer expects at most one bias vector (1D tensor)'
 
         # Initialize beta and h for each parameter
         for group in self.param_groups:
@@ -44,6 +61,8 @@ class IDBD(Optimizer):
                 state = self.state[p]
                 state['beta'] = torch.full_like(p.data, math.log(init_lr))
                 state['h'] = torch.zeros_like(p.data)
+                if autostep:
+                    state['v'] = torch.zeros_like(p.data)
     
 
     @torch.no_grad()
@@ -61,9 +80,8 @@ class IDBD(Optimizer):
             predictions: Predictions tensor of shape (batch_size, n_classes)
             param_inputs: Dictionary mapping linear layer weight parameters to their inputs
         """
-        all_params = [p for group in self.param_groups for p in group['params']]
-        
         if self.version == 'squared_grads':
+            all_params = [p for group in self.param_groups for p in group['params']]
             with torch.enable_grad():
                 prediction_sum = torch.sum(predictions)
             prediction_grads = torch.autograd.grad(
@@ -74,11 +92,13 @@ class IDBD(Optimizer):
             prediction_grads = {p: g for p, g in zip(all_params, prediction_grads)}
         
         # Compute gradients for all model parameters
-        loss.backward(create_graph=True)
+        create_graph = self.version in ('hessian_diagonal', 'hvp')
+        loss.backward(create_graph=create_graph)
 
         param_updates = []
         for group in self.param_groups:
             meta_lr = group['meta_lr']
+            tau = group['tau']
             
             for p in group['params']:
                 if p.grad is None:
@@ -98,26 +118,17 @@ class IDBD(Optimizer):
                 state = self.state[p]
                 beta = state['beta']
                 h = state['h']
+                if self.autostep:
+                    v = state['v']
                 
-                # Update beta
-                beta.add_(meta_lr * grad * h)
-                state['beta'] = beta
                 
-                # Calculate alpha (learning rate)
-                alpha = torch.exp(beta)
-                
-                # Queue paramter update
-                weight_decay_term = self.weight_decay * p.data if self.weight_decay != 0 else 0
-                param_update = -alpha * (grad + weight_decay_term)
-                param_updates.append((p, param_update))
-                
-                ## Different h update depending on version ##
+                ### Different versions of IDBD change how h is decayed ###
                 
                 if self.version == 'squared_inputs':
-                    state['h'] = h * (1 - alpha * inputs.pow(2)).clamp(min=0) + alpha * inputs
+                    h_decay_term = inputs.pow(2)
                     
                 elif self.version == 'squared_grads':
-                    state['h'] = h * (1 - alpha * prediction_grads[p].pow(2)).clamp(min=0) + alpha * grad
+                    h_decay_term = prediction_grads[p].pow(2)
 
                 elif self.version == 'hvp':
                     try:
@@ -132,7 +143,7 @@ class IDBD(Optimizer):
                             )
                         else:
                             raise e
-                    state['h'] = h * (1 - alpha * second_order_grad).clamp(min=0) + alpha * grad
+                    h_decay_term = second_order_grad
                     
                 elif self.version == 'hessian_diagonal':
                     try:
@@ -150,7 +161,44 @@ class IDBD(Optimizer):
                             )
                         else:
                             raise e
-                    state['h'] = h * (1 - alpha * second_order_grad).clamp(min=0) + alpha * grad
+                    h_decay_term = second_order_grad
+                
+                else:
+                    raise ValueError(f"Invalid IDBD version: {self.version}")
+                
+                
+                ### Update state variables ###
+                
+                # Calculate and update step-size (learning rate / alpha)
+                if self.autostep:
+                    alpha = torch.exp(state['beta'])
+                    v = torch.max(
+                        torch.abs(grad * h),
+                        v + 1.0 / tau * alpha * h_decay_term * (torch.abs(grad * h) - v),
+                    )
+                    new_alpha = alpha * torch.exp(meta_lr * grad * h / v)
+                    alpha = torch.where(
+                        v != 0,
+                        new_alpha,
+                        alpha,
+                    )
+                    
+                    # Normalize the step-size
+                    effective_step_size = torch.clamp(torch.sum(alpha * h_decay_term, dim=1), min=1.0)
+                    alpha = alpha / effective_step_size.unsqueeze(1)
+                    state['beta'] = torch.log(alpha)
+                else:
+                    beta.add_(meta_lr * grad * h)
+                    state['beta'] = beta
+                    alpha = torch.exp(beta)
+                
+                # Queue paramter update
+                weight_decay_term = self.weight_decay * p.data if self.weight_decay != 0 else 0
+                param_update = -alpha * (grad + weight_decay_term)
+                param_updates.append((p, param_update))
+                
+                # Update h (gradient trace)
+                state['h'] = h * (1 - alpha * h_decay_term).clamp(min=0) + alpha * grad
                 
         for p, param_update in param_updates:
             p.add_(param_update)
@@ -318,7 +366,7 @@ class RMSPropIDBD(Optimizer):
             p.grad = None
 
         return loss
-    
+
 
 if __name__ == '__main__':
     print("Testing IDBD optimizer...")
@@ -335,28 +383,32 @@ if __name__ == '__main__':
     with torch.no_grad():
         model.weight.data.copy_(torch.tensor([[1.0, -1.0]]))
                                            # [0.5, 1.0]]))
-    optimizer = IDBD(model.parameters(), meta_lr=0.01, init_lr=0.5)
+    optimizer = IDBD(model.parameters(), meta_lr=0.0001, init_lr=0.5, autostep=True)
     
     for _ in range(10):
         y_pred = model(X[0])
         loss = 0.5 * torch.nn.functional.mse_loss(y_pred, y[0])
-        print('Loss:', loss)
-        loss.backward(create_graph=True)
-        optimizer.step()
+        print('loss:', loss.item(), 'step-size:', torch.exp(optimizer.state[model.weight]['beta']))
+        
+        param_inputs = {model.weight: X[0]}
+        optimizer.zero_grad()
+        optimizer.step(loss, y_pred, param_inputs)
 
     # Test 2
     print("\nTest 2: Linear Regression w/ Undershooting (IDBD increases learning rate)")
     with torch.no_grad():
         model.weight.data.copy_(torch.tensor([[1.0, -1.0]]))
                                            # [0.5, 1.0]]))
-    optimizer = IDBD(model.parameters(), meta_lr=5.0, init_lr=0.001)
+    optimizer = IDBD(model.parameters(), meta_lr=0.1, init_lr=0.001, autostep=True)
     
     for _ in range(10):
         y_pred = model(X[0])
         loss = 0.5 * torch.nn.functional.mse_loss(y_pred, y[0])
-        print('Loss:', loss)
-        loss.backward(create_graph=True)
-        optimizer.step()
+        print('loss:', loss.item(), 'step-size:', torch.exp(optimizer.state[model.weight]['beta']))
+        
+        param_inputs = {model.weight: X[0]}
+        optimizer.zero_grad()
+        optimizer.step(loss, y_pred, param_inputs)
     
     
     # # Test with 2-layer network

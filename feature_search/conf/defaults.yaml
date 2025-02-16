@@ -46,8 +46,10 @@ model:
   hidden_dim: 256
   output_dim: 10
   activation: relu
+  n_frozen_layers: 0
 
 # IDBD parameters
 idbd:
   meta_learning_rate: 0.01
   version: squared_inputs # squared_inputs, squared_grads, hvp, hessian_diagonal
+  autostep: false

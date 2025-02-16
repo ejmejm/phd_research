@@ -14,7 +14,7 @@ import omegaconf
 from omegaconf import DictConfig
 
 from adam import Adam
-from feature_recycling import InputRecycler, CBPTracker, reset_feature_weights
+from feature_recycling import InputRecycler, CBPTracker, reset_input_weights
 from idbd import IDBD, RMSPropIDBD
 from models import MLP
 from tasks import DummyTask, GEOFFTask, NonlinearGEOFFTask
@@ -88,6 +88,7 @@ def prepare_optimizer(model: nn.Module, cfg: DictConfig):
             meta_lr=cfg.idbd.meta_learning_rate,
             version=cfg.idbd.version,
             weight_decay=cfg.train.weight_decay,
+            autostep=cfg.idbd.autostep,
         )
     elif cfg.train.optimizer == 'rmsprop_idbd':
         return RMSPropIDBD(
@@ -269,7 +270,7 @@ def main(cfg: DictConfig) -> None:
                     targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
 
         # Reset weights and optimizer states for recycled features
-        reset_feature_weights(recycled_features, model, optimizer, cfg)
+        reset_input_weights(recycled_features, model, optimizer, cfg)
         if cbp_tracker is not None:
             pruned_idxs = cbp_tracker.prune_features()
             total_pruned += sum([len(idxs) for idxs in pruned_idxs.values()])
