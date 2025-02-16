@@ -2,10 +2,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 import math
 import random
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple, Union
 import warnings
 
 import numpy as np
+from omegaconf import DictConfig
 import torch
 from torch import nn
 import torch.optim as optim
@@ -346,6 +347,45 @@ class InputRecycler:
             self._add_new_feature(idx, step_num)
         
         return feature_values, recycled_features
+
+
+def reset_feature_weights(idxs: Union[int, Sequence[int]], model: MLP, optimizer: optim.Optimizer, cfg: DictConfig):
+    """Reset the weights and associated optimizer state for a feature."""
+    if isinstance(idxs, Sequence) and len(idxs) == 0:
+        return
+    
+    first_layer = model.layers[0]
+    
+    # Reset weights
+    if cfg.model.weight_init_method == 'zeros':
+        with torch.no_grad():
+            first_layer.weight[:, idxs] = 0
+    elif cfg.model.weight_init_method == 'kaiming_uniform':
+        fan = first_layer.weight.shape[1] # fan_in
+        gain = 1
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
+        with torch.no_grad():
+            first_layer.weight[:, idxs] = first_layer.weight[:, idxs].uniform_(-bound, bound)
+    else:
+        raise ValueError(f'Invalid weight initialization method: {cfg.model.weight_init_method}')
+
+    # Reset optimizer states
+    if isinstance(optimizer, Adam):
+        # Reset Adam state for the specific feature
+        state = optimizer.state[first_layer.weight]
+        if len(state) > 0: # State is only populated after the first call to step
+            state['step'][:, idxs] = 0
+            state['exp_avg'][:, idxs] = 0
+            state['exp_avg_sq'][:, idxs] = 0
+            if 'max_exp_avg_sq' in state:  # For AMSGrad
+                state['max_exp_avg_sq'][:, idxs] = 0
+    elif isinstance(optimizer, IDBD):
+        state = optimizer.state[first_layer.weight]
+        state['beta'][:, idxs] = math.log(cfg.train.learning_rate)
+        state['h'][:, idxs] = 0
+    else:
+        raise ValueError(f'Invalid optimizer type: {type(optimizer)}')
 
 
 def n_kaiming_uniform(tensor, shape, a=0, mode='fan_in', nonlinearity='relu'):
