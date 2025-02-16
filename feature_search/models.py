@@ -81,9 +81,9 @@ class MLP(nn.Module):
             self.layers.append(nn.Linear(input_dim, hidden_dim, bias=False))
             self.layers.append(activation_cls())
             for _ in range(n_layers - 2):
-                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim, bias=False))
                 self.layers.append(activation_cls())
-            self.layers.append(nn.Linear(hidden_dim, output_dim))
+            self.layers.append(nn.Linear(hidden_dim, output_dim, bias=False))
         
         # Freeze layers
         for i in range(n_frozen_layers):

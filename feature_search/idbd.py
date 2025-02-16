@@ -184,7 +184,7 @@ class IDBD(Optimizer):
                     )
                     
                     # Normalize the step-size
-                    effective_step_size = torch.clamp(torch.sum(alpha * h_decay_term, dim=1), min=1.0)
+                    effective_step_size = torch.clamp(torch.sum(alpha * h_decay_term, dim=-1), min=1.0)
                     alpha = alpha / effective_step_size.unsqueeze(1)
                     state['beta'] = torch.log(alpha)
                 else:
