@@ -55,35 +55,36 @@ def prepare_task(cfg: DictConfig):
 
 def prepare_optimizer(model: nn.Module, cfg: DictConfig):
     """Prepare the optimizer based on configuration."""
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
     if cfg.train.optimizer == 'adam':
         return Adam(
-            model.parameters(),
+            trainable_params,
             lr=cfg.train.learning_rate,
             weight_decay=cfg.train.weight_decay,
         )
     elif cfg.train.optimizer == 'rmsprop':
         return Adam(
-            model.parameters(),
+            trainable_params,
             lr=cfg.train.learning_rate,
             betas=(0, 0.999),
             weight_decay=cfg.train.weight_decay,
         )
     elif cfg.train.optimizer == 'sgd':
         return optim.SGD(
-            model.parameters(),
+            trainable_params,
             lr=cfg.train.learning_rate,
             weight_decay=cfg.train.weight_decay,
         )
     elif cfg.train.optimizer == 'sgd_momentum':
         return optim.SGD(
-            model.parameters(),
+            trainable_params,
             lr=cfg.train.learning_rate,
             weight_decay=cfg.train.weight_decay,
             momentum=0.9,
         )
     elif cfg.train.optimizer == 'idbd':
         return IDBD(
-            model.parameters(),
+            trainable_params,
             init_lr=cfg.train.learning_rate,
             meta_lr=cfg.idbd.meta_learning_rate,
             version=cfg.idbd.version,
@@ -92,7 +93,7 @@ def prepare_optimizer(model: nn.Module, cfg: DictConfig):
         )
     elif cfg.train.optimizer == 'rmsprop_idbd':
         return RMSPropIDBD(
-            model.parameters(),
+            trainable_params,
             init_lr=cfg.train.learning_rate,
             meta_lr=cfg.idbd.meta_learning_rate,
             trace_diagonal_approx=cfg.idbd.diagonal_approx,

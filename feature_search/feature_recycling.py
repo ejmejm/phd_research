@@ -481,7 +481,9 @@ class CBPTracker():
                 layer.bias.data[idxs] = torch.rand(len(idxs), device=layer.bias.device) * 2 * bound - bound
                 
         elif self.incoming_weight_init == 'binary':
-            layer.weight.data[idxs] = torch.randint(0, 2, (len(idxs),), device=layer.weight.device) * 2 - 1
+            weight_data = layer.weight.data
+            layer.weight.data[idxs] = torch.randint(
+                0, 2, weight_data[idxs].shape, device=layer.weight.device).float() * 2 - 1
             if layer.bias is not None:
                 layer.bias.data[idxs] = torch.zeros_like(layer.bias.data[idxs])
 
