@@ -276,40 +276,42 @@ class InputRecycler:
         if self.use_cbp_utility:
             stats['mean_utility_real'] = np.mean([f.utility for f in real_features]) if real_features else 0
             stats['mean_utility_distractor'] = np.mean([f.utility for f in distractor_features]) if distractor_features else 0
+        
+        # Log step sizes for the inputs, but only if the first layer is not frozen
+        first_layer_weights = model.layers[0].weight
+        if len(optimizer.state[first_layer_weights]) > 0:
             
-        if isinstance(optimizer, (IDBD, RMSPropIDBD)):
-            first_layer = model.layers[0]
-            idbd_beta = optimizer.state[first_layer.weight]['beta']
-            learning_rates = torch.exp(idbd_beta).mean(dim=0)
-            stats['mean_learning_rate_real'] = learning_rates[real_indices].mean().item() if real_indices else 0
-            stats['mean_learning_rate_distractor'] = learning_rates[distractor_indices].mean().item() if distractor_indices else 0
-            
-        elif isinstance(optimizer, Adam):
-            first_layer = model.layers[0]
-            state = optimizer.state[first_layer.weight]
-            
-            # Get Adam parameters
-            step = state['step']
-            exp_avg_sq = state['exp_avg_sq']
-            beta1, beta2 = optimizer.defaults['betas']
-            lr = optimizer.defaults['lr']
-            eps = optimizer.defaults['eps']
-            
-            # Calculate bias corrections
-            bias_correction1 = 1 - beta1 ** step
-            bias_correction2 = 1 - beta2 ** step
-            
-            # Calculate step size
-            step_size = lr / bias_correction1
-            
-            # Calculate denominator
-            denom = (exp_avg_sq.sqrt() / bias_correction2.sqrt()).add_(eps)
-            
-            # Calculate effective learning rates
-            effective_lrs = (step_size / denom).mean(dim=0)
-            
-            stats['mean_learning_rate_real'] = effective_lrs[real_indices].mean().item() if real_indices else 0
-            stats['mean_learning_rate_distractor'] = effective_lrs[distractor_indices].mean().item() if distractor_indices else 0
+            if isinstance(optimizer, (IDBD, RMSPropIDBD)):
+                idbd_beta = optimizer.state[first_layer_weights]['beta']
+                learning_rates = torch.exp(idbd_beta).mean(dim=0)
+                stats['mean_learning_rate_real'] = learning_rates[real_indices].mean().item() if real_indices else 0
+                stats['mean_learning_rate_distractor'] = learning_rates[distractor_indices].mean().item() if distractor_indices else 0
+                
+            elif isinstance(optimizer, Adam):
+                state = optimizer.state[first_layer_weights]
+                
+                # Get Adam parameters
+                step = state['step']
+                exp_avg_sq = state['exp_avg_sq']
+                beta1, beta2 = optimizer.defaults['betas']
+                lr = optimizer.defaults['lr']
+                eps = optimizer.defaults['eps']
+                
+                # Calculate bias corrections
+                bias_correction1 = 1 - beta1 ** step
+                bias_correction2 = 1 - beta2 ** step
+                
+                # Calculate step size
+                step_size = lr / bias_correction1
+                
+                # Calculate denominator
+                denom = (exp_avg_sq.sqrt() / bias_correction2.sqrt()).add_(eps)
+                
+                # Calculate effective learning rates
+                effective_lrs = (step_size / denom).mean(dim=0)
+                
+                stats['mean_learning_rate_real'] = effective_lrs[real_indices].mean().item() if real_indices else 0
+                stats['mean_learning_rate_distractor'] = effective_lrs[distractor_indices].mean().item() if distractor_indices else 0
         
         return stats
     

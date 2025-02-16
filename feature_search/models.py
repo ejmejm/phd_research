@@ -107,7 +107,7 @@ class MLP(nn.Module):
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
         elif method == 'binary':
-            layer.weight.data = torch.randint(0, 2, layer.weight.shape, device=layer.weight.device) * 2 - 1
+            layer.weight.data = torch.randint(0, 2, layer.weight.shape, device=layer.weight.device).float() * 2 - 1
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
         else:
