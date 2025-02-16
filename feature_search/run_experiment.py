@@ -232,6 +232,7 @@ def prepare_components(cfg: DictConfig):
         hidden_dim=cfg.model.hidden_dim,
         weight_init_method=cfg.model.weight_init_method,
         activation=cfg.model.activation,
+        n_frozen_layers=cfg.model.n_frozen_layers,
         device=cfg.device
     ).to(cfg.device)
     

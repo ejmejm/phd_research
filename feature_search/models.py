@@ -51,6 +51,7 @@ class MLP(nn.Module):
         hidden_dim: int,
         weight_init_method: str,
         activation: str = 'tanh',
+        n_frozen_layers: int = 0,
         device: str = 'cuda'
     ):
         """
@@ -59,13 +60,15 @@ class MLP(nn.Module):
             output_dim: Number of output classes
             n_layers: Number of layers (including output)
             hidden_dim: Size of hidden layers
-            weight_init_method: How to initialize weights ('zeros' or 'kaiming')
+            weight_init_method: How to initialize weights ('zeros', 'kaiming', or 'binary')
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
+            n_frozen_layers: Number of frozen layers
             device: Device to put model on
         """
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.n_frozen_layers = n_frozen_layers
         self.device = device
         
         activation_cls = ACTIVATION_MAP[activation]
@@ -82,6 +85,13 @@ class MLP(nn.Module):
                 self.layers.append(activation_cls())
             self.layers.append(nn.Linear(hidden_dim, output_dim))
         
+        # Freeze layers
+        for i in range(n_frozen_layers):
+            layer = self.layers[int(i*2)]
+            layer.weight.requires_grad = False
+            if layer.bias is not None:
+                layer.bias.requires_grad = False
+        
         # Initialize weights
         self._initialize_weights(weight_init_method)
     
@@ -94,6 +104,10 @@ class MLP(nn.Module):
                 nn.init.zeros_(layer.bias)
         elif method == 'kaiming_uniform':
             nn.init.kaiming_uniform_(layer.weight)
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+        elif method == 'binary':
+            layer.weight.data = torch.randint(0, 2, layer.weight.shape, device=layer.weight.device) * 2 - 1
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
         else:
