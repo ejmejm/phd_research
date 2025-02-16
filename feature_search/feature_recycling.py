@@ -349,7 +349,7 @@ class InputRecycler:
         return feature_values, recycled_features
 
 
-def reset_feature_weights(idxs: Union[int, Sequence[int]], model: MLP, optimizer: optim.Optimizer, cfg: DictConfig):
+def reset_input_weights(idxs: Union[int, Sequence[int]], model: MLP, optimizer: optim.Optimizer, cfg: DictConfig):
     """Reset the weights and associated optimizer state for a feature."""
     if isinstance(idxs, Sequence) and len(idxs) == 0:
         return
@@ -408,7 +408,14 @@ def n_kaiming_uniform(tensor, shape, a=0, mode='fan_in', nonlinearity='relu'):
 class CBPTracker():
     """Perform CBP for recycling features."""
     
-    def __init__(self, optimizer=None, replace_rate=1e-4, decay_rate=0.99, maturity_threshold=100):
+    def __init__(
+        self,
+        optimizer = None,
+        replace_rate = 1e-4,
+        decay_rate = 0.99,
+        maturity_threshold = 100,
+        incoming_weight_init = 'kaiming_uniform',
+    ):
         assert optimizer is None or isinstance(optimizer, (Adam, IDBD, torch.optim.SGD))
         
         # Dictionary mapping feature output layer to previous and next layers
@@ -456,14 +463,23 @@ class CBPTracker():
     def _reinit_input_weights(self, layer, idxs):
         """Reinitialize the weights that output features at the given indices."""
         # This is how linear layers are initialized in PyTorch
-        weight_data = layer.weight.data
-        layer.weight.data[idxs] = n_kaiming_uniform(
-            weight_data, weight_data[idxs].shape, a=math.sqrt(5))
+        if self.incoming_weight_init == 'kaiming_uniform':
+            weight_data = layer.weight.data
+            layer.weight.data[idxs] = n_kaiming_uniform(
+                weight_data, weight_data[idxs].shape, a=math.sqrt(5))
 
-        if layer.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            layer.bias.data[idxs] = torch.rand(len(idxs), device=layer.bias.device) * 2 * bound - bound
+            if layer.bias is not None:
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
+                bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+                layer.bias.data[idxs] = torch.rand(len(idxs), device=layer.bias.device) * 2 * bound - bound
+                
+        elif self.incoming_weight_init == 'binary':
+            layer.weight.data[idxs] = torch.randint(0, 2, (len(idxs),), device=layer.weight.device) * 2 - 1
+            if layer.bias is not None:
+                layer.bias.data[idxs] = torch.zeros_like(layer.bias.data[idxs])
+
+        else:
+            raise ValueError(f'Invalid weight initialization: {self.incoming_weight_init}')
 
     def _reset_input_optim_state(self, layer, idxs):
         """
