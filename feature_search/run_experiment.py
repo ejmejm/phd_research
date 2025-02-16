@@ -209,10 +209,8 @@ def standardize_targets(
     return targets, cumulant_mean, cumulant_square_mean
 
 
-
-@hydra.main(config_path='conf', config_name='defaults')
-def main(cfg: DictConfig) -> None:
-    """Run the feature recycling experiment."""
+def prepare_components(cfg: DictConfig):
+    """Prepare the components based on configuration."""
     set_seed(cfg.seed)
     
     if not cfg.wandb:
@@ -265,7 +263,15 @@ def main(cfg: DictConfig) -> None:
         cbp_tracker.track_sequential(model.layers)
     else:
         cbp_tracker = None
-    
+        
+    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker
+
+
+@hydra.main(config_path='conf', config_name='defaults')
+def main(cfg: DictConfig) -> None:
+    """Run the feature recycling experiment."""
+    task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
+        prepare_components(cfg)
 
     # Training loop
     step = 0
