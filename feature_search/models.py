@@ -2,10 +2,44 @@ import torch
 import torch.nn as nn
 
 
+class LTU(nn.Module):
+    def __init__(self, threshold: float = 0.0, scale: float = 1.0):
+        """Linear threshold unit with sigmoid-like gradient."""
+        super().__init__()
+        self.threshold = threshold
+        self.scale = scale
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass applies step function but backward pass uses sigmoid gradient.
+        
+        Args:
+            x: Input tensor
+            
+        Returns:
+            Tensor with 1s where x > 0 and 0s elsewhere
+        """
+        # Custom autograd function to override gradient
+        class _LTUFunction(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, input):
+                ctx.save_for_backward(input)
+                return (input > self.threshold).float() * self.scale
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                input, = ctx.saved_tensors
+                # Sigmoid gradient is sigmoid(x) * (1 - sigmoid(x))
+                grad_input = torch.sigmoid(input - self.threshold) * (1 - torch.sigmoid(input - self.threshold))
+                return grad_output * grad_input
+
+        return _LTUFunction.apply(x)
+
+
 ACTIVATION_MAP = {
     'relu': nn.ReLU,
     'tanh': nn.Tanh,
     'sigmoid': nn.Sigmoid,
+    'ltu': LTU,
 }
 
 
