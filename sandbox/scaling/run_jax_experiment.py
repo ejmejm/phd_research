@@ -246,7 +246,8 @@ def train_and_evaluate(
   all_train_losses = []
   all_test_losses = []
   first_key = list(train_ds.keys())[0]
-  samples_per_epoch = len(train_ds[first_key])
+  num_batches = len(train_ds[first_key])
+  samples_per_epoch = num_batches * config.train.batch_size
   progress_bar = tqdm(total=config.train.total_samples, unit='samples')
 
   # Process dataset in chunks of log_freq batches
@@ -264,7 +265,7 @@ def train_and_evaluate(
       batches = jax.tree.map(lambda *x: jnp.stack(x), *batches)
         
     batch_idx += config.train.log_freq
-    if batch_idx >= len(train_ds):
+    if batch_idx >= num_batches:
       batch_idx = 0
     
     running_samples = np.prod(batches[first_key].shape[:2])
@@ -283,9 +284,9 @@ def train_and_evaluate(
       wandb.log({
         'train/loss': train_loss,
         'train/accuracy': train_acc,
-        'train/step': step,
-        'train/samples': samples_seen,
-        'train/epoch': current_epoch
+        'train_step': step,
+        'samples': samples_seen,
+        'epoch': current_epoch
       })
     
     progress_bar.set_postfix(
@@ -305,9 +306,9 @@ def train_and_evaluate(
         wandb.log({
           'test/loss': test_metrics['loss'],
           'test/accuracy': test_metrics['accuracy'],
-          'test/step': step,
-          'test/samples': samples_seen,
-          'test/epoch': current_epoch
+          'train_step': step,
+          'samples': samples_seen,
+          'epoch': current_epoch
         })
 
   progress_bar.close()
