@@ -587,8 +587,10 @@ class CBPTracker():
 
     def _reset_feature_stats(self, layer, idxs):
         """Resets the feature stats for the given layer and indices."""
+        median_utility = self._feature_stats[layer]['utility'].median()
         for key in self._feature_stats[layer]:
             self._feature_stats[layer][key][idxs] = 0
+        self._feature_stats[layer]['utility'][idxs] = median_utility
 
     def _prune_layer(self, layer):
         ages = self._feature_stats[layer]['age']

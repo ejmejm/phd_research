@@ -72,15 +72,7 @@ def main(cfg: DictConfig) -> None:
         # Generate batch of data
         inputs, targets = next(task_iterator)
         target_buffer.extend(targets.view(-1).tolist())
-        inputs, targets = inputs.to(cfg.device), targets.to(cfg.device)
-        
-        # Get recycled features
-        features, recycled_features = recycler.step(
-            batch_size=inputs.size(0),
-            real_features=inputs,
-            first_layer_weights=model.get_first_layer_weights(),
-            step_num=step
-        )
+        features, targets = inputs.to(cfg.device), targets.to(cfg.device)
         
         if cfg.train.standardize_cumulants:
             with torch.no_grad():
@@ -88,7 +80,6 @@ def main(cfg: DictConfig) -> None:
                     targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
 
         # Reset weights and optimizer states for recycled features
-        reset_input_weights(recycled_features, model, optimizer, cfg)
         if cbp_tracker is not None:
             pruned_idxs = cbp_tracker.prune_features()
             total_pruned += sum([len(idxs) for idxs in pruned_idxs.values()])
@@ -136,8 +127,6 @@ def main(cfg: DictConfig) -> None:
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
             }
-            # Add recycler statistics
-            metrics.update(recycler.get_statistics(step, model, optimizer))
             # Add model statistics
             metrics.update(get_model_statistics(model, features, param_inputs))
             wandb.log(metrics)

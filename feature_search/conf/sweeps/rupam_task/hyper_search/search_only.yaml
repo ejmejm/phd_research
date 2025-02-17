@@ -1,7 +1,7 @@
 program: scripts/rupam_experiment.py
 method: grid
 project: feature_recycling-rupam_task-hyper_search
-name: task_size
+name: search_only_v2
 
 
 command:
@@ -61,7 +61,7 @@ parameters:
     value: 500
 
   train.total_steps:
-    value: 1000000
+    value: 600000
   train.log_freq:
     value: 100
   train.batch_size:
@@ -70,8 +70,6 @@ parameters:
     value: idbd
   train.standardize_cumulants:
     value: False
-  train.learning_rate:
-    value: 0.00001
 
   model.n_layers:
     value: 2
@@ -85,12 +83,14 @@ parameters:
     value: ltu
 
   # IDBD parameters
-  idbd.meta_learning_rate:
-    value: 0.01
   idbd.version:
     value: squared_grads
   idbd.autostep:
     value: true
 
+  idbd.meta_learning_rate:
+    values: [0.0005, 0.001, 0.005]
+  train.learning_rate:
+    values: [0.0005, 0.001, 0.005]
   seed:
-    values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    values: [1, 2, 3]
