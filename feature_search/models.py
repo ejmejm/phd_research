@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 
@@ -32,6 +34,70 @@ class LTU(nn.Module):
                 return grad_output * grad_input
 
         return _LTUFunction.apply(x)
+
+
+class ParallelLinear(nn.Module):
+    """A linear layer that applies multiple weight matrices in parallel to the same input.
+    
+    Args:
+        in_features: Size of each input sample
+        out_features: Size of each output sample
+        n_parallel: Number of parallel weight matrices
+        bias: If True, adds a learnable bias to the output
+    """
+    
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        n_parallel: int,
+        bias: bool = True
+    ) -> None:
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.n_parallel = n_parallel
+        
+        self.weight = nn.Parameter(torch.empty(n_parallel, out_features, in_features))
+        if bias:
+            self.bias = nn.Parameter(torch.empty(n_parallel, out_features))
+        else:
+            self.register_parameter('bias', None)
+            
+        self.reset_parameters()
+    
+    def reset_parameters(self) -> None:
+        """Initialize weights using the same strategy as nn.Linear."""
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in = self.weight.size(1)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (in_features,) or (n_parallel, in_features)
+            
+        Returns:
+            Output tensor of shape (n_parallel, out_features)
+        """
+        # Reshape input to (n_parallel, in_features, 1)
+        if x.dim() == 1:
+            x = x.unsqueeze(0).unsqueeze(2).expand(self.n_parallel, -1, 1)
+        elif x.dim() == 2:
+            x = x.unsqueeze(2)
+        else:
+            raise ValueError(f'Input tensor must have 1 or 2 dimensions, got {x.dim()}')
+        
+        # Apply parallel matrix multiplication
+        output = torch.bmm(self.weight, x)
+        output = output.squeeze(2)
+        
+        if self.bias is not None:
+            output += self.bias
+        
+        return output
 
 
 ACTIVATION_MAP = {
