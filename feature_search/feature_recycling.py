@@ -592,32 +592,43 @@ class CBPTracker():
             self._feature_stats[layer][key][idxs] = 0
         self._feature_stats[layer]['utility'][idxs] = median_utility
 
-    def _prune_layer(self, layer):
+    def _step_replacement_accumulator(self, layer):
         ages = self._feature_stats[layer]['age']
 
         # Get number of features to reset
         n_features = ages.numel()
         self._replace_accumulator[layer] += self.replace_rate * n_features
 
-        # If there are not enough features to reset, return
+    def _get_layer_prune_idxs(self, layer) -> List[int]:
+        """Get the indices of features to prune from the given layer."""
+        # If there are not enough features to reset, return an empty list
         if self._replace_accumulator[layer] < 1:
-            return
+            return []
 
         # Get eligible features
-        eligible_idxs = ages > self.maturity_threshold
+        eligible_idxs = self._feature_stats[layer]['age'] > self.maturity_threshold
         eligible_idxs = torch.nonzero(eligible_idxs).squeeze()
         n_reset = int(self._replace_accumulator[layer])
         
-        # If there are no eligible features, return
+        # If there are no eligible features, return an empty list
         if eligible_idxs.numel() == 0 or n_reset == 0:
-            return
+            return []
 
         # Get features to reset based on lowest utility
-        self._replace_accumulator[layer] -= n_reset
+        # self._replace_accumulator[layer] -= n_reset
         reset_idxs = torch.argsort(
             self._feature_stats[layer]['utility'][eligible_idxs])[:n_reset]
         reset_idxs = eligible_idxs[reset_idxs]
-        
+
+        return reset_idxs
+    
+    def _prune_layer(self, layer, reset_idxs):
+        if reset_idxs is None or len(reset_idxs) == 0:
+            return
+
+        # Step replacement accumulator
+        self._replace_accumulator[layer] -= len(reset_idxs)
+
         # Reset feature stats
         self._reset_feature_stats(layer, reset_idxs)
 
@@ -630,13 +641,13 @@ class CBPTracker():
             self._reset_input_optim_state(self._tracked_layers[layer][0], reset_idxs)
             self._reset_output_optim_state(self._tracked_layers[layer][1], reset_idxs)
 
-        return reset_idxs
-
     def prune_features(self):
         """Prune features based on the CBP score."""
         reset_idxs = {}
         for layer in self._tracked_layers.keys():
-            layer_idxs = self._prune_layer(layer)
-            if layer_idxs is not None:
+            self._step_replacement_accumulator(layer)
+            layer_reset_idxs = self._get_layer_prune_idxs(layer)
+            layer_idxs = self._prune_layer(layer, layer_reset_idxs)
+            if layer_idxs is not None and len(layer_idxs) > 0:
                 reset_idxs[layer] = layer_idxs
         return reset_idxs
