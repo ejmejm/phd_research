@@ -641,7 +641,7 @@ class CBPTracker():
             self._reset_input_optim_state(self._tracked_layers[layer][0], reset_idxs)
             self._reset_output_optim_state(self._tracked_layers[layer][1], reset_idxs)
 
-    def prune_features(self):
+    def prune_features(self) -> Dict[nn.Module, List[int]]:
         """Prune features based on the CBP score."""
         reset_idxs = {}
         for layer in self._tracked_layers.keys():
