@@ -615,7 +615,6 @@ class CBPTracker():
             return []
 
         # Get features to reset based on lowest utility
-        # self._replace_accumulator[layer] -= n_reset
         reset_idxs = torch.argsort(
             self._feature_stats[layer]['utility'][eligible_idxs])[:n_reset]
         reset_idxs = eligible_idxs[reset_idxs]

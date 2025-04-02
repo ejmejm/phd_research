@@ -34,7 +34,6 @@ from run_experiment import *
 
 CONVERGENCE_N_SAMPLES = 1_000_000
 OPTIMAL_WEIGHT_LOSS_THRESHOLD = 0.0001
-OPTIMAL_WEIGHT_SIMILARITY_THRESHOLD = 0.1 # 0.02
 CONVERGENCE_STEPS = 5000
 
 
@@ -136,25 +135,26 @@ def compute_optimal_weights(
     return model.layers[-1].weight.data.to(original_device)
 
 
-def compute_weight_convergence_steps(
-        model: MLP,
-        optimal_weights: torch.Tensor,
-        convergence_steps: torch.Tensor,
+def get_feature_safe_step(
+        newest_feature_idx: Optional[int],
+        newest_feature_safe_at_step: Optional[int],
         step: int,
-    ) -> torch.Tensor:
+        feature_utilities: torch.Tensor,
+    ) -> Optional[int]:
+    """
+    Returns the step at which the newest feature became safe,
+    or None if it is not currently safe.
+    """
+    if newest_feature_idx is not None:
+        is_newest_feature_safe = feature_utilities.argmin() != newest_feature_idx
+        if is_newest_feature_safe and newest_feature_safe_at_step is None:
+            newest_feature_safe_at_step = step
+        elif not is_newest_feature_safe:
+            newest_feature_safe_at_step = None
+    return newest_feature_safe_at_step
 
-    convergence_mask = torch.isclose(
-        model.layers[-1].weight,
-        optimal_weights,
-        rtol = OPTIMAL_WEIGHT_SIMILARITY_THRESHOLD,
-    )
 
-    convergence_steps = convergence_steps.clone()
-    convergence_steps[~convergence_mask] = torch.inf
-    convergence_steps[convergence_mask] = torch.minimum(
-        convergence_steps[convergence_mask], torch.tensor(step))
-
-    return convergence_steps
+# def prune_feature()
 
 
 def run_experiment(
@@ -178,20 +178,24 @@ def run_experiment(
     cumulant_mean = 0.0
     cumulant_square_mean = 0.0
     total_pruned = 0
-    step_since_feature_pruned = 0
+    steps_since_feature_pruned = 0
     cumulant_gamma = 0.999
     target_buffer = []
 
-    weight_convergence_steps = torch.full_like(model.layers[-1].weight, torch.inf)
-    optimal_weights = compute_optimal_weights(task, model, criterion, cfg.get('optimal_weight_device', cfg.device))
+    # New feature stats
+    newest_feature_idx = None
+    newest_feature_added_at_step = None
+    newest_feature_safe_at_step = None
+    feature_layer = model.layers[-2]
     
     # Buffers used to check for convergence
     recent_targets = []
     recent_losses = []
 
     while step < cfg.train.total_steps:
+        
+        ### Generate a batch of data ###
 
-        # Generate batch of data
         inputs, targets = next(task_iterator)
 
         flat_targets = targets.view(-1).tolist()
@@ -200,46 +204,86 @@ def run_experiment(
         recent_targets = recent_targets[-CONVERGENCE_STEPS * len(flat_targets):]
         features, targets = inputs.to(cfg.device), targets.to(cfg.device)
         
+
+        ### Standardize targets ###
+
         if cfg.train.standardize_cumulants:
             raise NotImplementedError("Need to implement for computing optimal weights first")
             with torch.no_grad():
                 targets, cumulant_mean, cumulant_square_mean = standardize_targets(
                     targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
 
-        # Reset weights and optimizer states for recycled features
-        if cbp_tracker is not None:
-            pruned_idxs = cbp_tracker.prune_features()
-            total_pruned += sum([len(idxs) for idxs in pruned_idxs.values()])
 
-        feature_pruned = cbp_tracker and pruned_idxs.get(model.layers[-1], 0) > 0
-        if feature_pruned:
-            print('FEATURE PRUNED')
-            step_since_feature_pruned = 0
-            # When a feature is pruned, we need to calculate the new optimal weights
-            optimal_weights = compute_optimal_weights(task, model, criterion, cfg.device)
-        else:
-            step_since_feature_pruned += 1
-        
-        # Update the convergence tracker for each feature
-        weight_convergence_steps = compute_weight_convergence_steps(
-            model, optimal_weights, weight_convergence_steps, step) 
+        ### Update tracker for the newest feature ###
 
-        # convergence_threshold = OPTIMAL_WEIGHT_LOSS_THRESHOLD * np.mean(np.array(target_buffer) ** 2)
-        # prior_loss_avg = np.mean(recent_losses[:CONVERGENCE_STEPS // 2])
-        # recent_loss_avg = np.mean(recent_losses[CONVERGENCE_STEPS // 2:])
+        feature_utilities = cbp_tracker.get_statistics(feature_layer)['utility']
+        newest_feature_safe_at_step = get_feature_safe_step(
+            newest_feature_idx, newest_feature_safe_at_step, step, feature_utilities)
+    
+
+        ### Check for near-convergence ###
+
+        convergence_threshold = OPTIMAL_WEIGHT_LOSS_THRESHOLD * np.mean(np.array(target_buffer) ** 2)
+        prior_loss_avg = np.mean(recent_losses[:CONVERGENCE_STEPS // 2])
+        recent_loss_avg = np.mean(recent_losses[CONVERGENCE_STEPS // 2:])
         # print(f'Recent loss: {np.mean(recent_losses):.5f}, Std: {np.std(recent_losses):.5f}, Treshold: {convergence_threshold:.5f}, Prior loss: {prior_loss_avg:.5f}, Recent loss: {recent_loss_avg:.5f}')
-        # if len(recent_losses) >= CONVERGENCE_STEPS and prior_loss_avg - recent_loss_avg < convergence_threshold:
-        #     logger.info(f'Model converged in {step} steps with a loss of {np.mean(recent_losses):.5f}')
-        #     break
+        converged = (
+            len(recent_losses) >= CONVERGENCE_STEPS and
+            prior_loss_avg - recent_loss_avg < convergence_threshold
+        )
 
-        # Forward pass
+
+        ### Prune the lowest utility feature after convergence ###
+
+        if step > 0 and converged:
+            logger.info(f'Model converged in {step - CONVERGENCE_STEPS} steps with a loss of {np.mean(recent_losses):.5f}')
+            
+            # Prune the lowest utility feature
+
+        # Need to log (newest feature is really the previous feature that was added, and hence these need to be logged before that is updated):
+        # - How many steps it took for the newest feature to become safe or nan if it never did (prior feature)
+        # - Optimal weight of the newest feature
+        # - The feature's final weight
+        # - The total number of features in the same (final) layer
+        # - The L1 norm of the targets
+        # - The L2 norm of the targets
+        # - The convergent loss before the feature was added
+        # - The convergent loss after the feature was added
+        # - *At least the first three, just start with those for now*
+
+        if step > 0:
+            # Get the lowest utility feature
+            feature_layer = model.layers[-2]
+            feature_stats = cbp_tracker.get_statistics(feature_layer)
+            feature_utility = feature_stats['utility'] # shape: (n_features,)
+            prune_feature_idx = np.argmin(feature_utility)
+            prune_feature_value = feature_utility[prune_feature_idx]
+
+            # Log stats related to the feature being pruned and the newest feature
+            if newest_feature_idx is not None:
+                pass
+
+            newest_feature_added_at_step = step
+
+            # Prune the lowest utility feature
+            cbp_tracker._prune_layer(feature_layer, [prune_feature_idx])
+            total_pruned += 1
+
+            steps_since_feature_pruned = 0
+
+            print('a')
+
+
+        ### Forward pass ###
         
         outputs, param_inputs = model(features)
         loss = criterion(outputs, targets)
         recent_losses.append(loss.item())
         recent_losses = recent_losses[-CONVERGENCE_STEPS:]
 
-        # Backward pass
+
+        ### Backward pass ###
+
         optimizer.zero_grad()
         if isinstance(optimizer, IDBD):
             # Mean over batch dimension
@@ -249,12 +293,17 @@ def run_experiment(
             loss.backward()
             optimizer.step()
         
-        # Accumulate metrics
+    
+        ### Accumulate metrics ###
+
         loss_acc += loss.item()
         cumulative_loss += loss.item()
         n_steps_since_log += 1
+        steps_since_feature_pruned += 1
         
-        # Log metrics
+        
+        ### Log metrics ###
+
         if step % cfg.train.log_freq == 0:
             metrics = {
                 'step': step,
