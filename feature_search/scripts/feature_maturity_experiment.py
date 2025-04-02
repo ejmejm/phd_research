@@ -34,7 +34,7 @@ from run_experiment import *
 
 CONVERGENCE_N_SAMPLES = 1_000_000
 OPTIMAL_WEIGHT_LOSS_THRESHOLD = 0.0001
-OPTIMAL_WEIGHT_SIMILARITY_THRESHOLD = 0.02
+OPTIMAL_WEIGHT_SIMILARITY_THRESHOLD = 0.1 # 0.02
 CONVERGENCE_STEPS = 5000
 
 
@@ -233,6 +233,7 @@ def run_experiment(
         #     break
 
         # Forward pass
+        
         outputs, param_inputs = model(features)
         loss = criterion(outputs, targets)
         recent_losses.append(loss.item())
@@ -268,6 +269,7 @@ def run_experiment(
             metrics.update(get_model_statistics(model, features, param_inputs))
             wandb.log(metrics)
             
+            pbar.update(n_steps_since_log)
             pbar.set_postfix(loss=metrics['loss'], accuracy=metrics['accuracy'])
             
             # Reset accumulators
@@ -277,7 +279,6 @@ def run_experiment(
             target_buffer = []
 
         step += 1
-        pbar.update(1)
     
     pbar.close()
     wandb.finish()
