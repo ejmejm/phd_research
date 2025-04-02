@@ -436,7 +436,7 @@ class CBPTracker():
         self.incoming_weight_init = incoming_weight_init
         self.outgoing_weight_init = outgoing_weight_init
 
-    def track(self, previous, current, next):
+    def track(self, previous: nn.Module, current: nn.Module, next: nn.Module):
         """Track a list of layers used for CBP calculations."""
         if not isinstance(previous, nn.Linear) or not isinstance(next, nn.Linear):
             raise NotImplementedError('CBP is only implemented for linear layers.')
@@ -453,21 +453,21 @@ class CBPTracker():
         for i in range(0, len(sequential) - 2, 2):
             self.track(sequential[i], sequential[i+1], sequential[i+2])
 
-    def track_optimizer(self, optimizer):
+    def track_optimizer(self, optimizer: optim.Optimizer):
         """Track an optimizer for CBP calculations."""
         if self.optimizer is not None:
             warnings.warn("Replacing previously tracked optimizer.")
         self.optimizer = optimizer
 
-    def _get_input_weight_sums(self, layer):
+    def _get_input_weight_sums(self, layer: nn.Module) -> torch.Tensor:
         """Return the sum of the absolute values of the weights for each outputted feature."""
         return torch.sum(torch.abs(layer.weight), dim=1)
 
-    def _get_output_weight_sums(self, layer):
+    def _get_output_weight_sums(self, layer: nn.Module) -> torch.Tensor:
         """Return the sum of the absolute values of the weights for each inputted feature."""
         return torch.sum(torch.abs(layer.weight), dim=0)
 
-    def _reinit_input_weights(self, layer, idxs):
+    def _reinit_input_weights(self, layer: nn.Module, idxs: List[int]):
         """Reinitialize the weights that output features at the given indices."""
         # This is how linear layers are initialized in PyTorch
         if self.incoming_weight_init == 'kaiming_uniform':
@@ -490,7 +490,7 @@ class CBPTracker():
         else:
             raise ValueError(f'Invalid weight initialization: {self.incoming_weight_init}')
 
-    def _reset_input_optim_state(self, layer, idxs):
+    def _reset_input_optim_state(self, layer: nn.Module, idxs: List[int]):
         """
         Reset the optimizer state for the weights that output features at the given indices.
         Currently works for SGD and Adam (without step reset) optimizers.
@@ -526,7 +526,7 @@ class CBPTracker():
             if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
                 optim_state['beta'][idxs] = math.log(self.optimizer.init_lr)
 
-    def _reinit_output_weights(self, layer, idxs):
+    def _reinit_output_weights(self, layer: nn.Module, idxs: List[int]):
         """Reinitialize the weights that take in features at the given indices."""
         # This is how linear layers are initialized in PyTorch
         weight_data = layer.weight.data
@@ -539,7 +539,7 @@ class CBPTracker():
         else:
             raise ValueError(f'Invalid weight initialization: {self.outgoing_weight_init}')
     
-    def _reset_output_optim_state(self, layer, idxs):
+    def _reset_output_optim_state(self, layer: nn.Module, idxs: List[int]):
         """
         Reset the optimizer state for the weights that take in features at the given indices.
         Currently works for SGD and Adam optimizers.
@@ -560,9 +560,9 @@ class CBPTracker():
         if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
             optim_state['beta'][:, idxs] = math.log(self.optimizer.init_lr)
 
-    def _get_hook(self, layer):
+    def _get_hook(self, layer: nn.Module):
         """Return a hook function for a given layer."""
-        def track_cbp_stats(module, input, output):
+        def track_cbp_stats(module: nn.Module, input: torch.Tensor, output: torch.Tensor):
             if not module.training:
                 return
 
@@ -585,21 +585,21 @@ class CBPTracker():
 
         return track_cbp_stats
 
-    def _reset_feature_stats(self, layer, idxs):
+    def _reset_feature_stats(self, layer: nn.Module, idxs: List[int]):
         """Resets the feature stats for the given layer and indices."""
         median_utility = self._feature_stats[layer]['utility'].median()
         for key in self._feature_stats[layer]:
             self._feature_stats[layer][key][idxs] = 0
         self._feature_stats[layer]['utility'][idxs] = median_utility
 
-    def _step_replacement_accumulator(self, layer):
+    def _step_replacement_accumulator(self, layer: nn.Module):
         ages = self._feature_stats[layer]['age']
 
         # Get number of features to reset
         n_features = ages.numel()
         self._replace_accumulator[layer] += self.replace_rate * n_features
 
-    def _get_layer_prune_idxs(self, layer) -> List[int]:
+    def _get_layer_prune_idxs(self, layer: nn.Module) -> List[int]:
         """Get the indices of features to prune from the given layer."""
         # If there are not enough features to reset, return an empty list
         if self._replace_accumulator[layer] < 1:
@@ -622,7 +622,7 @@ class CBPTracker():
 
         return reset_idxs
     
-    def _prune_layer(self, layer, reset_idxs):
+    def _prune_layer(self, layer: nn.Module, reset_idxs: List[int]):
         if reset_idxs is None or len(reset_idxs) == 0:
             return
 
@@ -651,3 +651,7 @@ class CBPTracker():
             if layer_idxs is not None and len(layer_idxs) > 0:
                 reset_idxs[layer] = layer_idxs
         return reset_idxs
+    
+    def get_statistics(self, module: nn.Module) -> Dict[str, torch.Tensor]:
+        """Get the statistics for the given module."""
+        return self._feature_stats.get(module, {})
