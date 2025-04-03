@@ -275,9 +275,9 @@ def run_experiment(
                     'steps_until_safe': newest_feature_safe_at_step - newest_feature_added_at_step,
                     'optimal_utility': optimal_utilities[newest_feature_idx],
                     'utility_on_next_prune': feature_utilities[newest_feature_idx],
-                    'was_pruned': newest_feature_idx == prune_feature_idx,
-                    'should_prune': newest_feature_idx == optimal_prune_idx,
-                    'pruned_correct_feature': prune_feature_idx == optimal_prune_idx,
+                    'was_pruned': int(newest_feature_idx == prune_feature_idx),
+                    'should_prune': int(newest_feature_idx == optimal_prune_idx),
+                    'pruned_correct_feature': int(prune_feature_idx == optimal_prune_idx),
                     'total_pruned': total_pruned,
                 }
                 for k, v in stats.items():
