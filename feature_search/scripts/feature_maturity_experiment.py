@@ -7,7 +7,7 @@ as a function of the optimal utility of the feature and the number of other exis
 """
 
 
-from collections import OrderedDict
+from collections import defaultdict, OrderedDict
 import copy
 import logging
 import os
@@ -34,7 +34,8 @@ from run_experiment import *
 
 CONVERGENCE_N_SAMPLES = 1_000_000
 OPTIMAL_WEIGHT_LOSS_THRESHOLD = 0.0001
-CONVERGENCE_STEPS = 1000# 5000
+CONVERGENCE_CHANGE_THRESHOLD = 0.000001
+CONVERGENCE_STEPS = 5000
 
 
 logger = logging.getLogger(__name__)
@@ -83,12 +84,14 @@ def check_sequence_convergence(sequence: List[float], threshold: float = 0.01) -
     return np.std(sequence) < threshold
 
 
-def compute_optimal_weights(
+def compute_optimal_stats(
         task: NonlinearGEOFFTask,
         model: MLP,
         criterion: nn.Module,
         device: str,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute the optimal weights and utilities given the task and model structure."""
+
     original_device = next(model.parameters()).device
     model = copy.deepcopy(model)
     model.layers[1]._forward_hooks = OrderedDict() # Remove CBP hook
@@ -130,14 +133,24 @@ def compute_optimal_weights(
             scheduler.step()
             step += 1
 
-    logger.info(f'Model converged in {step} steps with a loss of {np.mean(loss_history):.5f}')
+    logger.info(f'Optimal model converged in {step} steps with a loss of {np.mean(loss_history):.5f}')
 
-    return model.layers[-1].weight.data.to(original_device)
+    with torch.no_grad():
+        weight_layer = model.layers[-1].weight
+        optimal_weights = weight_layer.data
+        feature_weight_sums = weight_layer.abs().sum(dim=0)
+
+        layer_inputs = param_inputs[weight_layer]
+        input_magnitudes = layer_inputs.abs().mean(dim=0)
+
+        optimal_utilities = input_magnitudes * feature_weight_sums
+
+    return optimal_weights.to(original_device), optimal_utilities.to(original_device)
 
 
 def get_feature_safe_step(
         newest_feature_idx: Optional[int],
-        newest_feature_safe_at_step: Optional[int],
+        newest_feature_safe_at_step: int,
         step: int,
         feature_utilities: torch.Tensor,
     ) -> Optional[int]:
@@ -147,10 +160,10 @@ def get_feature_safe_step(
     """
     if newest_feature_idx is not None:
         is_newest_feature_safe = feature_utilities.argmin() != newest_feature_idx
-        if is_newest_feature_safe and newest_feature_safe_at_step is None:
+        if is_newest_feature_safe and np.isnan(newest_feature_safe_at_step):
             newest_feature_safe_at_step = step
         elif not is_newest_feature_safe:
-            newest_feature_safe_at_step = None
+            newest_feature_safe_at_step = np.nan
     return newest_feature_safe_at_step
 
 
@@ -187,17 +200,13 @@ def run_experiment(
     newest_feature_added_at_step = None
     newest_feature_safe_at_step = np.nan
     feature_layer = model.layers[-2]
-    new_feature_stats = {
-        'steps_until_safe': [],
-        'optimal_utility': [],
-        'utility_on_next_prune': [],
-        'should_prune': [],
-        'was_pruned': [],
-    }
-    
+    new_feature_stats = defaultdict(list)
+
     # Buffers used to check for convergence
     recent_targets = []
     recent_losses = []
+
+    optimal_weights, optimal_utilities = compute_optimal_stats(task, model, criterion, cfg.device)
 
     while step < cfg.train.total_steps:
         
@@ -230,13 +239,13 @@ def run_experiment(
 
         ### Check for near-convergence ###
 
-        convergence_threshold = OPTIMAL_WEIGHT_LOSS_THRESHOLD * np.mean(np.array(target_buffer) ** 2)
+        convergence_threshold = CONVERGENCE_CHANGE_THRESHOLD * np.mean(np.array(target_buffer) ** 2)
         prior_loss_avg = np.mean(recent_losses[:CONVERGENCE_STEPS // 2])
         recent_loss_avg = np.mean(recent_losses[CONVERGENCE_STEPS // 2:])
         # print(f'Recent loss: {np.mean(recent_losses):.5f}, Std: {np.std(recent_losses):.5f}, Treshold: {convergence_threshold:.5f}, Prior loss: {prior_loss_avg:.5f}, Recent loss: {recent_loss_avg:.5f}')
         converged = (
             steps_since_feature_pruned >= CONVERGENCE_STEPS and
-            prior_loss_avg - recent_loss_avg < convergence_threshold
+            np.abs(prior_loss_avg - recent_loss_avg) < convergence_threshold
         )
 
 
@@ -244,16 +253,11 @@ def run_experiment(
 
 
         # Need to log (newest feature is really the previous feature that was added, and hence these need to be logged before that is updated):
-        # - How many steps it took for the newest feature to become safe or nan if it never did (prior feature)
-        # - Optimal weight of the newest feature
-        # - The feature's final weight
-        # - Whether the right feature was pruned?
         # - The total number of features in the same (final) layer
         # - The L1 norm of the targets
         # - The L2 norm of the targets
         # - The convergent loss before the feature was added
         # - The convergent loss after the feature was added
-        # - *At least the first three, just start with those for now*
 
         if step > 0 and converged:
             logger.info(
@@ -263,26 +267,37 @@ def run_experiment(
             
             # Get the lowest utility feature
             prune_feature_idx = np.argmin(feature_utilities)
-            # prune_feature_utility = feature_utilities[prune_feature_idx]
-            
-            # Log stats related to the last added feature
-            pass
 
             # Log stats related to the feature being pruned and the newest feature
             if newest_feature_idx is not None:
-                new_feature_stats['steps_until_safe'].append(steps_since_feature_pruned)
-                new_feature_stats['optimal_utility'].append(None) # TODO: Compute optimal utility
-                new_feature_stats['utility_on_next_prune'].append(feature_utilities[newest_feature_idx])
-                new_feature_stats['should_prune'].append(None) # TODO: Compute should prune
-                new_feature_stats['was_pruned'].append(prune_feature_idx == newest_feature_idx)
+                optimal_prune_idx = np.argmin(optimal_utilities)
+                stats = {
+                    'steps_until_safe': newest_feature_safe_at_step - newest_feature_added_at_step,
+                    'optimal_utility': optimal_utilities[newest_feature_idx],
+                    'utility_on_next_prune': feature_utilities[newest_feature_idx],
+                    'was_pruned': newest_feature_idx == prune_feature_idx,
+                    'should_prune': newest_feature_idx == optimal_prune_idx,
+                    'pruned_correct_feature': prune_feature_idx == optimal_prune_idx,
+                    'total_pruned': total_pruned,
+                }
+                for k, v in stats.items():
+                    new_feature_stats[k].append(v)
+
+                if cfg.wandb:
+                    wandb.log(stats)
             
             # Prune the lowest utility feature
             cbp_tracker._prune_layer(feature_layer, [prune_feature_idx])
+            newest_feature_idx = prune_feature_idx
             total_pruned += 1
             newest_feature_added_at_step = step
+            newest_feature_safe_at_step = np.nan
             steps_since_feature_pruned = 0
 
-            logger.info(f'Pruned feature {prune_feature_idx} at step {step}')
+            logger.info(f'Pruned feature {prune_feature_idx} after {step - newest_feature_added_at_step} steps')
+
+            # Update the optimal weights and utilities
+            optimal_weights, optimal_utilities = compute_optimal_stats(task, model, criterion, cfg.device)
 
         ### Forward pass ###
         
@@ -348,6 +363,7 @@ def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_experiment(cfg)
+    cbp_tracker._utility_reset_mode = 'zero'
 
     run_experiment(cfg, task, task_iterator, model, criterion, optimizer, cbp_tracker)
 

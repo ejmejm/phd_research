@@ -420,9 +420,10 @@ class CBPTracker():
         maturity_threshold = 100,
         incoming_weight_init = 'kaiming_uniform', # {'kaiming_uniform', 'binary'}
         outgoing_weight_init = 'zeros', # {'zeros', 'kaiming_uniform'}
+        utility_reset_mode = 'median', # {'median', 'zero'}
     ):
         assert optimizer is None or isinstance(optimizer, (Adam, IDBD, torch.optim.SGD))
-        
+        assert utility_reset_mode in {'median', 'zero'}
         # Dictionary mapping feature output layer to previous and next layers
         self._tracked_layers = {}
         self._feature_stats = {}
@@ -435,6 +436,7 @@ class CBPTracker():
         self.maturity_threshold = maturity_threshold
         self.incoming_weight_init = incoming_weight_init
         self.outgoing_weight_init = outgoing_weight_init
+        self._utility_reset_mode = utility_reset_mode
 
     def track(self, previous: nn.Module, current: nn.Module, next: nn.Module):
         """Track a list of layers used for CBP calculations."""
@@ -590,7 +592,11 @@ class CBPTracker():
         median_utility = self._feature_stats[layer]['utility'].median()
         for key in self._feature_stats[layer]:
             self._feature_stats[layer][key][idxs] = 0
-        self._feature_stats[layer]['utility'][idxs] = median_utility
+
+        if self._utility_reset_mode == 'median':
+            self._feature_stats[layer]['utility'][idxs] = median_utility
+        elif self._utility_reset_mode == 'zero':
+            self._feature_stats[layer]['utility'][idxs] = 0
 
     def _step_replacement_accumulator(self, layer: nn.Module):
         ages = self._feature_stats[layer]['age']

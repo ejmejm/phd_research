@@ -1,4 +1,5 @@
 import math
+from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -179,7 +180,7 @@ class MLP(nn.Module):
         else:
             raise ValueError(f'Invalid weight initialization method: {method}')
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, Dict[nn.Module, torch.Tensor]]:
         param_inputs = {}
         for i in range(0, len(self.layers) - 2, 2):
             param_inputs[self.layers[i].weight] = x
