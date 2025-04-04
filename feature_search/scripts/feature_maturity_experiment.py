@@ -101,37 +101,40 @@ def compute_optimal_stats(
     inputs = inputs.to(device)
     targets = targets.to(device)
 
-    avg_squared_target = targets.square().mean().item()
     loss = np.inf
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     n_features = model.layers[-1].in_features
     init_lr = 1.0 / np.sqrt(n_features)
-    optimizer = torch.optim.Adam(trainable_params, lr=init_lr)
-    scheduler = torch.optim.lr_scheduler.LinearLR(
+    optimizer = torch.optim.SGD(trainable_params, lr=init_lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        start_factor = 1.0,
-        end_factor = 0.01,
-        total_iters = 1000,
+        mode = 'min',
+        factor = 0.5,
+        patience = 10,
+        verbose = False,
     )
-    
     loss_history = []
     step = 0
-    convergence_threshold = OPTIMAL_WEIGHT_LOSS_THRESHOLD * avg_squared_target
-    while len(loss_history) < 10 or not check_sequence_convergence(loss_history, convergence_threshold):
+    min_lr = init_lr * 0.001
+    
+    while True:
         # Compute optimal weights
         outputs, param_inputs = model(inputs)
         loss = criterion(outputs, targets)
         loss_history.append(loss.item())
         loss_history = loss_history[-10:]
 
+        scheduler.step(loss.item())
+        
+        # Stop if learning rate gets too small
+        if optimizer.param_groups[0]['lr'] <= min_lr:
+            break
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        
-        if step < 1000:
-            scheduler.step()
-            step += 1
+        step += 1
 
     logger.info(f'Optimal model converged in {step} steps with a loss of {np.mean(loss_history):.5f}')
 
