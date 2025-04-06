@@ -13,7 +13,7 @@ import logging
 import os
 import sys
 from typing import Iterator, List, Tuple
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np
 import torch
@@ -30,12 +30,10 @@ from idbd import IDBD, RMSPropIDBD
 from models import LTU
 from tasks import NonlinearGEOFFTask
 from run_experiment import *
-from feature_maturity_experiment import *
+from scripts.feature_maturity_experiment import *
 
 
 CONVERGENCE_N_SAMPLES = 1_000_000
-CONVERGENCE_CHANGE_THRESHOLD = 0.000001
-CONVERGENCE_STEPS = 5000
 
 
 logger = logging.getLogger(__name__)
@@ -150,7 +148,7 @@ def run_experiment(
     wandb.finish()
 
 
-@hydra.main(config_path='../conf', config_name='feature_maturity_defaults')
+@hydra.main(config_path='../../conf', config_name='feature_maturity_defaults')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \

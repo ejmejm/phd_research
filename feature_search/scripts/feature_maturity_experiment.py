@@ -33,7 +33,6 @@ from run_experiment import *
 
 
 CONVERGENCE_N_SAMPLES = 1_000_000
-OPTIMAL_WEIGHT_LOSS_THRESHOLD = 0.0001
 CONVERGENCE_CHANGE_THRESHOLD = 0.000001
 CONVERGENCE_STEPS = 5000
 
@@ -200,7 +199,7 @@ def run_experiment(
 
     # New feature stats
     newest_feature_idx = None
-    newest_feature_added_at_step = None
+    newest_feature_added_at_step = 0
     newest_feature_safe_at_step = np.nan
     feature_layer = model.layers[-2]
     new_feature_stats = defaultdict(list)
@@ -289,6 +288,8 @@ def run_experiment(
                 if cfg.wandb:
                     wandb.log(stats)
             
+            logger.info(f'Pruned feature {prune_feature_idx} after {step - newest_feature_added_at_step} steps')
+            
             # Prune the lowest utility feature
             cbp_tracker._prune_layer(feature_layer, [prune_feature_idx])
             newest_feature_idx = prune_feature_idx
@@ -296,8 +297,6 @@ def run_experiment(
             newest_feature_added_at_step = step
             newest_feature_safe_at_step = np.nan
             steps_since_feature_pruned = 0
-
-            logger.info(f'Pruned feature {prune_feature_idx} after {step - newest_feature_added_at_step} steps')
 
             # Update the optimal weights and utilities
             optimal_weights, optimal_utilities = compute_optimal_stats(task, model, criterion, cfg.device)
