@@ -160,11 +160,10 @@ class MLP(nn.Module):
                 layer.bias.requires_grad = False
         
         # Initialize weights
-        self._initialize_weights(weight_init_method)
+        self._initialize_weights(self.layers[0], weight_init_method)
     
-    def _initialize_weights(self, method: str):
+    def _initialize_weights(self, layer: nn.Module, method: str):
         """Initialize weights according to specified method."""
-        layer = self.layers[0]
         if method == 'zeros':
             nn.init.zeros_(layer.weight)
             if layer.bias is not None:
