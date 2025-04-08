@@ -91,6 +91,11 @@ def run_experiment(
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
             }
+
+            if pruned_newest_feature is not None:
+                metrics['pruned_newest_feature'] = int(pruned_newest_feature)
+                pruned_newest_feature = None
+
             # Add model statistics
             metrics.update(get_model_statistics(model, features, param_inputs))
             wandb.log(metrics)
