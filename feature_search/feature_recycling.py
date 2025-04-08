@@ -659,9 +659,9 @@ class CBPTracker():
         for layer in self._tracked_layers.keys():
             self._step_replacement_accumulator(layer)
             layer_reset_idxs = self._get_layer_prune_idxs(layer)
-            layer_idxs = self._prune_layer(layer, layer_reset_idxs)
-            if layer_idxs is not None and len(layer_idxs) > 0:
-                reset_idxs[layer] = layer_idxs
+            self._prune_layer(layer, layer_reset_idxs)
+            if layer_reset_idxs is not None and len(layer_reset_idxs) > 0:
+                reset_idxs[layer] = layer_reset_idxs
         return reset_idxs
     
     def get_statistics(self, module: nn.Module) -> Dict[str, torch.Tensor]:
