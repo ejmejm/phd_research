@@ -171,7 +171,7 @@ def standardize_targets(
     return targets, cumulant_mean, cumulant_square_mean
 
 
-def prepare_components(cfg: DictConfig):
+def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     """Prepare the components based on configuration."""
     set_seed(cfg.seed)
     
@@ -187,16 +187,18 @@ def prepare_components(cfg: DictConfig):
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
     # Initialize model and optimizer
-    model = MLP(
-        input_dim=cfg.task.n_features,
-        output_dim=cfg.model.output_dim,
-        n_layers=cfg.model.n_layers,
-        hidden_dim=cfg.model.hidden_dim,
-        weight_init_method=cfg.model.weight_init_method,
-        activation=cfg.model.activation,
-        n_frozen_layers=cfg.model.n_frozen_layers,
-        device=cfg.device
-    ).to(cfg.device)
+    if model is None:
+        model = MLP(
+            input_dim=cfg.task.n_features,
+            output_dim=cfg.model.output_dim,
+            n_layers=cfg.model.n_layers,
+            hidden_dim=cfg.model.hidden_dim,
+            weight_init_method=cfg.model.weight_init_method,
+            activation=cfg.model.activation,
+            n_frozen_layers=cfg.model.n_frozen_layers,
+            device=cfg.device
+        )
+    model.to(cfg.device)
     
     criterion = (nn.CrossEntropyLoss() if cfg.task.type == 'classification'
                 else nn.MSELoss())
