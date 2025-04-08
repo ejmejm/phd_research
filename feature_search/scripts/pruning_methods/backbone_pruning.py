@@ -37,12 +37,13 @@ def run_experiment(
     step = 0
     prev_pruned_idx = np.nan
     prune_layer = model.layers[-2]
-    pruned_newest_feature = None
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
 
     # Initialize accumulators
     cumulative_loss = np.float128(0.0)
-    loss_acc = 0.0
+    loss_accum = 0.0
+    pruned_accum = 0
+    pruned_newest_feature_accum = 0
     n_steps_since_log = 0
     total_pruned = 0
     target_buffer = []
@@ -57,10 +58,17 @@ def run_experiment(
         # Reset weights and optimizer states for recycled features
         if cbp_tracker is not None:
             pruned_idxs = cbp_tracker.prune_features()
-            total_pruned += sum([len(idxs) for idxs in pruned_idxs.values()])
+            n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
+            total_pruned += n_pruned
+
+            if n_pruned > 1:
+                raise Exception("More than one feature was pruned! This would make the logging invalid.")
+
             if prune_layer in pruned_idxs and len(pruned_idxs[prune_layer]) > 0:
                 new_pruned_idx = pruned_idxs[prune_layer][0]
-                pruned_newest_feature = new_pruned_idx == prev_pruned_idx
+                pruned_accum += 1
+                pruned_newest_feature_accum += int(new_pruned_idx == prev_pruned_idx)
+                prev_pruned_idx = new_pruned_idx
         
         # Forward pass
         outputs, param_inputs = model(features)
@@ -77,7 +85,7 @@ def run_experiment(
             optimizer.step()
         
         # Accumulate metrics
-        loss_acc += loss.item()
+        loss_accum += loss.item()
         cumulative_loss += loss.item()
         n_steps_since_log += 1
         
@@ -86,40 +94,41 @@ def run_experiment(
             metrics = {
                 'step': step,
                 'samples': step * cfg.train.batch_size,
-                'loss': loss_acc / n_steps_since_log,
+                'loss': loss_accum / n_steps_since_log,
                 'cumulative_loss': cumulative_loss,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
             }
 
-            if pruned_newest_feature is not None:
-                metrics['pruned_newest_feature'] = int(pruned_newest_feature)
-                pruned_newest_feature = None
+            if pruned_accum > 0:
+                metrics['fraction_pruned_were_new'] = pruned_newest_feature_accum / pruned_accum
+                pruned_newest_feature_accum = 0
+                pruned_accum = 0
 
             # Add model statistics
             metrics.update(get_model_statistics(model, features, param_inputs))
             wandb.log(metrics)
             
-            pbar.set_postfix(loss=metrics['loss'], accuracy=metrics['accuracy'])
+            pbar.set_postfix(loss=metrics['loss'])
+            pbar.update(cfg.train.log_freq)
             
             # Reset accumulators
-            loss_acc = 0.0
+            loss_accum = 0.0
             n_steps_since_log = 0
             target_buffer = []
 
         step += 1
-        pbar.update(1)
 
     pbar.close()
     wandb.finish()
 
 
-@hydra.main(config_path='../../conf', config_name='feature_maturity_defaults')
+@hydra.main(config_path='../../conf', config_name='rupam_task')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_experiment(cfg)
-    cbp_tracker._utility_reset_mode = 'zero' # TODO: Decide if I want to use zero reset mode or not
+    # cbp_tracker._utility_reset_mode = 'zero' # TODO: Decide if I want to use zero reset mode or not
 
     run_experiment(cfg, task, task_iterator, model, criterion, optimizer, cbp_tracker)
 
