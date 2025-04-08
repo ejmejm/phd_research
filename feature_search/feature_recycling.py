@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
+import logging
 import math
 import random
 from typing import Any, Dict, List, Sequence, Tuple, Union
@@ -17,6 +18,9 @@ from models import MLP
 
 
 EPSILON = 1e-8
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -589,14 +593,17 @@ class CBPTracker():
 
     def _reset_feature_stats(self, layer: nn.Module, idxs: List[int]):
         """Resets the feature stats for the given layer and indices."""
-        median_utility = self._feature_stats[layer]['utility'].median()
         for key in self._feature_stats[layer]:
             self._feature_stats[layer][key][idxs] = 0
 
-        if self._utility_reset_mode == 'median':
-            self._feature_stats[layer]['utility'][idxs] = median_utility
-        elif self._utility_reset_mode == 'zero':
-            self._feature_stats[layer]['utility'][idxs] = 0
+        if 'utility' in self._feature_stats[layer]:
+            median_utility = self._feature_stats[layer]['utility'].median()
+            if self._utility_reset_mode == 'median':
+                self._feature_stats[layer]['utility'][idxs] = median_utility
+            elif self._utility_reset_mode == 'zero':
+                self._feature_stats[layer]['utility'][idxs] = 0
+        else:
+            logger.warning(f'Utility stats not found for layer {layer}')
 
     def _step_replacement_accumulator(self, layer: nn.Module):
         ages = self._feature_stats[layer]['age']
