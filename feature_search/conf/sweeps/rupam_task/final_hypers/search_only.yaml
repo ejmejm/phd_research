@@ -1,0 +1,96 @@
+program: scripts/rupam_experiment.py
+method: grid
+project: feature_recycling-rupam_task-final_hypers
+name: search_only
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=nonlinear_geoff.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  wandb:
+    value: True
+  device:
+    value: cuda
+  
+  task.n_real_features:
+    value: 20
+  task.n_features:
+    value: 20
+  task.flip_rate:
+    value: 0.0
+  task.weight_scale:
+    value: 1.0
+  task.n_layers:
+    value: 2
+  task.hidden_dim:
+    value: 20
+  task.weight_init:
+    value: binary
+  task.activation:
+    value: ltu
+  task.sparsity:
+    value: 0.0
+  task.n_stationary_layers:
+    value: 1
+
+  input_recycling.use_cbp_utility:
+    value: False
+  input_recycling.distractor_chance:
+    value: 0.0
+  input_recycling.recycle_rate:
+    value: 0.0
+
+  feature_recycling.use_cbp_utility:
+    value: True
+  feature_recycling.utility_decay:
+    value: 0.99
+  feature_recycling.recycle_rate:
+    value: 0.00005
+  feature_recycling.feature_protection_steps:
+    value: 500
+
+  train.total_steps:
+    value: 3000000
+  train.log_freq:
+    value: 100
+  train.batch_size:
+    value: 1
+  train.optimizer:
+    value: idbd
+  train.standardize_cumulants:
+    value: False
+
+  model.n_layers:
+    value: 2
+  model.weight_init_method:
+    value: binary
+  model.hidden_dim:
+    value: 100
+  model.n_frozen_layers:
+    value: 1
+  model.activation:
+    value: ltu
+
+  # IDBD parameters
+  idbd.version:
+    value: squared_grads
+  idbd.autostep:
+    value: true
+
+  idbd.meta_learning_rate:
+    value: 0.0005
+  train.learning_rate:
+    value: 0.001
+  seed:
+    values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
