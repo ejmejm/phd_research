@@ -62,7 +62,11 @@ def run_experiment(
             total_pruned += n_pruned
 
             if n_pruned > 1:
-                raise Exception("More than one feature was pruned! This would make the logging invalid.")
+                prev_pruned_idx = np.nan
+                logger.warning(
+                    "More than one feature was pruned! "
+                    "Logging if the newest feature was pruned will not work."
+                )
 
             if prune_layer in pruned_idxs and len(pruned_idxs[prune_layer]) > 0:
                 new_pruned_idx = pruned_idxs[prune_layer][0]
@@ -128,7 +132,6 @@ def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_experiment(cfg)
-    # cbp_tracker._utility_reset_mode = 'zero' # TODO: Decide if I want to use zero reset mode or not
 
     run_experiment(cfg, task, task_iterator, model, criterion, optimizer, cbp_tracker)
 
