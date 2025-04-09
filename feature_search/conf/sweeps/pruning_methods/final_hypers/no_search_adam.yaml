@@ -1,0 +1,48 @@
+program: scripts/pruning_methods/backbone_pruning.py
+method: grid
+project: feature_recycling-rupam_task_pruning_methods-final_hypers
+name: no_pruning_adam
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=rupam_task.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  wandb:
+    value: True
+  device:
+    value: cuda
+
+  feature_recycling.use_cbp_utility:
+    value: False
+
+  train.total_steps:
+    value: 300000
+  train.optimizer:
+    value: adam
+
+  train.learning_rate:
+    value: "\"${eval:0.0015 / ${model.hidden_dim} ** 0.5}\"" # [0.00001, 0.00005, 0.0001, 0.0005, 0.001]
+  model.hidden_dim:
+    values: [20, 80, 320, 1280, 5120, 20480]
+  seed:
+    values: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+
+# Ideal step-sizes:
+# 20 -> 0.00005-0.001 (0.0001)
+# 80 -> 0.00005-0.001 (0.0001)
+# 320 -> 0.00005-0.0005 (0.0001)
+# 1280 -> 0.00005-0.0001 (0.00005)
+# 5120 -> 0.00001-0.00005 (0.00001)
+# 20480 -> 0.000005-0.00001 (0.00001)
+# Trend ~= 0.0015 / sqrt(hidden_dim)
