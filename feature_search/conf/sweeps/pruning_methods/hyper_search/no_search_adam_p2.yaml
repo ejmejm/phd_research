@@ -1,7 +1,7 @@
 program: scripts/pruning_methods/backbone_pruning.py
 method: grid
 project: feature_recycling-rupam_task_pruning_methods-hyper_search
-name: no_pruning_adam
+name: no_pruning_adam_20480
 
 
 command:
@@ -27,16 +27,16 @@ parameters:
     value: False
 
   train.total_steps:
-    value: 500000
+    value: 250000
   train.optimizer:
     value: adam
 
   train.learning_rate:
-    values: [0.00001, 0.00005, 0.0001, 0.0005, 0.001]
+    values: [0.000001, 0.000005, 0.00001]
   model.hidden_dim:
-    values: [20, 80, 320, 1280, 5120, 20480]
+    value: 20480
   seed:
-    values: [1, 2, 3]
+    values: [1, 2]
 
 # Ideal step-sizes:
 # 20 -> 0.00005-0.001 (0.0001)
@@ -44,5 +44,4 @@ parameters:
 # 320 -> 0.00005-0.0005 (0.0001)
 # 1280 -> 0.00005-0.0001 (0.00005)
 # 5120 -> 0.00001-0.00005 (0.00001)
-# 20480 -> 0.000005-0.00001 (0.00001)
-# Trend ~= 0.0015 / sqrt(hidden_dim)
+# 20480 -> <=0.00001 (0.00001)
