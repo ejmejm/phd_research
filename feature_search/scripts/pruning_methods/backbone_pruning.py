@@ -35,7 +35,7 @@ def run_experiment(
 
     # Training loop
     step = 0
-    prev_pruned_idx = np.nan
+    prev_pruned_idxs = set()
     prune_layer = model.layers[-2]
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
 
@@ -61,18 +61,11 @@ def run_experiment(
             n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
             total_pruned += n_pruned
 
-            if n_pruned > 1:
-                prev_pruned_idx = np.nan
-                logger.warning(
-                    "More than one feature was pruned! "
-                    "Logging if the newest feature was pruned will not work."
-                )
-
             if prune_layer in pruned_idxs and len(pruned_idxs[prune_layer]) > 0:
-                new_pruned_idx = pruned_idxs[prune_layer][0]
-                pruned_accum += 1
-                pruned_newest_feature_accum += int(new_pruned_idx == prev_pruned_idx)
-                prev_pruned_idx = new_pruned_idx
+                pruned_accum += len(pruned_idxs[prune_layer])
+                for new_pruned_idx in pruned_idxs[prune_layer]:
+                    pruned_newest_feature_accum += int(new_pruned_idx in prev_pruned_idxs)
+                prev_pruned_idxs = set(pruned_idxs[prune_layer])
         
         # Forward pass
         outputs, param_inputs = model(features)
