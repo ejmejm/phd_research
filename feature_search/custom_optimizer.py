@@ -6,6 +6,7 @@ from torch import Tensor
 from torch.optim.optimizer import Optimizer, ParamsT
 
 
+# Adam-like optimizer but with per-parameter step sizes
 class CustomizableOptimizer(Optimizer):
     def __init__(
         self,
