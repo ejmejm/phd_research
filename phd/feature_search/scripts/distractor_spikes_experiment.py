@@ -13,9 +13,9 @@ import hydra
 import omegaconf
 from omegaconf import DictConfig
 
-from idbd import IDBD, RMSPropIDBD
-from models import MLP
-from experiment_helpers import *
+from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
+from phd.feature_search.core.models import MLP
+from phd.feature_search.core.experiment_helpers import *
 
 
 def get_model_statistics(model: MLP, param_inputs: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -107,6 +107,7 @@ def main(cfg: DictConfig) -> None:
         utility_decay=cfg.input_recycling.utility_decay,
         use_cbp_utility=cfg.input_recycling.use_cbp_utility,
         feature_protection_steps=cfg.input_recycling.feature_protection_steps,
+        std_normal_distractors_only=cfg.task.std_normal_distractors_only,
         device=cfg.device,
     )
     
@@ -134,6 +135,19 @@ def main(cfg: DictConfig) -> None:
             first_layer_weights=model.get_first_layer_weights(),
             step_num=step
         )
+        
+        # For each real feature, force its weights to be force_real_weight_val * target weight value
+        if cfg.train.get('force_real_weight_val') is not None:
+            # Get first layer weights
+            first_layer = model.layers[0]
+            with torch.no_grad():
+                real_indices = [i for i, f in recycler.features.items() if f.is_real]
+                for i, real_idx in enumerate(real_indices):
+                    # Get the target weight for this real feature
+                    target_idx = recycler.features[real_idx].distribution_params['feature_idx']
+                    target_weight = task.weights[target_idx]
+                    # Force weight to be force_real_weight_val * target weight
+                    first_layer.weight[:, real_idx] = cfg.train.force_real_weight_val * target_weight
 
         # Reset weights and optimizer states for recycled features
         reset_feature_weights(recycled_features, model, optimizer, cfg)
@@ -148,10 +162,22 @@ def main(cfg: DictConfig) -> None:
         if isinstance(optimizer, RMSPropIDBD):
             loss.backward(create_graph=True)
             optimizer.step(param_inputs)
+            if cfg.train.normalize_loss:
+                raise NotImplementedError('Normalize loss not supported for RMSPropIDBD')
         elif isinstance(optimizer, IDBD):
             optimizer.step(loss, outputs, param_inputs)
+            if cfg.train.normalize_loss:
+                raise NotImplementedError('Normalize loss not supported for IDBD')
         else:
             loss.backward()
+            if cfg.train.normalize_loss:
+                with torch.no_grad():
+                    delta = (targets - outputs).mean().detach()
+                    if delta.abs() != 0:
+                        for param in model.parameters():
+                            if param.grad is not None:
+                                assert (param.grad == -2 * (delta.squeeze() * features)).all()
+                                param.grad.data = param.grad.data / delta.abs()
             optimizer.step()
         
         # Accumulate metrics

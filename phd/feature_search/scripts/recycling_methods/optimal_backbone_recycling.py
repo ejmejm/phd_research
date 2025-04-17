@@ -10,10 +10,7 @@ as a function of the optimal utility of the feature and the number of other exis
 from collections import defaultdict, OrderedDict
 import copy
 import logging
-import os
-import sys
 from typing import Iterator, List, Tuple
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np
 import torch
@@ -25,12 +22,12 @@ import wandb
 import hydra
 from omegaconf import DictConfig
 
-from feature_recycling import reset_input_weights
-from idbd import IDBD, RMSPropIDBD
-from models import LTU
-from tasks import NonlinearGEOFFTask
-from run_experiment import *
-from scripts.feature_maturity_experiment import *
+from phd.feature_search.core.feature_recycling import reset_input_weights
+from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
+from phd.feature_search.core.models import LTU
+from phd.feature_search.core.tasks import NonlinearGEOFFTask
+from phd.feature_search.core.experiment_helpers import *
+from phd.feature_search.scripts.feature_maturity_experiment import *
 
 
 CONVERGENCE_N_SAMPLES = 1_000_000

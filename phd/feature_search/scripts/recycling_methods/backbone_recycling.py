@@ -1,8 +1,5 @@
 import logging
-import os
-import sys
 from typing import Iterator, Tuple
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import numpy as np
 import torch
@@ -14,10 +11,10 @@ import wandb
 import hydra
 from omegaconf import DictConfig
 
-from idbd import IDBD
-from tasks import NonlinearGEOFFTask
-from experiment_helpers import *
-from scripts.feature_maturity_experiment import *
+from phd.feature_search.core.idbd import IDBD
+from phd.feature_search.core.tasks import NonlinearGEOFFTask
+from phd.feature_search.core.experiment_helpers import *
+from phd.feature_search.scripts.feature_maturity_experiment import *
 
 
 logger = logging.getLogger(__name__)

@@ -11,11 +11,11 @@ import wandb
 import omegaconf
 from omegaconf import DictConfig
 
-from adam import Adam
-from feature_recycling import InputRecycler, CBPTracker
-from idbd import IDBD, RMSPropIDBD
-from models import MLP
-from tasks import DummyTask, GEOFFTask, NonlinearGEOFFTask
+from .adam import Adam
+from .feature_recycling import InputRecycler, CBPTracker
+from .idbd import IDBD, RMSPropIDBD
+from .models import MLP
+from .tasks import DummyTask, GEOFFTask, NonlinearGEOFFTask
 
 
 omegaconf.OmegaConf.register_new_resolver('eval', lambda x: eval(str(x)))

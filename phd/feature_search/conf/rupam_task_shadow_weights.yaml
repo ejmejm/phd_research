@@ -1,0 +1,6 @@
+defaults:
+  - rupam_task
+  - _self_
+
+model:
+  fraction_shadow_units: 0.5

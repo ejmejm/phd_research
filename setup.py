@@ -1,10 +1,9 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="phd_research",
+    name="phd",
     version="0.1.0",
-    package_dir={"": "src"},
-    packages=find_packages(where="src"),
+    packages=find_packages(),
     author="Edan Meyer",
     author_email="ejmejm98@gmail.com",
     description="Research for my PhD, mainly on the discovery problem",

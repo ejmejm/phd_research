@@ -1,0 +1,54 @@
+program: scripts/pruning_methods/backbone_pruning.py
+method: grid
+project: feature_recycling-rupam_task_pruning_methods-hyper_search
+name: backbone_search_v3_protection_steps
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=rupam_task.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  wandb:
+    value: True
+  device:
+    value: cuda
+
+  feature_recycling.use_cbp_utility:
+    value: True
+  feature_recycling.utility_decay:
+    value: 0.99
+  feature_recycling.recycle_rate:
+    value: 0.005
+
+  train.total_steps:
+    value: 200000
+  train.optimizer:
+    value: idbd
+  train.learning_rate:
+    value: "\"${eval:0.03 / ${model.hidden_dim} ** 0.75}\""
+  
+  # IDBD parameters
+  idbd.version:
+    value: squared_grads
+  idbd.autostep:
+    value: true
+  idbd.meta_learning_rate:
+    value: 0.005
+
+  feature_recycling.feature_protection_steps:
+    values: [0, 20, 50, 100, 150, 180]
+
+  model.hidden_dim:
+    values: [80, 1280, 20480] # [20, 80, 320, 1280, 5120, 20480]
+  seed:
+    values: [2, 3]

@@ -12,9 +12,9 @@ import torch
 from torch import nn
 import torch.optim as optim
 
-from adam import Adam
-from idbd import IDBD, RMSPropIDBD
-from models import MLP
+from .adam import Adam
+from .idbd import IDBD, RMSPropIDBD
+from .models import MLP
 
 
 EPSILON = 1e-8

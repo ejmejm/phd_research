@@ -11,16 +11,47 @@ import wandb
 import hydra
 from omegaconf import DictConfig
 
-from feature_recycling import reset_input_weights
-from idbd import IDBD, RMSPropIDBD
-from experiment_helpers import *
+from phd.feature_search.core.feature_recycling import reset_input_weights
+from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
+from phd.feature_search.core.models import LTU
+from phd.feature_search.core.tasks import NonlinearGEOFFTask
+from phd.feature_search.core.experiment_helpers import *
 
 
-@hydra.main(config_path='conf', config_name='defaults')
+@hydra.main(config_path='../conf', config_name='defaults')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_components(cfg)
+
+    assert isinstance(task, NonlinearGEOFFTask)
+    
+    assert cfg.model.weight_init_method == 'binary', \
+        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
+    assert cfg.task.weight_init == 'binary', \
+        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
+    assert cfg.model.activation == 'ltu', \
+        "LTU activations are required for reproducing Mahmood and Sutton (2013)"
+    assert cfg.task.activation == 'ltu', \
+        "LTU activations are required for reproducing Mahmood and Sutton (2013)"
+
+    if cbp_tracker is not None:
+        cbp_tracker.incoming_weight_init = 'binary'
+    
+    # Init target output weights to kaiming uniform and predictor output weights to zero
+    torch.nn.init.kaiming_uniform_(
+        task.weights[-1],
+        mode = 'fan_in',
+        nonlinearity = 'linear',
+    )
+    torch.nn.init.zeros_(model.layers[-1].weight)
+    
+    # Change LTU threshold for target and predictors
+    ltu_threshold = 0.1 * cfg.task.n_features
+    for layer in model.layers:
+        if isinstance(layer, LTU):
+            layer.threshold = ltu_threshold
+    task.activation_fn.threshold = ltu_threshold
 
     # Training loop
     step = 0
@@ -41,15 +72,7 @@ def main(cfg: DictConfig) -> None:
         # Generate batch of data
         inputs, targets = next(task_iterator)
         target_buffer.extend(targets.view(-1).tolist())
-        inputs, targets = inputs.to(cfg.device), targets.to(cfg.device)
-        
-        # Get recycled features
-        features, recycled_features = recycler.step(
-            batch_size=inputs.size(0),
-            real_features=inputs,
-            first_layer_weights=model.get_first_layer_weights(),
-            step_num=step
-        )
+        features, targets = inputs.to(cfg.device), targets.to(cfg.device)
         
         if cfg.train.standardize_cumulants:
             with torch.no_grad():
@@ -57,7 +80,6 @@ def main(cfg: DictConfig) -> None:
                     targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
 
         # Reset weights and optimizer states for recycled features
-        reset_input_weights(recycled_features, model, optimizer, cfg)
         if cbp_tracker is not None:
             pruned_idxs = cbp_tracker.prune_features()
             total_pruned += sum([len(idxs) for idxs in pruned_idxs.values()])
@@ -65,6 +87,8 @@ def main(cfg: DictConfig) -> None:
         # Forward pass
         outputs, param_inputs = model(features)
         loss = criterion(outputs, targets)
+        
+        # loss += torch.randn_like(loss)
 
         # Backward pass
         optimizer.zero_grad()
@@ -103,8 +127,6 @@ def main(cfg: DictConfig) -> None:
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
             }
-            # Add recycler statistics
-            metrics.update(recycler.get_statistics(step, model, optimizer))
             # Add model statistics
             metrics.update(get_model_statistics(model, features, param_inputs))
             wandb.log(metrics)

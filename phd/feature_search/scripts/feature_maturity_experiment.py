@@ -25,11 +25,11 @@ import wandb
 import hydra
 from omegaconf import DictConfig
 
-from feature_recycling import reset_input_weights
-from idbd import IDBD, RMSPropIDBD
-from models import LTU
-from tasks import NonlinearGEOFFTask
-from experiment_helpers import *
+from phd.feature_search.core.feature_recycling import reset_input_weights
+from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
+from phd.feature_search.core.models import LTU
+from phd.feature_search.core.tasks import NonlinearGEOFFTask
+from phd.feature_search.core.experiment_helpers import *
 
 
 CONVERGENCE_N_SAMPLES = 1_000_000
