@@ -1,5 +1,5 @@
 import math
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -45,6 +45,7 @@ class ParallelLinear(nn.Module):
         out_features: Size of each output sample
         n_parallel: Number of parallel weight matrices
         bias: If True, adds a learnable bias to the output
+        generator: Optional random generator for reproducibility
     """
     
     def __init__(
@@ -52,12 +53,14 @@ class ParallelLinear(nn.Module):
         in_features: int,
         out_features: int,
         n_parallel: int,
-        bias: bool = True
+        bias: bool = True,
+        generator: Optional[torch.Generator] = None
     ) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.n_parallel = n_parallel
+        self.generator = generator
         
         self.weight = nn.Parameter(torch.empty(n_parallel, out_features, in_features))
         if bias:
@@ -69,11 +72,11 @@ class ParallelLinear(nn.Module):
     
     def reset_parameters(self) -> None:
         """Initialize weights using the same strategy as nn.Linear."""
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5), generator=self.generator)
         if self.bias is not None:
             fan_in = self.weight.size(1)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            nn.init.uniform_(self.bias, -bound, bound)
+            nn.init.uniform_(self.bias, -bound, bound, generator=self.generator)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -119,7 +122,8 @@ class MLP(nn.Module):
         weight_init_method: str,
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
-        device: str = 'cuda'
+        device: str = 'cuda',
+        seed: Optional[int] = None,
     ):
         """
         Args:
@@ -131,12 +135,16 @@ class MLP(nn.Module):
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             n_frozen_layers: Number of frozen layers
             device: Device to put model on
+            seed: Optional random seed for reproducibility
         """
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.n_frozen_layers = n_frozen_layers
         self.device = device
+        
+        # Create a generator if seed is provided
+        self.generator = torch.Generator(device=device).manual_seed(seed) if seed is not None else None
         
         activation_cls = ACTIVATION_MAP[activation]
         
@@ -169,11 +177,11 @@ class MLP(nn.Module):
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
         elif method == 'kaiming_uniform':
-            nn.init.kaiming_uniform_(layer.weight)
+            nn.init.kaiming_uniform_(layer.weight, generator=self.generator)
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
         elif method == 'binary':
-            layer.weight.data = torch.randint(0, 2, layer.weight.shape, device=layer.weight.device).float() * 2 - 1
+            layer.weight.data = torch.randint(0, 2, layer.weight.shape, device=layer.weight.device, generator=self.generator).float() * 2 - 1
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
         else:
