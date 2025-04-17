@@ -29,7 +29,7 @@ from feature_recycling import reset_input_weights
 from idbd import IDBD, RMSPropIDBD
 from models import ACTIVATION_MAP, LTU, MLP
 from tasks import NonlinearGEOFFTask
-from run_experiment import *
+from experiment_helpers import *
 from scripts.feature_maturity_experiment import *
 
 

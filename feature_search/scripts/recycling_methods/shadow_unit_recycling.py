@@ -17,7 +17,7 @@ from omegaconf import DictConfig
 from idbd import IDBD
 from models import MLP, ACTIVATION_MAP
 from tasks import NonlinearGEOFFTask
-from run_experiment import *
+from experiment_helpers import *
 from scripts.feature_maturity_experiment import *
 
 
@@ -387,6 +387,7 @@ def prepare_experiment(cfg: DictConfig):
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+            seed = cfg.seed + hash('shadow_cbp_tracker'),
         )
         shadow_cbp_tracker.track_sequential(model.shadow_layers)
     
@@ -396,6 +397,7 @@ def prepare_experiment(cfg: DictConfig):
         shadow_cbp_tracker.incoming_weight_init = 'binary'
 
     # Init target output weights to kaiming uniform and predictor output weights to zero
+    seed = cfg.seed + hash('target_output_weights')
     torch.nn.init.kaiming_uniform_(
         task.weights[-1],
         mode = 'fan_in',
