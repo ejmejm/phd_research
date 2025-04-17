@@ -29,12 +29,12 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
         # Non-stochastic version of the 1-layer GEOFF task
         cfg.model.output_dim = 1
         cfg.task.type = 'regression'
-        return GEOFFTask(cfg.task.n_real_features, -1, cfg.task.n_real_features, seed=cfg.seed)
+        return GEOFFTask(cfg.task.n_real_features, -1, cfg.task.n_real_features, seed=seed)
     elif cfg.task.name.lower() == 'linear_geoff':
         # Stochastic version of the 1-layer GEOFF task
         cfg.model.output_dim = 1
         cfg.task.type = 'regression'
-        return GEOFFTask(cfg.task.n_real_features, 20, cfg.task.n_real_features, seed=cfg.seed)
+        return GEOFFTask(cfg.task.n_real_features, 20, cfg.task.n_real_features, seed=seed)
     elif cfg.task.name.lower() == 'nonlinear_geoff':
         cfg.model.output_dim = 1
         cfg.task.type = 'regression'
@@ -172,8 +172,7 @@ def standardize_targets(
 
 def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     """Prepare the components based on configuration."""
-    set_seed(cfg.seed)
-    task_seed, model_seed, recycler_seed, cbp_tracker_seed = torch.randint(0, 2**32, (4,)).tolist()
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
     
     if not cfg.wandb:
         os.environ['WANDB_DISABLED'] = 'true'
@@ -183,7 +182,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
         cfg, resolve=True, throw_on_missing=True)
     wandb.init(project=cfg.project, config=wandb_config, allow_val_change=True)
     
-    task = prepare_task(cfg, seed=task_seed)
+    task = prepare_task(cfg, seed=base_seed + hash('task'))
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
     # Initialize model and optimizer
@@ -196,8 +195,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             weight_init_method=cfg.model.weight_init_method,
             activation=cfg.model.activation,
             n_frozen_layers=cfg.model.n_frozen_layers,
-            device=cfg.device,
-            seed=model_seed,
+            seed=base_seed + hash('model'),
         )
     model.to(cfg.device)
     
@@ -216,7 +214,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
         feature_protection_steps=cfg.input_recycling.feature_protection_steps,
         n_start_real_features=cfg.input_recycling.get('n_start_real_features', -1),
         device=cfg.device,
-        seed=recycler_seed,
+        seed=base_seed + hash('recycler'),
     )
     
     # Initialize CBP tracker
@@ -226,7 +224,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-            seed=cbp_tracker_seed,
+            seed=base_seed + hash('cbp_tracker'),
         )
         cbp_tracker.track_sequential(model.layers)
     else:

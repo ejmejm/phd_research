@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 
 def prepare_experiment(cfg: DictConfig):
+    set_seed(cfg.seed)
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
+    
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_components(cfg)
 
@@ -56,10 +59,13 @@ def prepare_experiment(cfg: DictConfig):
         cbp_tracker.incoming_weight_init = 'binary'
     
     # Init target output weights to kaiming uniform and predictor output weights to zero
+    task_init_generator = torch.Generator(device=task.weights[-1].device)
+    task_init_generator.manual_seed(base_seed + hash('task_init_generator'))
     torch.nn.init.kaiming_uniform_(
         task.weights[-1],
         mode = 'fan_in',
         nonlinearity = 'linear',
+        generator = task_init_generator,
     )
     torch.nn.init.zeros_(model.layers[-1].weight)
     
@@ -69,6 +75,8 @@ def prepare_experiment(cfg: DictConfig):
         if isinstance(layer, LTU):
             layer.threshold = ltu_threshold
     task.activation_fn.threshold = ltu_threshold
+
+    torch.manual_seed(base_seed + hash('experiment_setup'))
 
     return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker
 

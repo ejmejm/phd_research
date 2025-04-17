@@ -122,7 +122,6 @@ class MLP(nn.Module):
         weight_init_method: str,
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
-        device: str = 'cuda',
         seed: Optional[int] = None,
     ):
         """
@@ -134,17 +133,15 @@ class MLP(nn.Module):
             weight_init_method: How to initialize weights ('zeros', 'kaiming', or 'binary')
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             n_frozen_layers: Number of frozen layers
-            device: Device to put model on
             seed: Optional random seed for reproducibility
         """
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.n_frozen_layers = n_frozen_layers
-        self.device = device
         
         # Create a generator if seed is provided
-        self.generator = torch.Generator(device=device).manual_seed(seed) if seed is not None else None
+        self.generator = torch.Generator().manual_seed(seed) if seed is not None else None
         
         activation_cls = ACTIVATION_MAP[activation]
         
@@ -181,7 +178,8 @@ class MLP(nn.Module):
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
         elif method == 'binary':
-            layer.weight.data = torch.randint(0, 2, layer.weight.shape, device=layer.weight.device, generator=self.generator).float() * 2 - 1
+            layer.weight.data = torch.randint(
+                0, 2, layer.weight.shape, device=layer.weight.device, generator=self.generator).float() * 2 - 1
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
         else:

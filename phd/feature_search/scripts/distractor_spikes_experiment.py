@@ -90,7 +90,6 @@ def main(cfg: DictConfig) -> None:
         hidden_dim=cfg.model.hidden_dim,
         weight_init_method=cfg.model.weight_init_method,
         activation=cfg.model.activation,
-        device=cfg.device
     ).to(cfg.device)
     
     criterion = (nn.CrossEntropyLoss() if cfg.task.type == 'classification'

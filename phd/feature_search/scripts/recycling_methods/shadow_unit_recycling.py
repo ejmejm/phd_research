@@ -153,7 +153,7 @@ class ShadowUnitsMLP(MLP):
         weight_init_method: str,
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
-        device: str = 'cuda'
+        seed: Optional[int] = None,
     ):
         """
         Args:
@@ -165,7 +165,6 @@ class ShadowUnitsMLP(MLP):
             weight_init_method: How to initialize weights ('zeros', 'kaiming', or 'binary')
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             n_frozen_layers: Number of frozen layers
-            device: Device to put model on
         """
         super().__init__(
             input_dim = input_dim,
@@ -175,7 +174,7 @@ class ShadowUnitsMLP(MLP):
             weight_init_method = weight_init_method,
             activation = activation,
             n_frozen_layers = n_frozen_layers,
-            device = device
+            seed = seed,
         )
         assert n_layers == 2, "Shadow units MLP must have exactly 2 layers!"
 
@@ -348,6 +347,9 @@ def run_experiment(
 
 
 def prepare_experiment(cfg: DictConfig):
+    set_seed(cfg.seed)
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
+
     full_hidden_dim = cfg.model.hidden_dim
     n_shadow_units = int(cfg.model.fraction_shadow_units * full_hidden_dim)
     n_real_units = full_hidden_dim - n_shadow_units
@@ -360,7 +362,7 @@ def prepare_experiment(cfg: DictConfig):
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
-        device = cfg.device,
+        seed = base_seed + hash('model'),
     )
 
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
@@ -394,11 +396,13 @@ def prepare_experiment(cfg: DictConfig):
         shadow_cbp_tracker.incoming_weight_init = 'binary'
 
     # Init target output weights to kaiming uniform and predictor output weights to zero
-    seed = cfg.seed + hash('target_output_weights')
+    task_init_generator = torch.Generator(device=task.weights[-1].device)
+    task_init_generator.manual_seed(cfg.seed + hash('task_init_generator'))
     torch.nn.init.kaiming_uniform_(
         task.weights[-1],
         mode = 'fan_in',
         nonlinearity = 'linear',
+        generator = task_init_generator,
     )
     torch.nn.init.zeros_(model.layers[-1].weight)
     
@@ -408,6 +412,8 @@ def prepare_experiment(cfg: DictConfig):
         if isinstance(layer, LTU):
             layer.threshold = ltu_threshold
     task.activation_fn.threshold = ltu_threshold
+
+    torch.manual_seed(cfg.seed + hash('experiment_setup'))
 
     return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker, shadow_cbp_tracker
 

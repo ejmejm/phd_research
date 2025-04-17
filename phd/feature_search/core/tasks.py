@@ -151,8 +151,10 @@ class NonlinearGEOFFTask:
         self.weight_init = weight_init
         self.flip_accumulators = []  # Accumulate flip probability for each layer
         
+        # Create a generator for all random behaviors
+        self.generator = torch.Generator()
         if seed is not None:
-            torch.manual_seed(seed)
+            self.generator.manual_seed(seed)
             
         # Set activation function
         if activation == 'relu':
@@ -214,7 +216,7 @@ class NonlinearGEOFFTask:
             Initialized weight tensor
         """
         if self.weight_init == 'binary':
-            weights = (torch.randint(0, 2, (in_features, out_features)) * 2 - 1).float()
+            weights = (torch.randint(0, 2, (in_features, out_features), generator=self.generator) * 2 - 1).float()
         else:  # kaiming_uniform
             weights = torch.nn.init.kaiming_uniform_(
                 torch.empty(in_features, out_features),
@@ -228,7 +230,7 @@ class NonlinearGEOFFTask:
         if sparsity == 0:
             return
         n_zero = int(sparsity * weights.numel())
-        flat_idx = torch.randperm(weights.numel())[:n_zero]
+        flat_idx = torch.randperm(weights.numel(), generator=self.generator)[:n_zero]
         weights.view(-1)[flat_idx] = 0
     
     
@@ -252,7 +254,7 @@ class NonlinearGEOFFTask:
             n_flips = int(accumulator)
             if n_flips > 0:
                 # Randomly select weights to flip
-                flat_idx = torch.randperm(weights.numel())[:n_flips]
+                flat_idx = torch.randperm(weights.numel(), generator=self.generator)[:n_flips]
                 weights.view(-1)[flat_idx] *= -1
                 
                 # Update accumulator
@@ -277,7 +279,7 @@ class NonlinearGEOFFTask:
             self._flip_signs()
             
             # Generate random input features
-            x = torch.randn(batch_size, self.n_features)
+            x = torch.randn(batch_size, self.n_features, generator=self.generator)
             
             # Forward pass through target network
             y = self._forward(x)

@@ -164,7 +164,6 @@ class ShadowUnitsMLP(MLP):
         weight_init_method: str,
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
-        device: str = 'cuda'
     ):
         """
         Args:
@@ -176,7 +175,6 @@ class ShadowUnitsMLP(MLP):
             weight_init_method: How to initialize weights ('zeros', 'kaiming', or 'binary')
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             n_frozen_layers: Number of frozen layers
-            device: Device to put model on
         """
         super().__init__(
             input_dim = input_dim,
@@ -186,7 +184,6 @@ class ShadowUnitsMLP(MLP):
             weight_init_method = weight_init_method,
             activation = activation,
             n_frozen_layers = n_frozen_layers,
-            device = device
         )
         assert n_layers == 2, "Shadow units MLP must have exactly 2 layers!"
 
@@ -243,7 +240,6 @@ def custom_prepare_components(cfg: DictConfig):
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
-        device = cfg.device,
     )
 
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
