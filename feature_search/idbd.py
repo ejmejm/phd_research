@@ -1,4 +1,5 @@
 import math
+import logging
 
 import torch
 from torch.optim.optimizer import Optimizer
@@ -6,6 +7,9 @@ from typing import Dict, Iterator, Optional
 
 
 EPSILON = 1e-8
+
+
+logger = logging.getLogger(__name__)
 
 
 class IDBD(Optimizer):
@@ -31,7 +35,7 @@ class IDBD(Optimizer):
         meta_lr: float = 0.01,
         init_lr: float = 0.01,
         weight_decay: float = 0.0,
-        version: str = 'squared_inputs', # squared_inputs, squared_grads, hvp, hessian_diagonal,
+        version: str = 'squared_grads', # squared_inputs, squared_grads, hvp, hessian_diagonal,
         autostep: bool = False,
         tau: float = 1e4,
     ):
@@ -52,8 +56,15 @@ class IDBD(Optimizer):
             weights = [p for p in param_list if len(p.shape) == 2]
             biases = [p for p in param_list if len(p.shape) == 1]
             
-            assert len(weights) == 1, 'AutoStep optimizer expects exactly one weight matrix (2D tensor)'
-            assert len(biases) <= 1, 'AutoStep optimizer expects at most one bias vector (1D tensor)'
+            assert len(biases) == 0, "AutoStep optimizer does not support biases!"
+            assert len(weights) > 0, "No valid weight parameters found!"
+
+            if len(weights) > 1:
+                logger.warning(
+                    "Found multiple sets of weights, but AutoStep does not support non-linear  "
+                    "layer structures. If the weights provided to AutoStep are stacked and not "
+                    "independent, then this will probably cause a silent bug."
+                )
 
         # Initialize beta and h for each parameter
         for group in self.param_groups:
@@ -71,14 +82,17 @@ class IDBD(Optimizer):
         loss: torch.Tensor,
         predictions: torch.Tensor,
         param_inputs: Dict[torch.nn.parameter.Parameter, torch.Tensor],
-        closure: Optional[callable] = None,
+        retain_graph: bool = False,
     ) -> Optional[float]:
         """Performs a single optimization step.
         
         Args:
             loss: Loss tensor of shape ()
-            predictions: Predictions tensor of shape (batch_size, n_classes)
+            predictions: Predictions tensor of shape (batch_size, n_classes).
+                Only needed for `squared_grads` and `hvp` versions of IDBD.
             param_inputs: Dictionary mapping linear layer weight parameters to their inputs
+                Only needed for `squared_inputs` version of IDBD.
+            retain_graph: Whether to retain the graph of the computation
         """
         if self.version == 'squared_grads':
             all_params = [p for group in self.param_groups for p in group['params']]
@@ -93,7 +107,7 @@ class IDBD(Optimizer):
         
         # Compute gradients for all model parameters
         create_graph = self.version in ('hessian_diagonal', 'hvp')
-        loss.backward(create_graph=create_graph)
+        loss.backward(create_graph=create_graph, retain_graph=retain_graph)
 
         param_updates = []
         for group in self.param_groups:
@@ -110,6 +124,7 @@ class IDBD(Optimizer):
                     assert len(param_inputs[p].shape) == 1, "Inputs must be 1D tensors"
                     inputs = param_inputs[p].unsqueeze(0)
                 elif len(grad.shape) == 1:
+                    # This branch is currently not used because I disabled support for bias parameters
                     inputs = torch.ones_like(grad)
                 else:
                     raise ValueError(f"Parameter {p} not found in activations dictionary.")
