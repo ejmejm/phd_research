@@ -15,7 +15,7 @@ from omegaconf import DictConfig
 
 from idbd import IDBD, RMSPropIDBD
 from models import MLP
-from run_experiment import *
+from experiment_helpers import *
 
 
 def get_model_statistics(model: MLP, param_inputs: Dict[str, torch.Tensor]) -> Dict[str, float]:

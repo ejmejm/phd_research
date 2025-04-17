@@ -29,7 +29,7 @@ from feature_recycling import reset_input_weights
 from idbd import IDBD, RMSPropIDBD
 from models import LTU
 from tasks import NonlinearGEOFFTask
-from run_experiment import *
+from experiment_helpers import *
 
 
 CONVERGENCE_N_SAMPLES = 1_000_000
