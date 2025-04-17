@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import logging
 import math
 import random
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Sequence, Tuple, Union, Optional
 import warnings
 
 import numpy as np
@@ -47,6 +47,7 @@ class InputRecycler:
         std_normal_distractors_only: bool = False,
         n_start_real_features: int = -1,
         device: str = 'cuda',
+        seed: Optional[int] = None,
     ):
         """
         Args:
@@ -59,6 +60,7 @@ class InputRecycler:
             feature_protection_steps: Number of steps to protect new features
             n_start_real_features: When not -1, forces the the recycler to start with exactly this many real features
             device: Device to put tensors on
+            seed: Optional random seed for reproducibility
         """
         self.n_features = n_features
         self.n_real_features = n_real_features
@@ -71,6 +73,16 @@ class InputRecycler:
         self.std_normal_distractors_only = std_normal_distractors_only
         self.n_start_real_features = n_start_real_features
         self.device = device
+        
+        # Set up random number generators if seed is provided
+        self.seed = seed
+        if seed is not None:
+            self.rng = random.Random(seed)
+            self.torch_rng = torch.Generator(device=device)
+            self.torch_rng.manual_seed(seed)
+        else:
+            self.rng = random.Random()
+            self.torch_rng = None
         
         self.recycle_accumulator = 0.0
         self.features = {}
@@ -100,7 +112,7 @@ class InputRecycler:
         elif force_distractor:
             is_real = False
         else:
-            is_real = random.random() > self.distractor_chance
+            is_real = self.rng.random() > self.distractor_chance
         
         # Get list of currently used feature indices
         used_indices = set([
@@ -118,7 +130,7 @@ class InputRecycler:
             
             dist_params = {
                 'type': 'real',
-                'feature_idx': random.choice(available_indices)
+                'feature_idx': self.rng.choice(available_indices)
             }
         else:
             is_real = False
@@ -131,19 +143,19 @@ class InputRecycler:
                     'mean': 0.0,
                     'std': 1.0,
                 }
-            elif random.random() < 0.5:
+            elif self.rng.random() < 0.5:
                 dist_params = {
                     'type': 'distractor',
                     'distribution': 'uniform',
-                    'low': random.uniform(-1, 0),
-                    'high': random.uniform(0, 1)
+                    'low': self.rng.uniform(-1, 0),
+                    'high': self.rng.uniform(0, 1)
                 }
             else:
                 dist_params = {
                     'type': 'distractor',
                     'distribution': 'normal',
-                    'mean': random.uniform(-0.5, 0.5),
-                    'std': random.uniform(0.2, 0.5)
+                    'mean': self.rng.uniform(-0.5, 0.5),
+                    'std': self.rng.uniform(0.2, 0.5)
                 }
         
         self.features[idx] = FeatureInfo(
@@ -192,7 +204,11 @@ class InputRecycler:
             lows = torch.tensor(uniform_lows)
             highs = torch.tensor(uniform_highs)
             
-            uniform_values = torch.rand(batch_size, len(uniform_indices))
+            if self.torch_rng is not None:
+                uniform_values = torch.rand(batch_size, len(uniform_indices), generator=self.torch_rng)
+            else:
+                uniform_values = torch.rand(batch_size, len(uniform_indices))
+                
             uniform_values = uniform_values * (highs - lows) + lows
             values[:, uniform_indices] = uniform_values
             
@@ -201,7 +217,11 @@ class InputRecycler:
             means = torch.tensor(normal_means)
             stds = torch.tensor(normal_stds)
             
-            eps = torch.randn(batch_size, len(normal_indices))
+            if self.torch_rng is not None:
+                eps = torch.randn(batch_size, len(normal_indices), generator=self.torch_rng)
+            else:
+                eps = torch.randn(batch_size, len(normal_indices))
+                
             normal_values = (means + eps * stds).clamp(-1, 1)
             values[:, normal_indices] = normal_values
             
@@ -252,7 +272,7 @@ class InputRecycler:
             utilities = {i: self.features[i].utility for i in eligible_features}
             return sorted(utilities.keys(), key=lambda x: utilities[x])[:n_recycle]
         else:
-            return random.sample(eligible_features, min(n_recycle, len(eligible_features)))
+            return self.rng.sample(eligible_features, min(n_recycle, len(eligible_features)))
 
     def get_statistics(self, current_step: int, model: MLP, optimizer: optim.Optimizer) -> dict:
         """Calculate statistics about current features."""
@@ -394,7 +414,7 @@ def reset_input_weights(idxs: Union[int, Sequence[int]], model: MLP, optimizer: 
         raise ValueError(f'Invalid optimizer type: {type(optimizer)}')
 
 
-def n_kaiming_uniform(tensor, shape, a=0, mode='fan_in', nonlinearity='relu'):
+def n_kaiming_uniform(tensor, shape, a=0, mode='fan_in', nonlinearity='relu', generator=None):
     """
     Adapted from https://pytorch.org/docs/stable/_modules/torch/nn/init.html#kaiming_uniform_
     But has a customizable number of outputs.
@@ -406,7 +426,7 @@ def n_kaiming_uniform(tensor, shape, a=0, mode='fan_in', nonlinearity='relu'):
     gain = nn.init.calculate_gain(nonlinearity, a)
     std = gain / math.sqrt(fan)
     bound = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
-    result = torch.rand(shape) * 2 * bound - bound
+    result = torch.rand(shape, generator=generator) * 2 * bound - bound
     result = result.to(tensor.device)
     return result
 
@@ -425,6 +445,7 @@ class CBPTracker():
         incoming_weight_init = 'kaiming_uniform', # {'kaiming_uniform', 'binary'}
         outgoing_weight_init = 'zeros', # {'zeros', 'kaiming_uniform'}
         utility_reset_mode = 'median', # {'median', 'zero'}
+        seed = None,
     ):
         assert optimizer is None or isinstance(optimizer, (Adam, IDBD, torch.optim.SGD))
         assert utility_reset_mode in {'median', 'zero'}
@@ -441,6 +462,14 @@ class CBPTracker():
         self.incoming_weight_init = incoming_weight_init
         self.outgoing_weight_init = outgoing_weight_init
         self._utility_reset_mode = utility_reset_mode
+        
+        # Set up random number generator
+        self.seed = seed
+        if seed is not None:
+            self.rng = torch.Generator()
+            self.rng.manual_seed(seed)
+        else:
+            self.rng = None
 
     def track(self, previous: nn.Module, current: nn.Module, next: nn.Module):
         """Track a list of layers used for CBP calculations."""
@@ -479,17 +508,17 @@ class CBPTracker():
         if self.incoming_weight_init == 'kaiming_uniform':
             weight_data = layer.weight.data
             layer.weight.data[idxs] = n_kaiming_uniform(
-                weight_data, weight_data[idxs].shape, a=math.sqrt(5))
+                weight_data, weight_data[idxs].shape, a=math.sqrt(5), generator=self.rng)
 
             if layer.bias is not None:
                 fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
                 bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-                layer.bias.data[idxs] = torch.rand(len(idxs), device=layer.bias.device) * 2 * bound - bound
+                layer.bias.data[idxs] = torch.rand(len(idxs), device=layer.bias.device, generator=self.rng) * 2 * bound - bound
                 
         elif self.incoming_weight_init == 'binary':
             weight_data = layer.weight.data
             layer.weight.data[idxs] = torch.randint(
-                0, 2, weight_data[idxs].shape, device=layer.weight.device).float() * 2 - 1
+                0, 2, weight_data[idxs].shape, device=layer.weight.device, generator=self.rng).float() * 2 - 1
             if layer.bias is not None:
                 layer.bias.data[idxs] = torch.zeros_like(layer.bias.data[idxs])
 
@@ -541,7 +570,7 @@ class CBPTracker():
             layer.weight.data[:, idxs] = torch.zeros_like(weight_data[:, idxs])
         elif self.outgoing_weight_init == 'kaiming_uniform':
             layer.weight.data[:, idxs] = n_kaiming_uniform(
-                weight_data, weight_data[:, idxs].shape, a=math.sqrt(5))
+                weight_data, weight_data[:, idxs].shape, a=math.sqrt(5), generator=self.rng)
         else:
             raise ValueError(f'Invalid weight initialization: {self.outgoing_weight_init}')
     
