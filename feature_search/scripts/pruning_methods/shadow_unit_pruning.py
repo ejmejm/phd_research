@@ -269,6 +269,32 @@ def run_experiment(
             n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
             total_pruned += n_pruned
 
+            if pruned_idxs:
+                pruned_idxs = pruned_idxs[model.layers[-2]]
+                assert len(pruned_idxs) > 0, "No features were pruned!"
+                assert len(pruned_idxs) <= model.shadow_layers[-1].in_features, \
+                    "Not enough shadow units to replace all pruned features!"
+                
+                # Replace each of the pruned features with the highest utility shadow features
+
+                shadow_feature_utilities = list(shadow_cbp_tracker._feature_stats.values())[0]['utility']
+                shadow_feature_rankings = torch.argsort(shadow_feature_utilities, descending=True)
+
+                for i, real_idx in enumerate(pruned_idxs):
+                    with torch.no_grad():
+                        shadow_feature_weights = model.shadow_layers[0].weight[shadow_feature_rankings[i], :]
+                        model.layers[0].weight[real_idx, :] = shadow_feature_weights
+                
+
+                # Reset all shadow feature weights and CBP tracker stats
+
+                model._initialize_weights(model.shadow_layers[0], 'binary')
+                model._initialize_weights(model.shadow_layers[-1], 'zeros')
+                for layer in shadow_cbp_tracker._feature_stats:
+                    stat_keys = list(shadow_cbp_tracker._feature_stats[layer].keys())
+                    for key in stat_keys:
+                        del shadow_cbp_tracker._feature_stats[layer][key]
+
         # Backward pass
         optimizer.zero_grad()
         if isinstance(optimizer, IDBD):
