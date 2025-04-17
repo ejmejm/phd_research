@@ -50,6 +50,7 @@ def prepare_task(cfg: DictConfig):
             activation=cfg.task.activation,
             sparsity=cfg.task.sparsity,
             weight_init=cfg.task.weight_init,
+            seed=cfg.seed + hash('task'),
         )
 
 
@@ -174,6 +175,7 @@ def standardize_targets(
 def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     """Prepare the components based on configuration."""
     set_seed(cfg.seed)
+    task_seed, model_seed, recycler_seed, cbp_tracker_seed = torch.randint(0, 2**32, (4,)).tolist()
     
     if not cfg.wandb:
         os.environ['WANDB_DISABLED'] = 'true'
@@ -183,10 +185,12 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
         cfg, resolve=True, throw_on_missing=True)
     wandb.init(project=cfg.project, config=wandb_config, allow_val_change=True)
     
+    set_seed(task_seed)
     task = prepare_task(cfg)
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
     # Initialize model and optimizer
+    set_seed(model_seed)
     if model is None:
         model = MLP(
             input_dim=cfg.task.n_features,
@@ -205,6 +209,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     optimizer = prepare_optimizer(model, cfg)
     
     # Initialize feature recycler
+    set_seed(recycler_seed)
     recycler = InputRecycler(
         n_features=cfg.task.n_features,
         n_real_features=cfg.task.n_real_features,
@@ -218,6 +223,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     )
     
     # Initialize CBP tracker
+    set_seed(cbp_tracker_seed)
     if cfg.feature_recycling.use_cbp_utility:
         cbp_tracker = CBPTracker(
             optimizer = optimizer,

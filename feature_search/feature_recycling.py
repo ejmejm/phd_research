@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import logging
 import math
 import random
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import warnings
 
 import numpy as np
@@ -591,28 +591,35 @@ class CBPTracker():
 
         return track_cbp_stats
 
-    def _reset_feature_stats(self, layer: nn.Module, idxs: List[int]):
+    def _reset_feature_stats(self, layer: nn.Module, idxs: List[int], mask: Optional[torch.Tensor] = None):
         """Resets the feature stats for the given layer and indices."""
         for key in self._feature_stats[layer]:
             self._feature_stats[layer][key][idxs] = 0
 
         if 'utility' in self._feature_stats[layer]:
-            median_utility = self._feature_stats[layer]['utility'].median()
             if self._utility_reset_mode == 'median':
+                if mask is not None:
+                    median_utility = self._feature_stats[layer]['utility'][mask].median()
+                else:
+                    median_utility = self._feature_stats[layer]['utility'].median()
                 self._feature_stats[layer]['utility'][idxs] = median_utility
             elif self._utility_reset_mode == 'zero':
                 self._feature_stats[layer]['utility'][idxs] = 0
         else:
             logger.warning(f'Utility stats not found for layer {layer}')
 
-    def _step_replacement_accumulator(self, layer: nn.Module):
+    def _step_replacement_accumulator(self, layer: nn.Module, mask: Optional[torch.Tensor] = None):
         ages = self._feature_stats[layer]['age']
 
         # Get number of features to reset
-        n_features = ages.numel()
+        if mask is not None:
+            n_features = mask.sum()
+        else:
+            n_features = ages.numel()
+
         self._replace_accumulator[layer] += self.replace_rate * n_features
 
-    def _get_layer_prune_idxs(self, layer: nn.Module) -> List[int]:
+    def _get_layer_prune_idxs(self, layer: nn.Module, mask: Optional[torch.Tensor] = None) -> List[int]:
         """Get the indices of features to prune from the given layer."""
         # If there are not enough features to reset, return an empty list
         if self._replace_accumulator[layer] < 1:
@@ -620,6 +627,8 @@ class CBPTracker():
 
         # Get eligible features
         eligible_idxs = self._feature_stats[layer]['age'] > self.maturity_threshold
+        if mask is not None:
+            eligible_idxs = eligible_idxs & mask
         eligible_idxs = torch.nonzero(eligible_idxs).squeeze()
         n_reset = int(self._replace_accumulator[layer])
         
@@ -634,7 +643,7 @@ class CBPTracker():
 
         return reset_idxs
     
-    def _prune_layer(self, layer: nn.Module, reset_idxs: List[int]):
+    def _prune_layer(self, layer: nn.Module, reset_idxs: List[int], mask: Optional[torch.Tensor] = None):
         if reset_idxs is None or len(reset_idxs) == 0:
             return
 
@@ -642,9 +651,10 @@ class CBPTracker():
         self._replace_accumulator[layer] -= len(reset_idxs)
 
         # Reset feature stats
-        self._reset_feature_stats(layer, reset_idxs)
+        self._reset_feature_stats(layer, reset_idxs, mask)
 
         # Reset features
+        # TODO: Get this working with mask
         self._reinit_input_weights(self._tracked_layers[layer][0], reset_idxs)
         self._reinit_output_weights(self._tracked_layers[layer][1], reset_idxs)
 
@@ -653,13 +663,24 @@ class CBPTracker():
             self._reset_input_optim_state(self._tracked_layers[layer][0], reset_idxs)
             self._reset_output_optim_state(self._tracked_layers[layer][1], reset_idxs)
 
-    def prune_features(self) -> Dict[nn.Module, List[int]]:
-        """Prune features based on the CBP score."""
+    def prune_features(self, masks: Dict[nn.Module, torch.Tensor] = None) -> Dict[nn.Module, List[int]]:
+        """Prune features based on the CBP score.
+        
+        Args:
+            masks: A dictionary mapping layers to boolean masks, where True indicates features
+                   that should be considered for pruning, and False indicates features that
+                   should be fully ignored.
+            
+        Returns:
+            A dictionary mapping layers to the indices of features that were pruned.
+        """
+        masks = masks or {}
         reset_idxs = {}
         for layer in self._tracked_layers.keys():
-            self._step_replacement_accumulator(layer)
-            layer_reset_idxs = self._get_layer_prune_idxs(layer)
-            self._prune_layer(layer, layer_reset_idxs)
+            mask = masks.get(layer, None)
+            self._step_replacement_accumulator(layer, mask)
+            layer_reset_idxs = self._get_layer_prune_idxs(layer, mask)
+            self._prune_layer(layer, layer_reset_idxs, mask)
             if layer_reset_idxs is not None and len(layer_reset_idxs) > 0:
                 reset_idxs[layer] = layer_reset_idxs
         return reset_idxs
