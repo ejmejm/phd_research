@@ -1,3 +1,4 @@
+import hashlib
 import os
 import random
 from typing import Dict, Optional
@@ -113,6 +114,11 @@ def set_seed(seed: Optional[int]):
         torch.backends.cudnn.benchmark = False
 
 
+def seed_from_string(seed: int, string: str) -> int:
+    """Deterministic hash of a string."""
+    return seed + int(hashlib.md5(string.encode()).hexdigest(), 16) % (2**32)
+
+
 def get_model_statistics(model: MLP, features: torch.Tensor, param_inputs: Dict[str, torch.Tensor]) -> Dict[str, float]:
     """
     Compute statistics about the model's weights, biases, and layer inputs.
@@ -181,8 +187,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     wandb_config = omegaconf.OmegaConf.to_container(
         cfg, resolve=True, throw_on_missing=True)
     wandb.init(project=cfg.project, config=wandb_config, allow_val_change=True)
-    
-    task = prepare_task(cfg, seed=base_seed + hash('task'))
+    task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
     # Initialize model and optimizer
@@ -195,7 +200,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             weight_init_method=cfg.model.weight_init_method,
             activation=cfg.model.activation,
             n_frozen_layers=cfg.model.n_frozen_layers,
-            seed=base_seed + hash('model'),
+            seed=seed_from_string(base_seed, 'model'),
         )
     model.to(cfg.device)
     
@@ -214,7 +219,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
         feature_protection_steps=cfg.input_recycling.feature_protection_steps,
         n_start_real_features=cfg.input_recycling.get('n_start_real_features', -1),
         device=cfg.device,
-        seed=base_seed + hash('recycler'),
+        seed=seed_from_string(base_seed, 'recycler'),
     )
     
     # Initialize CBP tracker
@@ -224,7 +229,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-            seed=base_seed + hash('cbp_tracker'),
+            seed=seed_from_string(base_seed, 'cbp_tracker'),
         )
         cbp_tracker.track_sequential(model.layers)
     else:

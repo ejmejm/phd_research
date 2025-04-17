@@ -362,7 +362,7 @@ def prepare_experiment(cfg: DictConfig):
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
-        seed = base_seed + hash('model'),
+        seed = seed_from_string(base_seed, 'model'),
     )
 
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
@@ -386,7 +386,7 @@ def prepare_experiment(cfg: DictConfig):
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-            seed = cfg.seed + hash('shadow_cbp_tracker'),
+            seed = seed_from_string(cfg.seed, 'shadow_cbp_tracker'),
         )
         shadow_cbp_tracker.track_sequential(model.shadow_layers)
     
@@ -397,7 +397,7 @@ def prepare_experiment(cfg: DictConfig):
 
     # Init target output weights to kaiming uniform and predictor output weights to zero
     task_init_generator = torch.Generator(device=task.weights[-1].device)
-    task_init_generator.manual_seed(cfg.seed + hash('task_init_generator'))
+    task_init_generator.manual_seed(seed_from_string(cfg.seed, 'task_init_generator'))
     torch.nn.init.kaiming_uniform_(
         task.weights[-1],
         mode = 'fan_in',
@@ -413,7 +413,7 @@ def prepare_experiment(cfg: DictConfig):
             layer.threshold = ltu_threshold
     task.activation_fn.threshold = ltu_threshold
 
-    torch.manual_seed(cfg.seed + hash('experiment_setup'))
+    torch.manual_seed(seed_from_string(cfg.seed, 'experiment_setup'))
 
     return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker, shadow_cbp_tracker
 
