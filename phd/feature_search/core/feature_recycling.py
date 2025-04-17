@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
+import itertools
 import logging
 import math
 import random
@@ -462,23 +463,29 @@ class CBPTracker():
         self.incoming_weight_init = incoming_weight_init
         self.outgoing_weight_init = outgoing_weight_init
         self._utility_reset_mode = utility_reset_mode
-        
-        # Set up random number generator
         self.seed = seed
-        if seed is not None:
-            self.rng = torch.Generator()
-            self.rng.manual_seed(seed)
-        else:
-            self.rng = None
+        self.rng = None
 
-    def track(self, previous: nn.Module, current: nn.Module, next: nn.Module):
+    def _init_generator(self, device: torch.device):
+        if self.seed is not None:
+            self.rng = torch.Generator(device=device)
+            self.rng.manual_seed(self.seed)
+
+    def track(self, previous_module: nn.Module, current_module: nn.Module, next_module: nn.Module):
         """Track a list of layers used for CBP calculations."""
-        if not isinstance(previous, nn.Linear) or not isinstance(next, nn.Linear):
+        if not isinstance(previous_module, nn.Linear) or not isinstance(next_module, nn.Linear):
             raise NotImplementedError('CBP is only implemented for linear layers.')
+        
+        # Init generator if not already initialized
+        if self.rng is None:
+            params = itertools.chain(previous_module.parameters(), current_module.parameters(), next_module.parameters())
+            device = next(params).device
+            self._init_generator(device)
 
-        self._tracked_layers[current] = (previous, next) # Previous layer is currently unused, but could be for other utility metrics
-        self._feature_stats[current] = defaultdict(lambda: torch.zeros(1, requires_grad=False, device=next.weight.device))
-        current.register_forward_hook(self._get_hook(current))
+        self._tracked_layers[current_module] = (previous_module, next_module) # Previous layer is currently unused, but could be for other utility metrics
+        self._feature_stats[current_module] = defaultdict(
+            lambda: torch.zeros(1, requires_grad=False, device=next_module.weight.device))
+        current_module.register_forward_hook(self._get_hook(current_module))
 
     def track_sequential(self, sequential: Sequence[nn.Module]):
         """
