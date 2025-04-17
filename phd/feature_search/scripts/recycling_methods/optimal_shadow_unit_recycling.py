@@ -7,22 +7,19 @@ as a function of the optimal utility of the feature and the number of other exis
 """
 
 
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 import logging
-from typing import Iterator, List, Tuple
+from typing import Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.optim import Optimizer
 from tqdm import tqdm
 
 import wandb
 import hydra
 from omegaconf import DictConfig, open_dict
 
-from phd.feature_search.core.feature_recycling import reset_input_weights
-from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
 from phd.feature_search.core.models import ACTIVATION_MAP, LTU, MLP
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *

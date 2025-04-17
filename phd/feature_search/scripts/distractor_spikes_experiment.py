@@ -1,8 +1,6 @@
 import os
-import sys
 from typing import Dict
 import os.path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
@@ -15,6 +13,7 @@ from omegaconf import DictConfig
 
 from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
 from phd.feature_search.core.models import MLP
+from phd.feature_search.core.feature_recycling import reset_input_weights
 from phd.feature_search.core.experiment_helpers import *
 
 
@@ -150,7 +149,7 @@ def main(cfg: DictConfig) -> None:
                     first_layer.weight[:, real_idx] = cfg.train.force_real_weight_val * target_weight
 
         # Reset weights and optimizer states for recycled features
-        reset_feature_weights(recycled_features, model, optimizer, cfg)
+        reset_input_weights(recycled_features, model, optimizer, cfg)
         
         # Forward pass
         outputs, param_inputs = model(features)
