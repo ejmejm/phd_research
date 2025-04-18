@@ -114,8 +114,10 @@ def set_seed(seed: Optional[int]):
         torch.backends.cudnn.benchmark = False
 
 
-def seed_from_string(seed: int, string: str) -> int:
+def seed_from_string(seed: Optional[int], string: str) -> Optional[int]:
     """Deterministic hash of a string."""
+    if seed is None:
+        return random.randint(0, 2**32)
     return seed + int(hashlib.md5(string.encode()).hexdigest(), 16) % (2**32)
 
 
