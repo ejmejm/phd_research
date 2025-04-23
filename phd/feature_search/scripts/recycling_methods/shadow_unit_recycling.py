@@ -12,7 +12,7 @@ import wandb
 import hydra
 from omegaconf import DictConfig
 
-from phd.feature_search.core.idbd import IDBD
+from phd.feature_search.core.idbd import IDBD as OriginalIDBD
 from phd.feature_search.core.models import MLP, ACTIVATION_MAP
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *
@@ -101,6 +101,8 @@ class ShadowUnitsMLP(MLP):
         return value, param_inputs
 
 
+# TODO: Update ShadowCBPTracker so that that both real and shadow unit input weights are initialized
+#       as if there are |real weights| inputs or |real weights| + 1 inputs when using influence utility
 class ShadowCBPTracker(CBPTracker):
     """Perform CBP for recycling features."""
     
@@ -146,10 +148,126 @@ class ShadowCBPTracker(CBPTracker):
                         + self.decay_rate * self._feature_stats[module]['utility']
 
         return track_cbp_stats
-    
+
+
+# TODO: Update IDBD so that that both real and shadow unit weights are updated as if there
+#       are |real weights| inputs or |real weights| + 1 inputs when using influence utility
+class IDBD(OriginalIDBD):
+    def __init__(
+        self,
+        *args,
+        utility_type: str = 'cbp',
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.utility_type = utility_type
+        assert self.version in ('squared_grads', 'squared_inputs'), \
+            f"Invalid version: {self.version}. Must be one of: squared_grads, squared_inputs."
+
+    @torch.no_grad()
+    def step(
+        self,
+        predictions: torch.Tensor,
+        param_inputs: Dict[torch.nn.parameter.Parameter, torch.Tensor],
+    ) -> Optional[float]:
+        """Performs a single optimization step.
+        
+        Args:
+            predictions: Predictions tensor of shape (batch_size, n_classes).
+                Only needed for `squared_grads` and `hvp` versions of IDBD.
+            param_inputs: Dictionary mapping linear layer weight parameters to their inputs
+                Only needed for `squared_inputs` version of IDBD.
+            retain_graph: Whether to retain the graph of the computation
+        """
+        if self.version == 'squared_grads':
+            all_params = [p for group in self.param_groups for p in group['params']]
+            with torch.enable_grad():
+                prediction_sum = torch.sum(predictions)
+            prediction_grads = torch.autograd.grad(
+                outputs = prediction_sum,
+                inputs = all_params,
+                retain_graph = False,
+            )
+            prediction_grads = {p: g for p, g in zip(all_params, prediction_grads)}
+
+        param_updates = []
+        for group in self.param_groups:
+            meta_lr = group['meta_lr']
+            tau = group['tau']
+            
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                
+                grad = p.grad
+                
+                if p in param_inputs:
+                    assert len(param_inputs[p].shape) == 1, "Inputs must be 1D tensors"
+                    inputs = param_inputs[p].unsqueeze(0)
+                elif len(grad.shape) == 1:
+                    # This branch is currently not used because I disabled support for bias parameters
+                    inputs = torch.ones_like(grad)
+                else:
+                    raise ValueError(f"Parameter {p} not found in activations dictionary.")
+                
+                # Get state variables
+                state = self.state[p]
+                beta = state['beta']
+                h = state['h']
+                if self.autostep:
+                    v = state['v']
+                
+                
+                ### Different versions of IDBD change how h is decayed ###
+                
+                if self.version == 'squared_inputs':
+                    h_decay_term = inputs.pow(2)
+                elif self.version == 'squared_grads':
+                    h_decay_term = prediction_grads[p].pow(2)
+                else:
+                    raise ValueError(f"Invalid IDBD version: {self.version}")
+                
+                
+                ### Update state variables ###
+                
+                # Calculate and update step-size (learning rate / alpha)
+                if self.autostep:
+                    alpha = torch.exp(state['beta'])
+                    v = torch.max(
+                        torch.abs(grad * h),
+                        v + 1.0 / tau * alpha * h_decay_term * (torch.abs(grad * h) - v),
+                    )
+                    new_alpha = alpha * torch.exp(meta_lr * grad * h / v)
+                    alpha = torch.where(
+                        v != 0,
+                        new_alpha,
+                        alpha,
+                    )
+                    
+                    # Normalize the step-size
+                    effective_step_size = torch.clamp(torch.sum(alpha * h_decay_term, dim=-1), min=1.0)
+                    alpha = alpha / effective_step_size.unsqueeze(1)
+                    state['beta'] = torch.log(alpha)
+                else:
+                    beta.add_(meta_lr * grad * h)
+                    state['beta'] = beta
+                    alpha = torch.exp(beta)
+                
+                # Queue paramter update
+                weight_decay_term = self.weight_decay * p.data if self.weight_decay != 0 else 0
+                param_update = -alpha * (grad + weight_decay_term)
+                param_updates.append((p, param_update))
+                
+                # Update h (gradient trace)
+                state['h'] = h * (1 - alpha * h_decay_term).clamp(min=0) + alpha * grad
+                
+        for p, param_update in param_updates:
+            p.add_(param_update)
 
 
 # TODO: Consider changing the calculation for shadow weights so that the loss includes the contribution of just that single shadow unit
+# TODO: Check to make sure the shadow weights are not changing how squared_grads version of IDBD works.
+#       Can check this by making sure squared_grads and squared_inputs give the exact same results.
 
 
 def run_experiment(
@@ -183,10 +301,6 @@ def run_experiment(
         inputs, targets = next(task_iterator)
         target_buffer.extend(targets.view(-1).tolist())
         features, targets = inputs.to(cfg.device), targets.to(cfg.device)
-        
-        # Forward pass
-        outputs, param_inputs = model(features)
-        loss = criterion(outputs, targets)
 
         # Reset weights and optimizer states for recycled features
         if cbp_tracker is not None:
@@ -219,15 +333,31 @@ def run_experiment(
             pruned_idxs = shadow_cbp_tracker.prune_features()
             n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
             total_shadow_pruned += n_pruned
+        
+        # Forward pass
+        outputs, param_inputs = model(features)
+        param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
+        loss = criterion(outputs, targets)
 
         # Backward pass
         optimizer.zero_grad()
+        retain_graph = isinstance(optimizer, IDBD) and optimizer.version == 'squared_grads'
+        loss.backward(retain_graph=retain_graph)
+
+        # Modify shadow unit grads if using influence utility
+        if shadow_cbp_tracker is not None and shadow_cbp_tracker.utility_type == 'influence':
+            # TODO: This will need an update if I want to add in backprop at some point
+            with torch.no_grad():
+                shadow_out_weights = model.shadow_layers[2].weight
+                influence_grads = 2 * param_inputs[shadow_out_weights].unsqueeze(0) * shadow_out_weights
+                shadow_out_weights.grad += influence_grads
+
+
+        # Update weights
         if isinstance(optimizer, IDBD):
             # Mean over batch dimension
-            param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
-            optimizer.step(loss, outputs, param_inputs)
+            optimizer.step(outputs, param_inputs)
         else:
-            loss.backward()
             optimizer.step()
         
         # Accumulate metrics
@@ -276,27 +406,87 @@ def run_experiment(
     wandb.finish()
 
 
+def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
+    """Prepare the components based on configuration."""
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
+    
+    if not cfg.wandb:
+        os.environ['WANDB_DISABLED'] = 'true'
+    
+    # Initialize wandb
+    wandb_config = omegaconf.OmegaConf.to_container(
+        cfg, resolve=True, throw_on_missing=True)
+    wandb.init(project=cfg.project, config=wandb_config, allow_val_change=True)
+    task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
+    task_iterator = task.get_iterator(cfg.train.batch_size)
+    
+    # Initialize model and optimizer
+    if model is None:
+        full_hidden_dim = cfg.model.hidden_dim
+        n_shadow_units = int(cfg.model.fraction_shadow_units * full_hidden_dim)
+        n_real_units = full_hidden_dim - n_shadow_units
+        model = ShadowUnitsMLP(
+            input_dim = cfg.task.n_features,
+            n_shadow_units = n_shadow_units,
+            output_dim = cfg.model.output_dim,
+            n_layers = cfg.model.n_layers,
+            hidden_dim = n_real_units,
+            weight_init_method = cfg.model.weight_init_method,
+            activation = cfg.model.activation,
+            n_frozen_layers = cfg.model.n_frozen_layers,
+            seed = seed_from_string(base_seed, 'model'),
+        )
+    model.to(cfg.device)
+    
+    criterion = (nn.CrossEntropyLoss() if cfg.task.type == 'classification'
+                else nn.MSELoss())
+    if cfg.train.optimizer == 'idbd':
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = IDBD(
+            trainable_params,
+            init_lr=cfg.train.learning_rate,
+            meta_lr=cfg.idbd.meta_learning_rate,
+            version=cfg.idbd.version,
+            weight_decay=cfg.train.weight_decay,
+            autostep=cfg.idbd.autostep,
+            utility_type=cfg.shadow_feature_recycling.utility_type,
+        )
+    else:
+        optimizer = prepare_optimizer(model, cfg)
+    
+    # Initialize feature recycler
+    recycler = InputRecycler(
+        n_features=cfg.task.n_features,
+        n_real_features=cfg.task.n_real_features,
+        distractor_chance=cfg.input_recycling.distractor_chance,
+        recycle_rate=cfg.input_recycling.recycle_rate,
+        utility_decay=cfg.input_recycling.utility_decay,
+        use_cbp_utility=cfg.input_recycling.use_cbp_utility,
+        feature_protection_steps=cfg.input_recycling.feature_protection_steps,
+        n_start_real_features=cfg.input_recycling.get('n_start_real_features', -1),
+        device=cfg.device,
+        seed=seed_from_string(base_seed, 'recycler'),
+    )
+    
+    # Initialize CBP tracker
+    if cfg.feature_recycling.use_cbp_utility:
+        cbp_tracker = CBPTracker(
+            optimizer = optimizer,
+            replace_rate = cfg.feature_recycling.recycle_rate,
+            decay_rate = cfg.feature_recycling.utility_decay,
+            maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+            seed=seed_from_string(base_seed, 'cbp_tracker'),
+        )
+        cbp_tracker.track_sequential(model.layers)
+    else:
+        cbp_tracker = None
+        
+    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker
+
 def prepare_experiment(cfg: DictConfig):
     set_seed(cfg.seed)
-    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
-
-    full_hidden_dim = cfg.model.hidden_dim
-    n_shadow_units = int(cfg.model.fraction_shadow_units * full_hidden_dim)
-    n_real_units = full_hidden_dim - n_shadow_units
-    model = ShadowUnitsMLP(
-        input_dim = cfg.task.n_features,
-        n_shadow_units = n_shadow_units,
-        output_dim = cfg.model.output_dim,
-        n_layers = cfg.model.n_layers,
-        hidden_dim = n_real_units,
-        weight_init_method = cfg.model.weight_init_method,
-        activation = cfg.model.activation,
-        n_frozen_layers = cfg.model.n_frozen_layers,
-        seed = seed_from_string(base_seed, 'model'),
-    )
-
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
-        prepare_components(cfg, model=model)
+        prepare_components(cfg)
 
     assert isinstance(task, NonlinearGEOFFTask)
     
