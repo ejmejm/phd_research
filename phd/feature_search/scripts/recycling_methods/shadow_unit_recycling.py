@@ -15,6 +15,7 @@ from omegaconf import DictConfig
 from phd.feature_search.core.idbd import IDBD as OriginalIDBD
 from phd.feature_search.core.models import MLP, ACTIVATION_MAP
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
+from phd.feature_search.core.feature_recycling import CBPTracker as OriginalCBPTracker
 from phd.feature_search.core.experiment_helpers import *
 from phd.feature_search.scripts.feature_maturity_experiment import *
 
@@ -103,11 +104,9 @@ class ShadowUnitsMLP(MLP):
 
 # TODO: Update ShadowCBPTracker so that that both real and shadow unit input weights are initialized
 #       as if there are |real weights| inputs or |real weights| + 1 inputs when using influence utility
-class ShadowCBPTracker(CBPTracker):
+class CBPTracker(OriginalCBPTracker):
     """Perform CBP for recycling features."""
     
-    # TODO: Reimplement weight initialization between model, cbp, and input recycler
-    # so that they share the same initialization methods
     def __init__(
         self,
         *args,
@@ -475,17 +474,34 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-            seed=seed_from_string(base_seed, 'cbp_tracker'),
+            seed = seed_from_string(base_seed, 'cbp_tracker'),
+            utility_type = 'cbp',
         )
         cbp_tracker.track_sequential(model.layers)
+        cbp_tracker.incoming_weight_init = 'binary'
     else:
         cbp_tracker = None
+    
+    # Initialize shadow CBP tracker
+    if cfg.shadow_feature_recycling.use_cbp_utility:
+        shadow_cbp_tracker = CBPTracker(
+            optimizer = optimizer,
+            replace_rate = cfg.shadow_feature_recycling.recycle_rate,
+            decay_rate = cfg.shadow_feature_recycling.utility_decay,
+            maturity_threshold = cfg.shadow_feature_recycling.feature_protection_steps,
+            seed = seed_from_string(cfg.seed, 'shadow_cbp_tracker'),
+            utility_type = cfg.shadow_feature_recycling.utility_type,
+        )
+        shadow_cbp_tracker.track_sequential(model.shadow_layers)
+        shadow_cbp_tracker.incoming_weight_init = 'binary'
+    else:
+        shadow_cbp_tracker = None
         
-    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker
+    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker, shadow_cbp_tracker
 
 def prepare_experiment(cfg: DictConfig):
     set_seed(cfg.seed)
-    task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
+    task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker, shadow_cbp_tracker = \
         prepare_components(cfg)
 
     assert isinstance(task, NonlinearGEOFFTask)
@@ -498,23 +514,6 @@ def prepare_experiment(cfg: DictConfig):
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
     assert cfg.task.activation == 'ltu', \
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
-
-    # Additionaly initialize the CBP tracker for the shadow units
-    if cfg.shadow_feature_recycling.use_cbp_utility:
-        shadow_cbp_tracker = ShadowCBPTracker(
-            optimizer = optimizer,
-            replace_rate = cfg.shadow_feature_recycling.recycle_rate,
-            decay_rate = cfg.shadow_feature_recycling.utility_decay,
-            maturity_threshold = cfg.shadow_feature_recycling.feature_protection_steps,
-            seed = seed_from_string(cfg.seed, 'shadow_cbp_tracker'),
-            utility_type = cfg.shadow_feature_recycling.utility_type,
-        )
-        shadow_cbp_tracker.track_sequential(model.shadow_layers)
-    
-    if cbp_tracker is not None:
-        cbp_tracker.incoming_weight_init = 'binary'
-    if shadow_cbp_tracker is not None:
-        shadow_cbp_tracker.incoming_weight_init = 'binary'
 
     # Init target output weights to kaiming uniform and predictor output weights to zero
     task_init_generator = torch.Generator(device=task.weights[-1].device)
