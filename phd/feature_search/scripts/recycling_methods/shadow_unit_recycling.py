@@ -174,6 +174,7 @@ def run_experiment(
     pruned_newest_feature_accum = 0
     n_steps_since_log = 0
     total_pruned = 0
+    total_shadow_pruned = 0
     target_buffer = []
 
     while step < cfg.train.total_steps:
@@ -213,25 +214,11 @@ def run_experiment(
                 used_shadow_unit_idxs = shadow_feature_rankings[:len(pruned_idxs)]
                 shadow_feature_layer = model.shadow_layers[1] # Activation layer
                 shadow_cbp_tracker._prune_layer(shadow_feature_layer, used_shadow_unit_idxs)
-
-                # # Reset all shadow feature weights and CBP tracker stats
-
-                # model._initialize_weights(model.shadow_layers[0], 'binary')
-                # model._initialize_weights(model.shadow_layers[-1], 'zeros')
-                # for layer in shadow_cbp_tracker._feature_stats:
-                #     stat_keys = list(shadow_cbp_tracker._feature_stats[layer].keys())
-                #     for key in stat_keys:
-                #         del shadow_cbp_tracker._feature_stats[layer][key]
-
-                # # Reset shadow features optimizer state
-
-                # shadow_unit_weights = model.shadow_layers[-1].weight
-                # optim_state = optimizer.state[shadow_unit_weights]
-
-                # optim_state['beta'] = torch.full_like(optim_state['beta'], math.log(optimizer.init_lr))
-                # optim_state['h'] = torch.zeros_like(optim_state['h'])
-                # if 'v' in optim_state:
-                #     optim_state['v'] = torch.zeros_like(optim_state['v'])
+        
+        if shadow_cbp_tracker is not None:
+            pruned_idxs = shadow_cbp_tracker.prune_features()
+            n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
+            total_shadow_pruned += n_pruned
 
         # Backward pass
         optimizer.zero_grad()
@@ -259,6 +246,7 @@ def run_experiment(
                 'cumulative_loss': cumulative_loss,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
+                'pruned_shadow_units': total_shadow_pruned,
                 'utility_mean': feature_utilities.mean(),
                 'utility_std': feature_utilities.std(),
                 'shadow_utility_mean': shadow_feature_utilities.mean(),
