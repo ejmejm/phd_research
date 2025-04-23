@@ -102,8 +102,10 @@ class ShadowUnitsMLP(MLP):
         return value, param_inputs
 
 
-# TODO: Update ShadowCBPTracker so that that both real and shadow unit input weights are initialized
-#       as if there are |real weights| inputs or |real weights| + 1 inputs when using influence utility
+# *Note: If I change to using a kaiming_uniform wieght init, I will need to update CBPTracker so that that
+#        both real and shadow unit input weights are initialized as if there are |real weights| inputs or
+#        |real weights| + 1 inputs when using influence utility
+
 class CBPTracker(OriginalCBPTracker):
     """Perform CBP for recycling features."""
     
@@ -149,17 +151,27 @@ class CBPTracker(OriginalCBPTracker):
         return track_cbp_stats
 
 
-# TODO: Update IDBD so that that both real and shadow unit weights are updated as if there
-#       are |real weights| inputs or |real weights| + 1 inputs when using influence utility
 class IDBD(OriginalIDBD):
+    """Version of IDBD specifically made for handling shadow units in a linear model."""
+
     def __init__(
         self,
         *args,
         utility_type: str = 'cbp',
+        real_weights: nn.Parameter,
+        shadow_weights: nn.Parameter,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.utility_type = utility_type
+        self.real_weights = real_weights
+        self.shadow_weights = shadow_weights
+
+        assert (
+            real_weights in self.state and
+            shadow_weights in self.state and
+            len(self.state) == 2
+        ), "IDBD must be initialized with exactly one set of real weight and one set of shadow weight parameters!"
         assert self.version in ('squared_grads', 'squared_inputs'), \
             f"Invalid version: {self.version}. Must be one of: squared_grads, squared_inputs."
 
@@ -189,76 +201,89 @@ class IDBD(OriginalIDBD):
             )
             prediction_grads = {p: g for p, g in zip(all_params, prediction_grads)}
 
+        assert len(self.param_groups) == 1, "IDBD can only handle one parameter group!"
+
         param_updates = []
-        for group in self.param_groups:
-            meta_lr = group['meta_lr']
-            tau = group['tau']
+
+        meta_lr = self.param_groups[0]['meta_lr']
+        tau = self.param_groups[0]['tau']
+        
+        for p in [self.real_weights, self.shadow_weights]:
+            if p.grad is None:
+                continue
             
-            for p in group['params']:
-                if p.grad is None:
-                    continue
+            grad = p.grad
+            
+            if p in param_inputs:
+                assert len(param_inputs[p].shape) == 1, "Inputs must be 1D tensors"
+                inputs = param_inputs[p].unsqueeze(0)
+            elif len(grad.shape) == 1:
+                # This branch is currently not used because I disabled support for bias parameters
+                inputs = torch.ones_like(grad)
+            else:
+                raise ValueError(f"Parameter {p} not found in activations dictionary.")
+            
+            # Get state variables
+            state = self.state[p]
+            beta = state['beta']
+            h = state['h']
+            if self.autostep:
+                v = state['v']
+            
+            
+            ### Different versions of IDBD change how h is decayed ###
+            
+            if self.version == 'squared_inputs':
+                h_decay_term = inputs.pow(2)
+            elif self.version == 'squared_grads':
+                h_decay_term = prediction_grads[p].pow(2)
+            else:
+                raise ValueError(f"Invalid IDBD version: {self.version}")
+            
+            
+            ### Update state variables ###
+            
+            # Calculate and update step-size (learning rate / alpha)
+            if self.autostep:
+                alpha = torch.exp(state['beta'])
+                v = torch.max(
+                    torch.abs(grad * h),
+                    v + 1.0 / tau * alpha * h_decay_term * (torch.abs(grad * h) - v),
+                )
+                new_alpha = alpha * torch.exp(meta_lr * grad * h / v)
+                alpha = torch.where(
+                    v != 0,
+                    new_alpha,
+                    alpha,
+                )
                 
-                grad = p.grad
-                
-                if p in param_inputs:
-                    assert len(param_inputs[p].shape) == 1, "Inputs must be 1D tensors"
-                    inputs = param_inputs[p].unsqueeze(0)
-                elif len(grad.shape) == 1:
-                    # This branch is currently not used because I disabled support for bias parameters
-                    inputs = torch.ones_like(grad)
+                # Normalize the step-size
+                if p is self.real_weights:
+                    real_weights_effective_step_size = torch.sum(alpha * h_decay_term, dim=-1).unsqueeze(1) # (out, 1)
+                    effective_step_size = torch.clamp(real_weights_effective_step_size, min=1.0)
+                elif p is self.shadow_weights and self.utility_type == 'influence':
+                    shadow_weight_step_size_contribs = alpha * h_decay_term # (out, in)
+                    effective_step_size = real_weights_effective_step_size + shadow_weight_step_size_contribs # (out, in)
+                    effective_step_size = torch.clamp(effective_step_size, min=1.0)
+                elif p is self.shadow_weights:
+                    effective_step_size = torch.clamp(real_weights_effective_step_size, min=1.0)
                 else:
-                    raise ValueError(f"Parameter {p} not found in activations dictionary.")
-                
-                # Get state variables
-                state = self.state[p]
-                beta = state['beta']
-                h = state['h']
-                if self.autostep:
-                    v = state['v']
-                
-                
-                ### Different versions of IDBD change how h is decayed ###
-                
-                if self.version == 'squared_inputs':
-                    h_decay_term = inputs.pow(2)
-                elif self.version == 'squared_grads':
-                    h_decay_term = prediction_grads[p].pow(2)
-                else:
-                    raise ValueError(f"Invalid IDBD version: {self.version}")
-                
-                
-                ### Update state variables ###
-                
-                # Calculate and update step-size (learning rate / alpha)
-                if self.autostep:
-                    alpha = torch.exp(state['beta'])
-                    v = torch.max(
-                        torch.abs(grad * h),
-                        v + 1.0 / tau * alpha * h_decay_term * (torch.abs(grad * h) - v),
-                    )
-                    new_alpha = alpha * torch.exp(meta_lr * grad * h / v)
-                    alpha = torch.where(
-                        v != 0,
-                        new_alpha,
-                        alpha,
-                    )
-                    
-                    # Normalize the step-size
-                    effective_step_size = torch.clamp(torch.sum(alpha * h_decay_term, dim=-1), min=1.0)
-                    alpha = alpha / effective_step_size.unsqueeze(1)
-                    state['beta'] = torch.log(alpha)
-                else:
-                    beta.add_(meta_lr * grad * h)
-                    state['beta'] = beta
-                    alpha = torch.exp(beta)
-                
-                # Queue paramter update
-                weight_decay_term = self.weight_decay * p.data if self.weight_decay != 0 else 0
-                param_update = -alpha * (grad + weight_decay_term)
-                param_updates.append((p, param_update))
-                
-                # Update h (gradient trace)
-                state['h'] = h * (1 - alpha * h_decay_term).clamp(min=0) + alpha * grad
+                    raise ValueError(f"Invalid parameter: {p}")
+
+                alpha = alpha / effective_step_size
+                state['beta'] = torch.log(alpha)
+            else:
+                beta.add_(meta_lr * grad * h)
+                state['beta'] = beta
+                alpha = torch.exp(beta)
+            
+            # Queue paramter update
+            weight_decay_term = self.weight_decay * p.data if self.weight_decay != 0 else 0
+            param_update = -alpha * (grad + weight_decay_term)
+            param_updates.append((p, param_update))
+            
+            # Update h (gradient trace)
+            state['h'] = h * (1 - alpha * h_decay_term).clamp(min=0) + alpha * grad
                 
         for p, param_update in param_updates:
             p.add_(param_update)
@@ -443,29 +468,17 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         optimizer = IDBD(
             trainable_params,
-            init_lr=cfg.train.learning_rate,
-            meta_lr=cfg.idbd.meta_learning_rate,
-            version=cfg.idbd.version,
-            weight_decay=cfg.train.weight_decay,
-            autostep=cfg.idbd.autostep,
-            utility_type=cfg.shadow_feature_recycling.utility_type,
+            init_lr = cfg.train.learning_rate,
+            meta_lr = cfg.idbd.meta_learning_rate,
+            version = cfg.idbd.version,
+            weight_decay = cfg.train.weight_decay,
+            autostep = cfg.idbd.autostep,
+            utility_type = cfg.shadow_feature_recycling.utility_type,
+            real_weights = model.layers[-1].weight,
+            shadow_weights = model.shadow_layers[-1].weight,
         )
     else:
         optimizer = prepare_optimizer(model, cfg)
-    
-    # Initialize feature recycler
-    recycler = InputRecycler(
-        n_features=cfg.task.n_features,
-        n_real_features=cfg.task.n_real_features,
-        distractor_chance=cfg.input_recycling.distractor_chance,
-        recycle_rate=cfg.input_recycling.recycle_rate,
-        utility_decay=cfg.input_recycling.utility_decay,
-        use_cbp_utility=cfg.input_recycling.use_cbp_utility,
-        feature_protection_steps=cfg.input_recycling.feature_protection_steps,
-        n_start_real_features=cfg.input_recycling.get('n_start_real_features', -1),
-        device=cfg.device,
-        seed=seed_from_string(base_seed, 'recycler'),
-    )
     
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:
@@ -474,11 +487,12 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+            outgoing_weight_init = 'zeros',
+            incoming_weight_init = 'binary',
             seed = seed_from_string(base_seed, 'cbp_tracker'),
             utility_type = 'cbp',
         )
         cbp_tracker.track_sequential(model.layers)
-        cbp_tracker.incoming_weight_init = 'binary'
     else:
         cbp_tracker = None
     
@@ -489,19 +503,21 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             replace_rate = cfg.shadow_feature_recycling.recycle_rate,
             decay_rate = cfg.shadow_feature_recycling.utility_decay,
             maturity_threshold = cfg.shadow_feature_recycling.feature_protection_steps,
+            incoming_weight_init = 'binary',
+            outgoing_weight_init = 'zeros',
             seed = seed_from_string(cfg.seed, 'shadow_cbp_tracker'),
             utility_type = cfg.shadow_feature_recycling.utility_type,
         )
         shadow_cbp_tracker.track_sequential(model.shadow_layers)
-        shadow_cbp_tracker.incoming_weight_init = 'binary'
     else:
         shadow_cbp_tracker = None
         
-    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker, shadow_cbp_tracker
+    return task, task_iterator, model, criterion, optimizer, cbp_tracker, shadow_cbp_tracker
+
 
 def prepare_experiment(cfg: DictConfig):
     set_seed(cfg.seed)
-    task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker, shadow_cbp_tracker = \
+    task, task_iterator, model, criterion, optimizer, cbp_tracker, shadow_cbp_tracker = \
         prepare_components(cfg)
 
     assert isinstance(task, NonlinearGEOFFTask)
@@ -535,13 +551,13 @@ def prepare_experiment(cfg: DictConfig):
 
     torch.manual_seed(seed_from_string(cfg.seed, 'experiment_setup'))
 
-    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker, shadow_cbp_tracker
+    return task, task_iterator, model, criterion, optimizer, cbp_tracker, shadow_cbp_tracker
 
 
 @hydra.main(config_path='../../conf', config_name='rupam_task_shadow_weights')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
-    task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker, shadow_cbp_tracker = \
+    task, task_iterator, model, criterion, optimizer, cbp_tracker, shadow_cbp_tracker = \
         prepare_experiment(cfg)
 
     run_experiment(cfg, task, task_iterator, model, criterion, optimizer, cbp_tracker, shadow_cbp_tracker)

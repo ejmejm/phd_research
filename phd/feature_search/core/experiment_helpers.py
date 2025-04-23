@@ -195,14 +195,14 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     # Initialize model and optimizer
     if model is None:
         model = MLP(
-            input_dim=cfg.task.n_features,
-            output_dim=cfg.model.output_dim,
-            n_layers=cfg.model.n_layers,
-            hidden_dim=cfg.model.hidden_dim,
-            weight_init_method=cfg.model.weight_init_method,
-            activation=cfg.model.activation,
-            n_frozen_layers=cfg.model.n_frozen_layers,
-            seed=seed_from_string(base_seed, 'model'),
+            input_dim = cfg.task.n_features,
+            output_dim = cfg.model.output_dim,
+            n_layers = cfg.model.n_layers,
+            hidden_dim = cfg.model.hidden_dim,
+            weight_init_method = cfg.model.weight_init_method,
+            activation = cfg.model.activation,
+            n_frozen_layers = cfg.model.n_frozen_layers,
+            seed = seed_from_string(base_seed, 'model'),
         )
     model.to(cfg.device)
     
@@ -212,16 +212,16 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     
     # Initialize feature recycler
     recycler = InputRecycler(
-        n_features=cfg.task.n_features,
-        n_real_features=cfg.task.n_real_features,
-        distractor_chance=cfg.input_recycling.distractor_chance,
-        recycle_rate=cfg.input_recycling.recycle_rate,
-        utility_decay=cfg.input_recycling.utility_decay,
-        use_cbp_utility=cfg.input_recycling.use_cbp_utility,
-        feature_protection_steps=cfg.input_recycling.feature_protection_steps,
-        n_start_real_features=cfg.input_recycling.get('n_start_real_features', -1),
-        device=cfg.device,
-        seed=seed_from_string(base_seed, 'recycler'),
+        n_features = cfg.task.n_features,
+        n_real_features = cfg.task.n_real_features,
+        distractor_chance = cfg.input_recycling.distractor_chance,
+        recycle_rate = cfg.input_recycling.recycle_rate,
+        utility_decay = cfg.input_recycling.utility_decay,
+        use_cbp_utility = cfg.input_recycling.use_cbp_utility,
+        feature_protection_steps = cfg.input_recycling.feature_protection_steps,
+        n_start_real_features = cfg.input_recycling.get('n_start_real_features', -1),
+        device = cfg.device,
+        seed = seed_from_string(base_seed, 'recycler'),
     )
     
     # Initialize CBP tracker
@@ -231,7 +231,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-            seed=seed_from_string(base_seed, 'cbp_tracker'),
+            seed = seed_from_string(base_seed, 'cbp_tracker'),
         )
         cbp_tracker.track_sequential(model.layers)
     else:
