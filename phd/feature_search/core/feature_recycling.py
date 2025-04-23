@@ -633,8 +633,8 @@ class CBPTracker():
             self._feature_stats[layer][key][idxs] = 0
 
         if 'utility' in self._feature_stats[layer]:
-            median_utility = self._feature_stats[layer]['utility'].median()
             if self._utility_reset_mode == 'median':
+                median_utility = self._feature_stats[layer]['utility'].median()
                 self._feature_stats[layer]['utility'][idxs] = median_utility
             elif self._utility_reset_mode == 'zero':
                 self._feature_stats[layer]['utility'][idxs] = 0

@@ -101,6 +101,54 @@ class ShadowUnitsMLP(MLP):
         return value, param_inputs
 
 
+class ShadowCBPTracker(CBPTracker):
+    """Perform CBP for recycling features."""
+    
+    # TODO: Reimplement weight initialization between model, cbp, and input recycler
+    # so that they share the same initialization methods
+    def __init__(
+        self,
+        *args,
+        utility_type: str = 'cbp', # {'cbp', 'age_normalized', 'influence'}
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        assert utility_type in ('cbp', 'age_normalized', 'influence'), \
+            "Invalid shadow utility type! Must be one of: {cbp, age_normalized, influence}."
+        self.utility_type = utility_type
+
+    def _get_hook(self, layer: nn.Module):
+        """Return a hook function for a given layer."""
+        def track_cbp_stats(module: nn.Module, input: torch.Tensor, output: torch.Tensor):
+            if not module.training:
+                return
+
+            input = input[0]
+            
+            with torch.no_grad():
+                output_magnitude = torch.abs(output)
+                
+                # Mean over batch dimension if present
+                if len(output_magnitude.shape) == 2:
+                    output_magnitude = output_magnitude.mean(dim=0)
+                
+                self._feature_stats[module]['age'] = torch.ones_like(output_magnitude) + self._feature_stats[module]['age']
+
+                output_layer = self._tracked_layers[layer][1]
+                raw_utility = output_magnitude * self._get_output_weight_sums(output_layer)
+                
+                if self.utility_type == 'age_normalized':
+                    age_normalized_utility = raw_utility / (self._feature_stats[module]['age'] + 1)
+                    self._feature_stats[module]['utility'] = (1 - self.decay_rate) * age_normalized_utility \
+                        + self.decay_rate * self._feature_stats[module]['utility']
+                else:
+                    self._feature_stats[module]['utility'] = (1 - self.decay_rate) * raw_utility \
+                        + self.decay_rate * self._feature_stats[module]['utility']
+
+        return track_cbp_stats
+    
+
+
 # TODO: Consider changing the calculation for shadow weights so that the loss includes the contribution of just that single shadow unit
 
 
@@ -151,6 +199,7 @@ def run_experiment(
                 assert len(pruned_idxs) <= model.shadow_layers[-1].in_features, \
                     "Not enough shadow units to replace all pruned features!"
                 
+                # TODO: When the shadow utility type is set to 'influence', consider also copying over outgoing weights
                 # Replace each of the pruned features with the highest utility shadow features
 
                 shadow_feature_utilities = list(shadow_cbp_tracker._feature_stats.values())[0]['utility']
@@ -161,25 +210,28 @@ def run_experiment(
                         shadow_feature_weights = model.shadow_layers[0].weight[shadow_feature_rankings[i], :]
                         model.layers[0].weight[real_idx, :] = shadow_feature_weights
                 
+                used_shadow_unit_idxs = shadow_feature_rankings[:len(pruned_idxs)]
+                shadow_feature_layer = model.shadow_layers[1] # Activation layer
+                shadow_cbp_tracker._prune_layer(shadow_feature_layer, used_shadow_unit_idxs)
 
-                # Reset all shadow feature weights and CBP tracker stats
+                # # Reset all shadow feature weights and CBP tracker stats
 
-                model._initialize_weights(model.shadow_layers[0], 'binary')
-                model._initialize_weights(model.shadow_layers[-1], 'zeros')
-                for layer in shadow_cbp_tracker._feature_stats:
-                    stat_keys = list(shadow_cbp_tracker._feature_stats[layer].keys())
-                    for key in stat_keys:
-                        del shadow_cbp_tracker._feature_stats[layer][key]
+                # model._initialize_weights(model.shadow_layers[0], 'binary')
+                # model._initialize_weights(model.shadow_layers[-1], 'zeros')
+                # for layer in shadow_cbp_tracker._feature_stats:
+                #     stat_keys = list(shadow_cbp_tracker._feature_stats[layer].keys())
+                #     for key in stat_keys:
+                #         del shadow_cbp_tracker._feature_stats[layer][key]
 
-                # Reset shadow features optimizer state
+                # # Reset shadow features optimizer state
 
-                shadow_unit_weights = model.shadow_layers[-1].weight
-                optim_state = optimizer.state[shadow_unit_weights]
+                # shadow_unit_weights = model.shadow_layers[-1].weight
+                # optim_state = optimizer.state[shadow_unit_weights]
 
-                optim_state['beta'] = torch.full_like(optim_state['beta'], math.log(optimizer.init_lr))
-                optim_state['h'] = torch.zeros_like(optim_state['h'])
-                if 'v' in optim_state:
-                    optim_state['v'] = torch.zeros_like(optim_state['v'])
+                # optim_state['beta'] = torch.full_like(optim_state['beta'], math.log(optimizer.init_lr))
+                # optim_state['h'] = torch.zeros_like(optim_state['h'])
+                # if 'v' in optim_state:
+                #     optim_state['v'] = torch.zeros_like(optim_state['v'])
 
         # Backward pass
         optimizer.zero_grad()
@@ -270,13 +322,14 @@ def prepare_experiment(cfg: DictConfig):
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
 
     # Additionaly initialize the CBP tracker for the shadow units
-    if cfg.feature_recycling.use_cbp_utility:
-        shadow_cbp_tracker = CBPTracker(
+    if cfg.shadow_feature_recycling.use_cbp_utility:
+        shadow_cbp_tracker = ShadowCBPTracker(
             optimizer = optimizer,
-            replace_rate = cfg.feature_recycling.recycle_rate,
-            decay_rate = cfg.feature_recycling.utility_decay,
-            maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+            replace_rate = cfg.shadow_feature_recycling.recycle_rate,
+            decay_rate = cfg.shadow_feature_recycling.utility_decay,
+            maturity_threshold = cfg.shadow_feature_recycling.feature_protection_steps,
             seed = seed_from_string(cfg.seed, 'shadow_cbp_tracker'),
+            utility_type = cfg.shadow_feature_recycling.utility_type,
         )
         shadow_cbp_tracker.track_sequential(model.shadow_layers)
     
