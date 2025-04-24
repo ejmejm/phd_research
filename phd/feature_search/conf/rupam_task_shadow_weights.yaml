@@ -2,8 +2,6 @@ defaults:
   - rupam_task
   - _self_
 
-seed: 9
-
 model:
   fraction_shadow_units: 0.5
 
@@ -13,6 +11,3 @@ shadow_feature_recycling:
   recycle_rate: 0.0 # 0.005
   utility_decay: 0.99
   feature_protection_steps: 0
-
-idbd:
-  version: 'squared_grads'
