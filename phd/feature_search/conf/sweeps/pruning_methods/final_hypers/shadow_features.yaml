@@ -1,0 +1,70 @@
+program: scripts/recycling_methods/shadow_unit_recycling.py
+method: grid
+project: feature_recycling-rupam_task_pruning_methods-final_hypers
+name: shadow_feature_recycling
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=rupam_task_shadow_weights.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  wandb:
+    value: True
+  device:
+    value: cuda
+
+  feature_recycling.use_cbp_utility:
+    value: True
+  feature_recycling.utility_decay:
+    value: 0.99
+  feature_recycling.recycle_rate:
+    value: 0.005
+  feature_recycling.feature_protection_steps:
+    value: 0
+
+  shadow_feature_recycling.use_cbp_utility:
+    value: True
+  shadow_feature_recycling.utility_decay:
+    value: 0.99
+  shadow_feature_recycling.feature_protection_steps:
+    value: 0
+  
+
+  train.total_steps:
+    value: 500000
+  train.optimizer:
+    value: idbd
+  train.learning_rate:
+    value: "\"${eval:0.03 / ${model.hidden_dim} ** 0.75}\""
+  
+  # IDBD parameters
+  idbd.version:
+    value: squared_grads
+  idbd.autostep:
+    value: true
+  idbd.meta_learning_rate:
+    value: 0.005
+
+  model.fraction_shadow_units:
+    value: 0.98
+
+  shadow_feature_recycling.recycle_rate:
+    value: 0.01
+
+  shadow_feature_recycling.utility_type:
+    values: ['age_normalized', 'influence'] # {cbp, age_normalized, influence}
+
+  model.hidden_dim:
+    values: [20, 80, 320, 1280, 5120, 20480]
+  seed:
+    values: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
