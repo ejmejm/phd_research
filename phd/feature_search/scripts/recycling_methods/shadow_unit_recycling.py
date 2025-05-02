@@ -449,6 +449,11 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
         full_hidden_dim = cfg.model.hidden_dim
         n_shadow_units = int(cfg.model.fraction_shadow_units * full_hidden_dim)
         n_real_units = full_hidden_dim - n_shadow_units
+
+        logger.info(f"Shadow units: {n_shadow_units}, Real units: {n_real_units}")
+        wandb.summary['n_shadow_units'] = n_shadow_units
+        wandb.summary['n_real_units'] = n_real_units
+
         model = ShadowUnitsMLP(
             input_dim = cfg.task.n_features,
             n_shadow_units = n_shadow_units,
@@ -505,7 +510,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             maturity_threshold = cfg.shadow_feature_recycling.feature_protection_steps,
             incoming_weight_init = 'binary',
             outgoing_weight_init = 'zeros',
-            seed = seed_from_string(cfg.seed, 'shadow_cbp_tracker'),
+            seed = seed_from_string(base_seed, 'shadow_cbp_tracker'),
             utility_type = cfg.shadow_feature_recycling.utility_type,
         )
         shadow_cbp_tracker.track_sequential(model.shadow_layers)
@@ -517,6 +522,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
 
 def prepare_experiment(cfg: DictConfig):
     set_seed(cfg.seed)
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
     task, task_iterator, model, criterion, optimizer, cbp_tracker, shadow_cbp_tracker = \
         prepare_components(cfg)
 
@@ -533,7 +539,7 @@ def prepare_experiment(cfg: DictConfig):
 
     # Init target output weights to kaiming uniform and predictor output weights to zero
     task_init_generator = torch.Generator(device=task.weights[-1].device)
-    task_init_generator.manual_seed(seed_from_string(cfg.seed, 'task_init_generator'))
+    task_init_generator.manual_seed(seed_from_string(base_seed, 'task_init_generator'))
     torch.nn.init.kaiming_uniform_(
         task.weights[-1],
         mode = 'fan_in',
@@ -549,7 +555,7 @@ def prepare_experiment(cfg: DictConfig):
             layer.threshold = ltu_threshold
     task.activation_fn.threshold = ltu_threshold
 
-    torch.manual_seed(seed_from_string(cfg.seed, 'experiment_setup'))
+    torch.manual_seed(seed_from_string(base_seed, 'experiment_setup'))
 
     return task, task_iterator, model, criterion, optimizer, cbp_tracker, shadow_cbp_tracker
 
