@@ -102,7 +102,7 @@ class ShadowUnitsMLP(MLP):
         return value, param_inputs
 
 
-# *Note: If I change to using a kaiming_uniform wieght init, I will need to update CBPTracker so that that
+# *Note: If I change to using a kaiming_uniform weight init, I will need to update CBPTracker so that that
 #        both real and shadow unit input weights are initialized as if there are |real weights| inputs or
 #        |real weights| + 1 inputs when using influence utility
 
@@ -289,11 +289,6 @@ class IDBD(OriginalIDBD):
             p.add_(param_update)
 
 
-# TODO: Consider changing the calculation for shadow weights so that the loss includes the contribution of just that single shadow unit
-# TODO: Check to make sure the shadow weights are not changing how squared_grads version of IDBD works.
-#       Can check this by making sure squared_grads and squared_inputs give the exact same results.
-
-
 def run_experiment(
         cfg: DictConfig,
         task: NonlinearGEOFFTask,
@@ -446,20 +441,14 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     
     # Initialize model and optimizer
     if model is None:
-        full_hidden_dim = cfg.model.hidden_dim
-        n_shadow_units = int(cfg.model.fraction_shadow_units * full_hidden_dim)
-        n_real_units = full_hidden_dim - n_shadow_units
-
-        logger.info(f"Shadow units: {n_shadow_units}, Real units: {n_real_units}")
-        wandb.summary['n_shadow_units'] = n_shadow_units
-        wandb.summary['n_real_units'] = n_real_units
+        logger.info(f"Shadow units: {cfg.model.shadow_dim}, Real hidden units: {cfg.model.hidden_dim}")
 
         model = ShadowUnitsMLP(
             input_dim = cfg.task.n_features,
-            n_shadow_units = n_shadow_units,
+            n_shadow_units = cfg.model.shadow_dim,
             output_dim = cfg.model.output_dim,
             n_layers = cfg.model.n_layers,
-            hidden_dim = n_real_units,
+            hidden_dim = cfg.model.hidden_dim,
             weight_init_method = cfg.model.weight_init_method,
             activation = cfg.model.activation,
             n_frozen_layers = cfg.model.n_frozen_layers,

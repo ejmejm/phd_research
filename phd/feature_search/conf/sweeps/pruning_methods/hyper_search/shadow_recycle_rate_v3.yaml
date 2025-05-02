@@ -45,7 +45,7 @@ parameters:
   train.optimizer:
     value: idbd
   train.learning_rate:
-    value: "\"${eval:0.03 / ((1 - ${model.fraction_shadow_units}) * ${model.hidden_dim}) ** 0.75}\""
+    value: "\"${eval:0.03 / ${model.hidden_dim} ** 0.75}\""
   
   # IDBD parameters
   idbd.version:
@@ -56,9 +56,9 @@ parameters:
     value: 0.005
 
   model.hidden_dim:
-    value: 5000
-  model.fraction_shadow_units:
-    value: 0.98
+    value: 100
+  model.shadow_dim:
+    value: 4900
 
 
   shadow_feature_recycling.utility_type:

@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 model:
-  fraction_shadow_units: 0.5
+  shadow_dim: ${model.hidden_dim}
 
 shadow_feature_recycling:
   use_cbp_utility: true
