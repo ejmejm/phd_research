@@ -123,6 +123,8 @@ class NonlinearGEOFFTask:
         activation: str = 'relu',
         sparsity: float = 0.0,
         weight_init: str = 'binary',
+        input_mean_range: Tuple[float, float] = (0, 0),
+        input_std_range: Tuple[float, float] = (1, 1),
         seed: Optional[int] = None,
     ):
         """
@@ -153,8 +155,9 @@ class NonlinearGEOFFTask:
         
         # Create a generator for all random behaviors
         self.generator = torch.Generator()
-        if seed is not None:
-            self.generator.manual_seed(seed)
+        if seed is None:
+            seed = random.randint(0, 1000000000)
+        self.generator.manual_seed(seed)
             
         # Set activation function
         if activation == 'relu':
@@ -167,14 +170,26 @@ class NonlinearGEOFFTask:
             self.activation_fn = LTU()
         else:
             raise ValueError(f"Unsupported activation: {activation}")
+        
+        if tuple(input_mean_range) != (0, 0) or tuple(input_std_range) != (1, 1):
+            self.standard_input = False
+
+            # Initialize input distribution parameters
+            self.input_mean = torch.zeros(n_features)
+            self.input_std = torch.ones(n_features)
             
+            # Sample mean and std values uniformly from specified ranges
+            self.input_mean.uniform_(*input_mean_range, generator=self.generator)
+            self.input_std.uniform_(*input_std_range, generator=self.generator)
+        else:
+            self.standard_input = True
 
         # Initialize network weights
         self.weights = []
         
         if n_layers == 1:
             # For linear case, single layer mapping input to output
-            layer_weights = self._initialize_weights(n_features, 1, is_last_layer=True)
+            layer_weights = self._initialize_weights(n_features, 1)
             self.weights.append(layer_weights)
             self.flip_accumulators.append(flip_rate * n_features)
         else:
@@ -198,14 +213,14 @@ class NonlinearGEOFFTask:
                 self.flip_accumulators.append(flip_rate * n_flippable)
             
             # Output layer
-            output_weights = self._initialize_weights(hidden_dim, 1, is_last_layer=True)
+            output_weights = self._initialize_weights(hidden_dim, 1)
             self.weights.append(output_weights)
             
             # Output layer flippable weights
             n_flippable = hidden_dim
             self.flip_accumulators.append(flip_rate * n_flippable)
     
-    def _initialize_weights(self, in_features: int, out_features: int, is_last_layer: bool = False) -> torch.Tensor:
+    def _initialize_weights(self, in_features: int, out_features: int) -> torch.Tensor:
         """Initialize weights based on specified initialization method.
         
         Args:
@@ -220,8 +235,8 @@ class NonlinearGEOFFTask:
         else:  # kaiming_uniform
             weights = torch.nn.init.kaiming_uniform_(
                 torch.empty(in_features, out_features),
-                mode='fan_in',
-                nonlinearity='relu'
+                mode = 'fan_in',
+                nonlinearity = 'relu',
             )
         return weights * self.weight_scale
     
@@ -232,8 +247,7 @@ class NonlinearGEOFFTask:
         n_zero = int(sparsity * weights.numel())
         flat_idx = torch.randperm(weights.numel(), generator=self.generator)[:n_zero]
         weights.view(-1)[flat_idx] = 0
-    
-    
+
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the target network."""
         with torch.no_grad():
@@ -245,7 +259,6 @@ class NonlinearGEOFFTask:
                 x = self.activation_fn(x)
             return x @ self.weights[-1]
 
-    
     def _flip_signs(self):
         """Flip signs of weights based on accumulated probabilities."""
         for layer_idx, (weights, accumulator) in enumerate(
@@ -280,6 +293,8 @@ class NonlinearGEOFFTask:
             
             # Generate random input features
             x = torch.randn(batch_size, self.n_features, generator=self.generator)
+            if not self.standard_input:
+                x = x * self.input_std.unsqueeze(0) + self.input_mean.unsqueeze(0)
             
             # Forward pass through target network
             y = self._forward(x)
