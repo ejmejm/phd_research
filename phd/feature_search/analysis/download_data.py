@@ -160,6 +160,7 @@ run_df_data = {
     **config_df_data
 }
 run_df = pd.DataFrame(run_df_data)
+os.makedirs('data', exist_ok=True)
 run_df.to_csv(f'data/{args.project}_config_data.csv')
 
 # Create logged data dataframe
