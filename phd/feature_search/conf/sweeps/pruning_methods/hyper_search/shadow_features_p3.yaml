@@ -1,7 +1,7 @@
 program: scripts/recycling_methods/shadow_unit_recycling.py
 method: grid
 project: feature_recycling-rupam_task_pruning_methods-hyper_search
-name: shadow_feature_recycle_rate_v3
+name: shadow_features_p3
 
 
 command:
@@ -27,8 +27,6 @@ parameters:
     value: True
   feature_recycling.utility_decay:
     value: 0.99
-  feature_recycling.recycle_rate:
-    value: 0.005
   feature_recycling.feature_protection_steps:
     value: 0
 
@@ -55,15 +53,17 @@ parameters:
   idbd.meta_learning_rate:
     value: 0.005
 
-  model.hidden_dim:
-    value: 100
   model.shadow_dim:
-    value: 4900
-
+    value: ${model.hidden_dim}
 
   shadow_feature_recycling.utility_type:
-    values: ['cbp', 'age_normalized', 'influence'] # {cbp, age_normalized, influence}
+    value: 'influence' # {cbp, age_normalized, influence}
+
+  model.hidden_dim:
+    values: [40, 640, 10240]
   shadow_feature_recycling.recycle_rate:
-    values: [0.0, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]
+    values: [0.0005, 0.001, 0.005, 0.01]
+  feature_recycling.recycle_rate:
+    values: [0.00005, 0.0001, 0.0005, 0.001]
   seed:
-    values: [1, 2]
+    values: [1, 2, 3]

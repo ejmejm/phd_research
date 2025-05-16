@@ -1,7 +1,7 @@
 program: scripts/recycling_methods/shadow_unit_recycling.py
 method: grid
 project: feature_recycling-rupam_task_pruning_methods-hyper_search
-name: shadow_feature_recycle_rate
+name: shadow_feature_recycle_rate_fixed
 
 
 command:
@@ -21,7 +21,7 @@ parameters:
   wandb:
     value: True
   device:
-    value: cpu
+    value: cuda
 
   feature_recycling.use_cbp_utility:
     value: True
@@ -56,9 +56,9 @@ parameters:
     value: 0.005
 
   model.hidden_dim:
-    value: 200
-  model.fraction_shadow_units:
-    value: 0.5
+    value: 100
+  model.shadow_dim:
+    value: 100
 
 
   shadow_feature_recycling.utility_type:
