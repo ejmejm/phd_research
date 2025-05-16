@@ -24,19 +24,6 @@ from phd.feature_search.scripts.feature_maturity_experiment import *
 logger = logging.getLogger(__name__)
 
 
-# TODO:
-# [x] Make a distractor mask at the start of training for all the features
-# [x] Define config variables for the mean and variance range of distractors
-# [x] Keep an array for the mean and variance of the distractors
-# [x] Set which features are distractors at start of training
-# [x] Set the distractor mean and variance at the start of training
-# [x] Override weight initialization for the distractors to be 0 in inputs
-# [x] Make custom model that can set the distractor hidden units to random
-#     values each step during the forward pass
-# [x] Update the distractor mask each time a feature is replaced
-# [x] Update the distractor mean and variance each time a feature is replaced
-# [x] Override incoming weights of any new distractor features to 0
-
 class DistractorTracker():
     def __init__(
             self,
@@ -213,7 +200,7 @@ def run_experiment(
             total_pruned += n_pruned
 
             if prune_layer in pruned_idxs and len(pruned_idxs[prune_layer]) > 0:
-                new_feature_idxs = pruned_idxs[prune_layer]
+                new_feature_idxs = pruned_idxs[prune_layer].tolist()
 
                 # Turn some features into distractors
                 distractor_tracker.process_new_features(new_feature_idxs)
