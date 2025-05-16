@@ -62,9 +62,10 @@ class ParallelLinear(nn.Module):
         self.n_parallel = n_parallel
         self.generator = generator
         
-        self.weight = nn.Parameter(torch.empty(n_parallel, out_features, in_features))
+        # Reshape weight to (n_parallel * out_features, in_features) for efficient matmul
+        self.weight = nn.Parameter(torch.empty(n_parallel * out_features, in_features))
         if bias:
-            self.bias = nn.Parameter(torch.empty(n_parallel, out_features))
+            self.bias = nn.Parameter(torch.empty(n_parallel * out_features))
         else:
             self.register_parameter('bias', None)
             
@@ -81,26 +82,28 @@ class ParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Input tensor of shape (in_features,) or (n_parallel, in_features)
+            x: Input tensor of shape (batch_size, in_features) or (in_features,)
             
         Returns:
-            Output tensor of shape (n_parallel, out_features)
+            Output tensor of shape (batch_size, n_parallel, out_features) or (n_parallel, out_features)
         """
-        # Reshape input to (n_parallel, in_features, 1)
+        # Handle single sample case
         if x.dim() == 1:
-            x = x.unsqueeze(0).unsqueeze(2).expand(self.n_parallel, -1, 1)
-        elif x.dim() == 2:
-            x = x.unsqueeze(2)
-        else:
-            raise ValueError(f'Input tensor must have 1 or 2 dimensions, got {x.dim()}')
+            x = x.unsqueeze(0)
         
         # Apply parallel matrix multiplication
-        output = torch.bmm(self.weight, x)
-        output = output.squeeze(2)
-        
+        output = torch.matmul(x, self.weight.t())
         if self.bias is not None:
-            output += self.bias
+            output = output + self.bias
+            
+        # Reshape to (batch_size, n_parallel, out_features)
+        batch_size = x.size(0)
+        output = output.view(batch_size, self.n_parallel, self.out_features)
         
+        # Remove batch dimension if input was single sample
+        if x.size(0) == 1:
+            output = output.squeeze(0)
+            
         return output
 
 
