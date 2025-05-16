@@ -19,7 +19,9 @@ from .models import MLP
 from .tasks import DummyTask, GEOFFTask, NonlinearGEOFFTask
 
 
-omegaconf.OmegaConf.register_new_resolver('eval', lambda x: eval(str(x)))
+# Only register resolver if it hasn't been registered yet
+if not omegaconf.OmegaConf.has_resolver('eval'):
+    omegaconf.OmegaConf.register_new_resolver('eval', lambda x: eval(str(x)))
 
 
 def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
