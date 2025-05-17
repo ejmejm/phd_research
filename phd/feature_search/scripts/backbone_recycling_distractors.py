@@ -240,6 +240,7 @@ def run_experiment(
                 'cumulative_loss': cumulative_loss,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
+                'n_distractors': distractor_tracker.distractor_mask.sum().item(),
             }
 
             if pruned_accum > 0:
@@ -247,8 +248,21 @@ def run_experiment(
                 pruned_newest_feature_accum = 0
                 pruned_accum = 0
 
-            # Add model statistics
-            metrics.update(get_model_statistics(model, features, param_inputs))
+            # Add model statistics separately for real and distractor features
+            real_feature_masks = [
+                torch.ones(model.layers[0].weight.shape[1], dtype=torch.bool, device=model.layers[0].weight.device),
+                ~distractor_tracker.distractor_mask,
+            ]
+            metrics.update(get_model_statistics(
+                model, features, param_inputs, real_feature_masks, metric_prefix='real_'))
+            
+            distractor_feature_masks = [
+                real_feature_masks[0],
+                distractor_tracker.distractor_mask,
+            ]
+            metrics.update(get_model_statistics(
+                model, features, param_inputs, distractor_feature_masks, metric_prefix='distractor_'))
+
             wandb.log(metrics)
             
             pbar.set_postfix(loss=metrics['loss'])

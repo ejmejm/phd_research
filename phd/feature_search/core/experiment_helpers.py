@@ -1,7 +1,7 @@
 import hashlib
 import os
 import random
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -123,7 +123,13 @@ def seed_from_string(seed: Optional[int], string: str) -> Optional[int]:
     return seed + int(hashlib.md5(string.encode()).hexdigest(), 16) % (2**32)
 
 
-def get_model_statistics(model: MLP, features: torch.Tensor, param_inputs: Dict[str, torch.Tensor]) -> Dict[str, float]:
+def get_model_statistics(
+    model: MLP,
+    features: torch.Tensor,
+    param_inputs: Dict[str, torch.Tensor],
+    masks: Optional[List[torch.Tensor]] = None,
+    metric_prefix: str = '',
+) -> Dict[str, float]:
     """
     Compute statistics about the model's weights, biases, and layer inputs.
     
@@ -131,6 +137,8 @@ def get_model_statistics(model: MLP, features: torch.Tensor, param_inputs: Dict[
         model: The MLP model to analyze
         features: Input features to compute layer activations
         param_inputs: Dictionary mapping weight parameters to their inputs
+        masks: Optional list of boolean masks for computing statistics only on certain
+            units in each layer. If provided, must contain one mask per layer.
         
     Returns:
         Dictionary containing various model statistics
@@ -139,24 +147,39 @@ def get_model_statistics(model: MLP, features: torch.Tensor, param_inputs: Dict[
     
     # Compute statistics for each layer
     linear_layers = [layer for layer in model.layers if isinstance(layer, nn.Linear)]
+    
+    if masks is not None:
+        # Verify we have one mask per layer
+        assert len(masks) == len(linear_layers), \
+            f"Expected {len(linear_layers)} masks but got {len(masks)}"
+    
     for i, layer in enumerate(linear_layers):
-        # Weight norms
-        weight_l1 = torch.norm(layer.weight, p=1).item() / layer.weight.numel()
-
-        stats[f'layer_{i}/weight_l1'] = weight_l1
+        mask = masks[i] if masks is not None else \
+            torch.ones(layer.weight.shape[1], dtype=torch.bool, device=layer.weight.device)
+            # torch.ones_like(layer.weight[:,0], dtype=torch.bool)
         
-        # Bias norms (if exists)
-        if layer.bias is not None:
-            bias_l1 = torch.norm(layer.bias, p=1).item() / layer.bias.numel()
-            stats[f'layer_{i}/bias_l1'] = bias_l1
+        # Weight norms (masked)
+        weight_masked = layer.weight[:, mask]
+        weight_l1 = torch.norm(weight_masked, p=1).item() / weight_masked.numel()
+        stats[f'layer_{i}/{metric_prefix}weight_l1'] = weight_l1
         
-        # Input norms
+        # # Bias norms (if exists, masked)
+        # if layer.bias is not None:
+        #     bias_masked = layer.bias[mask]
+        #     bias_l1 = torch.norm(bias_masked, p=1).item() / bias_masked.numel()
+        #     stats[f'layer_{i}/bias_l1'] = bias_l1
+        
+        # Input norms (masked)
         if i == 0:
-            input_l1 = torch.norm(features, p=1, dim=1).mean().item() / features.shape[1]
+            input_l1 = torch.norm(features[:, mask], p=1, dim=1) / mask.sum()
+            input_l1 = input_l1.mean().item()
         else:
             layer_inputs = param_inputs[layer.weight]
-            input_l1 = torch.norm(layer_inputs, p=1, dim=-1).mean().item() / layer_inputs.shape[-1]
-        stats[f'layer_{i}/input_l1'] = input_l1
+            if layer_inputs.ndim == 1:
+                layer_inputs = layer_inputs.unsqueeze(0)
+            input_l1 = torch.norm(layer_inputs[:, mask], p=1, dim=-1) / mask.sum()
+            input_l1 = input_l1.mean().item()
+        stats[f'layer_{i}/{metric_prefix}input_l1'] = input_l1
     
     return stats
 
