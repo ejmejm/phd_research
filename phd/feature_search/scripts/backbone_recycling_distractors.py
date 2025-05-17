@@ -55,6 +55,8 @@ class DistractorTracker():
         # Use torch_rng for uniform sampling
         self.distractor_means.uniform_(*mean_range, generator=self.torch_rng)
         self.distractor_stds.uniform_(*std_range, generator=self.torch_rng)
+
+        self.distractor_values = None  # Will be initialized on first use
     
     def process_new_features(self, new_feature_idxs: List[int]):
         if len(new_feature_idxs) == 0:
@@ -102,14 +104,22 @@ class DistractorTracker():
             
         # Generate random values for entire batch
         batch_size = x.shape[0]
-        distractor_values = torch.randn(
-            (batch_size, self.n_features), 
-            device=self.device,
-            generator=self.torch_rng
-        ) * self.distractor_stds.unsqueeze(0) + self.distractor_means.unsqueeze(0)
         
-        # x = x.clone() # Apparently this severs the computation graph
-        x[:, self.distractor_mask] = distractor_values[:, self.distractor_mask]
+        # Initialize or resize the pre-allocated tensor if needed
+        if self.distractor_values is None or self.distractor_values.shape[0] != batch_size:
+            self.distractor_values = torch.empty(
+                (batch_size, self.n_features), 
+                device=self.device
+            )
+        
+        # Generate random values in-place
+        self.distractor_values.normal_(generator=self.torch_rng)
+        self.distractor_values.mul_(self.distractor_stds.unsqueeze(0))
+        self.distractor_values.add_(self.distractor_means.unsqueeze(0))
+        
+        # TODO: Fix this taking so long
+        # x = x * ~self.distractor_mask + self.distractor_values * self.distractor_mask
+        x[:, self.distractor_mask] = self.distractor_values[:, self.distractor_mask]
         return x
 
 
