@@ -203,6 +203,10 @@ def run_experiment(
         target_buffer.extend(targets.view(-1).tolist())
         features, targets = inputs.to(cfg.device), targets.to(cfg.device)
 
+        # Add noise to targets
+        if cfg.task.noise_std > 0:
+            targets += torch.randn_like(targets) * cfg.task.noise_std
+
         # Reset weights and optimizer states for recycled features
         if cbp_tracker is not None:
             pruned_idxs = cbp_tracker.prune_features()

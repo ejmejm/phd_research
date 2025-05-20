@@ -160,8 +160,11 @@ def get_model_statistics(
         
         # Weight norms (masked)
         weight_masked = layer.weight[:, mask]
-        weight_l1 = torch.norm(weight_masked, p=1).item() / weight_masked.numel()
-        stats[f'layer_{i}/{metric_prefix}weight_l1'] = weight_l1
+        if weight_masked.numel() > 0:
+            weight_l1 = torch.norm(weight_masked, p=1).item() / weight_masked.numel()
+            stats[f'layer_{i}/{metric_prefix}weight_l1'] = weight_l1
+        else:
+            stats[f'layer_{i}/{metric_prefix}weight_l1'] = 0.0
         
         # # Bias norms (if exists, masked)
         # if layer.bias is not None:
@@ -170,15 +173,18 @@ def get_model_statistics(
         #     stats[f'layer_{i}/bias_l1'] = bias_l1
         
         # Input norms (masked)
-        if i == 0:
-            input_l1 = torch.norm(features[:, mask], p=1, dim=1) / mask.sum()
-            input_l1 = input_l1.mean().item()
+        if mask.sum() > 0:
+            if i == 0:
+                input_l1 = torch.norm(features[:, mask], p=1, dim=1) / mask.sum()
+                input_l1 = input_l1.mean().item()
+            else:
+                layer_inputs = param_inputs[layer.weight]
+                if layer_inputs.ndim == 1:
+                    layer_inputs = layer_inputs.unsqueeze(0)
+                input_l1 = torch.norm(layer_inputs[:, mask], p=1, dim=-1) / mask.sum()
+                input_l1 = input_l1.mean().item()
         else:
-            layer_inputs = param_inputs[layer.weight]
-            if layer_inputs.ndim == 1:
-                layer_inputs = layer_inputs.unsqueeze(0)
-            input_l1 = torch.norm(layer_inputs[:, mask], p=1, dim=-1) / mask.sum()
-            input_l1 = input_l1.mean().item()
+            input_l1 = 0.0
         stats[f'layer_{i}/{metric_prefix}input_l1'] = input_l1
     
     return stats
