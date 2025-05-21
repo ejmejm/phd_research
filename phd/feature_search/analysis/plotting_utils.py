@@ -31,7 +31,6 @@ def bin_df(df, n_bins=10, bin_var='step', zero_start=True, run_key='run_id'):
   num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
   # Use dictionary comprehension to create an aggregation dictionary
   agg_dict = {col: 'mean' if col in num_cols else 'first' for col in df.columns}
-  print(agg_dict)
 
   with warnings.catch_warnings():
     warnings.simplefilter('ignore', category=FutureWarning)
