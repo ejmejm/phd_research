@@ -184,7 +184,7 @@ def run_experiment(
     total_pruned = 0
     target_buffer = []
 
-    while step < 1000: # cfg.train.total_steps:
+    while step < cfg.train.total_steps:
 
         # Generate batch of data
         inputs, targets = next(task_iterator)
