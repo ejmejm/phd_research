@@ -184,7 +184,7 @@ def run_experiment(
     total_pruned = 0
     target_buffer = []
 
-    while step < cfg.train.total_steps:
+    while step < 1000: # cfg.train.total_steps:
 
         # Generate batch of data
         inputs, targets = next(task_iterator)
@@ -281,7 +281,7 @@ def run_experiment(
     wandb.finish()
 
 
-@hydra.main(config_path='../conf', config_name='rupam_distractors_task')
+@hydra.main(config_path='../conf', config_name='full_backbone_recycling')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"

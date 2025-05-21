@@ -1,7 +1,0 @@
-defaults:
-  - rupam_distractors_task
-  - _self_
-
-train:
-  backprop_enabled: false
-  backprop_step_size: 0.001

@@ -1,4 +1,4 @@
-program: scripts/backbone_recycling_distractors.py
+program: scripts/full_backbone_recycling.py
 method: grid
 project: feature_recycling-rupam_distractors_task-hyper_search
 name: target_noise_n_features
@@ -8,7 +8,7 @@ command:
   - ${env}
   - python
   - ${program}
-  - --config-name=rupam_distractors_task.yaml
+  - --config-name=full_backbone_recycling.yaml
   - ${args_no_hyphens}
 
 
