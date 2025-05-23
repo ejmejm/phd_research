@@ -54,7 +54,6 @@ class MLP(eqx.Module):
     n_layers: int = eqx.field(static=True)
     hidden_dim: int = eqx.field(static=True)
     weight_init_method: str = eqx.field(static=True)
-    activation_name: str = eqx.field(static=True)
     n_frozen_layers: int = eqx.field(static=True)
     
     layers: List[Any]
@@ -88,7 +87,6 @@ class MLP(eqx.Module):
         self.n_layers = n_layers
         self.hidden_dim = hidden_dim
         self.weight_init_method = weight_init_method
-        self.activation_name = activation
         self.n_frozen_layers = n_frozen_layers
         
         # Get activation function
@@ -144,7 +142,7 @@ class MLP(eqx.Module):
         else:
             raise ValueError(f'Invalid weight initialization method: {init_method}')
     
-    def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Tuple[Array, Dict[Any, Array]]:
+    def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Tuple[Array, List[Array]]:
         """Forward pass through the network.
         
         Args:
@@ -152,18 +150,19 @@ class MLP(eqx.Module):
             key: Optional PRNG key (not used but kept for interface compatibility)
             
         Returns:
-            Tuple of (output, param_inputs) where param_inputs maps layer weights to their inputs
+            Tuple of (output, param_inputs) where param_inputs is a list of inputs to each layer
+            (in order: input to layer 0, input to layer 1, ..., input to final layer)
         """
-        param_inputs = {}
+        param_inputs = []
         
         # Process all layers except the last
         for i, layer in enumerate(self.layers[:-1]):
-            param_inputs[layer.weight] = x
+            param_inputs.append(x)
             x = layer(x)
             x = self.activation_fn(x)
         
         # Last layer (output layer)
-        param_inputs[self.layers[-1].weight] = x
+        param_inputs.append(x)
         output = self.layers[-1](x)
         
         return output, param_inputs

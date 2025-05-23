@@ -6,7 +6,7 @@ import equinox as eqx
 import numpy as np
 from jax import random, lax
 
-from .utils import tree_replace
+from ..utils import tree_replace
 
 
 class LTU(eqx.Module):
