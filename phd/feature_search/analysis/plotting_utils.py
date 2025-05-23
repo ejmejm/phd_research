@@ -196,3 +196,37 @@ def save_fig_versions(name, dir='../figures/svg/', type='svg', **kwargs):
   
   if type == 'svg':
     save_fig_versions(name, '../figures/png/', type='png', **kwargs)
+
+
+# Function to flatten nested dictionaries with dot notation
+def flatten_dict(d, parent_key='', sep='.'):
+  items = []
+  for k, v in d.items():
+    new_key = f"{parent_key}{sep}{k}" if parent_key else k
+    if isinstance(v, dict):
+      items.extend(flatten_dict(v, new_key, sep=sep).items())
+    else:
+      items.append((new_key, v))
+  return dict(items)
+
+
+# Process each row for both config dataframes
+def flatten_config_df(df):
+  flattened_rows = []
+  for _, row in df.iterrows():
+    flat_row = {}
+    for col, val in row.items():
+      if isinstance(val, str) and val.startswith('{'):
+        try:
+          # Try to evaluate string as dict
+          dict_val = eval(val)
+          if isinstance(dict_val, dict):
+            flat_row.update(flatten_dict(dict_val, parent_key=col))
+          else:
+            flat_row[col] = val
+        except:
+          flat_row[col] = val
+      else:
+        flat_row[col] = val
+    flattened_rows.append(flat_row)
+  return pd.DataFrame(flattened_rows)
