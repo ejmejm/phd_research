@@ -175,6 +175,11 @@ def run_experiment(
     prune_layer = model.layers[-2]
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
 
+    # Cumulant standardization
+    cumulant_mean = 0.0
+    cumulant_square_mean = 0.0
+    cumulant_gamma = 0.99
+
     # Initialize accumulators
     cumulative_loss = np.float128(0.0)
     loss_accum = 0.0
@@ -189,6 +194,12 @@ def run_experiment(
         # Generate batch of data
         inputs, targets = next(task_iterator)
         target_buffer.extend(targets.view(-1).tolist())
+        
+        if cfg.train.standardize_cumulants:
+            with torch.no_grad():
+                targets, cumulant_mean, cumulant_square_mean = standardize_targets(
+                    targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
+        
         features, targets = inputs.to(cfg.device), targets.to(cfg.device)
 
         # Add noise to targets
