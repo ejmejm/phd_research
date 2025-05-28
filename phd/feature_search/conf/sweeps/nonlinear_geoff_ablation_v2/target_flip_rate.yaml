@@ -1,0 +1,28 @@
+program: scripts/full_backbone_recycling.py
+method: grid
+project: feature_recycling-nlg_ablation_v2
+name: target_flip_rate
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  model.hidden_dim:
+    values: [320, 1280, 5120, 20480]
+  task.flip_rate:
+    values: [0.0, "${eval:2**-21}", "${eval:2**-20}", "${eval:2**-18}", "${eval:2**-16}", "${eval:2**-14}", "${eval:2**-12}"]
+  task.n_stationary_layers:
+    values: [0, 1]
+  seed:
+    values: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]

@@ -1,0 +1,26 @@
+program: scripts/full_backbone_recycling.py
+method: grid
+project: feature_recycling-nlg_ablation_v2
+name: distractor_chance
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  model.hidden_dim:
+    values: [320, 1280, 5120, 20480]
+  task.distractor_chance:
+    values: [0.0, 0.5, 0.9, 0.99]
+  seed:
+    values: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]

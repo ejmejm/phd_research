@@ -1,0 +1,29 @@
+program: scripts/full_backbone_recycling.py
+method: grid
+project: feature_recycling-nlg_ablation_v2
+name: target_input_features
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  task.n_real_features:
+    value: "\"${task.n_features}\""
+
+  model.hidden_dim:
+    values: [320, 1280, 5120, 20480]
+  task.n_features:
+    values: [10, 20, 40, 80, 160]
+  seed:
+    values: [101, 102, 103, 104, 105]

@@ -1,0 +1,29 @@
+program: scripts/full_backbone_recycling.py
+method: grid
+project: feature_recycling-nlg_ablation_v2
+name: target_noise
+
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --config-name=sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+  - ${args_no_hyphens}
+
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+
+parameters:
+  train.total_steps:
+    value: 2_000_000
+
+  model.hidden_dim:
+    values: [320, 1280, 5120, 20480]
+  task.noise_std:
+    values: [0.0, 1.0, 2.0, 4.0, 8.0]
+  seed:
+    values: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
