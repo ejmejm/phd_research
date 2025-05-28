@@ -183,6 +183,7 @@ def run_experiment(
     # Initialize accumulators
     cumulative_loss = np.float128(0.0)
     loss_accum = 0.0
+    mean_pred_loss_accum = 0.0
     pruned_accum = 0
     pruned_newest_feature_accum = 0
     n_steps_since_log = 0
@@ -193,12 +194,14 @@ def run_experiment(
 
         # Generate batch of data
         inputs, targets = next(task_iterator)
-        target_buffer.extend(targets.view(-1).tolist())
+        
+        with torch.no_grad():
+            standardized_targets, cumulant_mean, cumulant_square_mean = standardize_targets(
+                targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
         
         if cfg.train.standardize_cumulants:
-            with torch.no_grad():
-                targets, cumulant_mean, cumulant_square_mean = standardize_targets(
-                    targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
+            targets = standardized_targets
+        target_buffer.extend(targets.view(-1).tolist())
         
         features, targets = inputs.to(cfg.device), targets.to(cfg.device)
 
@@ -228,6 +231,9 @@ def run_experiment(
         outputs, param_inputs = model(
             features, distractor_tracker.replace_features)
         loss = criterion(outputs, targets)
+        
+        with torch.no_grad():
+            mean_pred_loss = criterion(outputs, cumulant_mean.unsqueeze(0).unsqueeze(0))
 
         # Backward pass
         optimizer.zero_grad()
@@ -242,6 +248,7 @@ def run_experiment(
         # Accumulate metrics
         loss_accum += loss.item()
         cumulative_loss += loss.item()
+        mean_pred_loss_accum += mean_pred_loss.item()
         n_steps_since_log += 1
         
         # Log metrics
@@ -251,6 +258,7 @@ def run_experiment(
                 'samples': step * cfg.train.batch_size,
                 'loss': loss_accum / n_steps_since_log,
                 'cumulative_loss': cumulative_loss,
+                'mean_prediction_loss': mean_pred_loss_accum / n_steps_since_log,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
                 'n_distractors': distractor_tracker.distractor_mask.sum().item(),
@@ -283,6 +291,7 @@ def run_experiment(
             
             # Reset accumulators
             loss_accum = 0.0
+            mean_pred_loss_accum = 0.0
             n_steps_since_log = 0
             target_buffer = []
 
