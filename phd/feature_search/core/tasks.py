@@ -191,7 +191,7 @@ class NonlinearGEOFFTask:
             # For linear case, single layer mapping input to output
             layer_weights = self._initialize_weights(n_features, 1)
             self.weights.append(layer_weights)
-            self.flip_accumulators.append(flip_rate * n_features)
+            self.flip_accumulators.append(0.0)
         else:
             # Input layer
             layer_weights = self._initialize_weights(n_features, hidden_dim)
@@ -199,8 +199,7 @@ class NonlinearGEOFFTask:
             self.weights.append(layer_weights)
             
             # Calculate number of weights that can flip in first layer
-            n_flippable = n_features * hidden_dim
-            self.flip_accumulators.append(flip_rate * n_flippable)
+            self.flip_accumulators.append(0.0)
             
             # Hidden layers
             for i in range(n_layers - 2):
@@ -209,16 +208,14 @@ class NonlinearGEOFFTask:
                 self.weights.append(layer_weights)
                 
                 # All weights can flip in hidden layers
-                n_flippable = hidden_dim * hidden_dim
-                self.flip_accumulators.append(flip_rate * n_flippable)
+                self.flip_accumulators.append(0.0)
             
             # Output layer
             output_weights = self._initialize_weights(hidden_dim, 1)
             self.weights.append(output_weights)
             
             # Output layer flippable weights
-            n_flippable = hidden_dim
-            self.flip_accumulators.append(flip_rate * n_flippable)
+            self.flip_accumulators.append(0.0)
     
     def _initialize_weights(self, in_features: int, out_features: int) -> torch.Tensor:
         """Initialize weights based on specified initialization method.
@@ -261,8 +258,9 @@ class NonlinearGEOFFTask:
 
     def _flip_signs(self):
         """Flip signs of weights based on accumulated probabilities."""
+        layer_offset = self.n_stationary_layers
         for layer_idx, (weights, accumulator) in enumerate(
-            zip(self.weights, self.flip_accumulators), start=self.n_stationary_layers,
+            list(zip(self.weights, self.flip_accumulators))[layer_offset:],
         ):
             n_flips = int(accumulator)
             if n_flips > 0:
@@ -271,14 +269,14 @@ class NonlinearGEOFFTask:
                 weights.view(-1)[flat_idx] *= -1
                 
                 # Update accumulator
-                self.flip_accumulators[layer_idx] -= n_flips
+                self.flip_accumulators[layer_offset + layer_idx] -= n_flips
     
     def get_iterator(self, batch_size: int):
         """Returns an iterator that generates batches of data."""
         while True:
             
             # Accumulate and handle weight flips
-            for i in range(len(self.flip_accumulators)):
+            for i in range(self.n_stationary_layers, len(self.flip_accumulators)):
                 if self.n_layers == 1:
                     n_flippable = self.n_features
                 elif i == 0:
