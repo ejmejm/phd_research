@@ -70,7 +70,7 @@ def prepare_experiment(cfg: DictConfig):
     torch.nn.init.zeros_(model.layers[-1].weight)
     
     # Change LTU threshold for target and predictors
-    ltu_threshold = 0.1 * cfg.task.n_features
+    ltu_threshold = 0.0 # 0.1 * cfg.task.n_features
     for layer in model.layers:
         if isinstance(layer, LTU):
             layer.threshold = ltu_threshold
