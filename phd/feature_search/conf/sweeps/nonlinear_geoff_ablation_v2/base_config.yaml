@@ -1,5 +1,7 @@
+# @package _global_
+
 defaults:
-  - full_backbone_recycling
+  - /full_backbone_recycling
   - _self_
 
 wandb: true
@@ -12,18 +14,16 @@ task:
 feature_recycling:
   use_cbp_utility: true
   utility_decay: 0.99
+  recycle_rate: 0.005
+  feature_protection_steps: 0
 
 train:
   total_steps: 1_000_000
   optimizer: idbd
   standardize_cumulants: true
-  learning_rate: "\"${eval:0.03 / ${model.hidden_dim} ** 0.75}\""
+  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
 
 idbd:
   version: squared_grads
   autostep: true
   meta_learning_rate: 0.005
-
-feature_recycling:
-  recycle_rate: 0.005
-  feature_protection_steps: 0
