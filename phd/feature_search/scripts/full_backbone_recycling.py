@@ -175,12 +175,8 @@ def run_experiment(
     prune_layer = model.layers[-2]
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
 
-    # Cumulant standardization
-    cumulant_mean = 0.0
-    cumulant_square_mean = 0.0
-    cumulant_gamma = 0.99
-
     # Initialize accumulators
+    cumulant_stats = StandardizationStats(gamma=0.99)
     cumulative_loss = np.float128(0.0)
     loss_accum = 0.0
     mean_pred_loss_accum = 0.0
@@ -196,8 +192,7 @@ def run_experiment(
         inputs, targets = next(task_iterator)
         
         with torch.no_grad():
-            standardized_targets, cumulant_mean, cumulant_square_mean = standardize_targets(
-                targets, cumulant_mean, cumulant_square_mean, cumulant_gamma, step)
+            standardized_targets, cumulant_stats = standardize_targets(targets, cumulant_stats)
         
         if cfg.train.standardize_cumulants:
             targets = standardized_targets
@@ -233,7 +228,11 @@ def run_experiment(
         loss = criterion(outputs, targets)
         
         with torch.no_grad():
-            mean_pred_loss = criterion(outputs, cumulant_mean.unsqueeze(0).unsqueeze(0))
+            if cfg.train.standardize_cumulants:
+                baseline_pred = torch.zeros_like(targets)
+            else:
+                baseline_pred = cumulant_stats.running_mean.cpu().view(1, 1)
+            mean_pred_loss = criterion(baseline_pred, targets)
 
         # Backward pass
         optimizer.zero_grad()
@@ -253,6 +252,8 @@ def run_experiment(
         
         # Log metrics
         if step % cfg.train.log_freq == 0:
+            n_distractors = distractor_tracker.distractor_mask.sum().item()
+            n_real_features = distractor_tracker.distractor_mask.numel() - n_distractors
             metrics = {
                 'step': step,
                 'samples': step * cfg.train.batch_size,
@@ -261,7 +262,8 @@ def run_experiment(
                 'mean_prediction_loss': mean_pred_loss_accum / n_steps_since_log,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
-                'n_distractors': distractor_tracker.distractor_mask.sum().item(),
+                'n_distractors': n_distractors,
+                'n_real_features': n_real_features,
             }
 
             if pruned_accum > 0:

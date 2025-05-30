@@ -1,7 +1,7 @@
 import hashlib
 import os
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -190,23 +190,81 @@ def get_model_statistics(
     return stats
 
 
+class StandardizationStats(nn.Module):
+    """Holds running statistics for standardization."""
+    def __init__(
+        self,
+        gamma: float = 0.99,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        super().__init__()
+        self.register_buffer('running_mean', torch.tensor(0.0, device=device, dtype=dtype))
+        self.register_buffer('running_var', torch.tensor(1.0, device=device, dtype=dtype))
+        self.register_buffer('step', torch.tensor(0, device=device))
+        self.gamma = gamma
+
+
+@torch.no_grad()
 def standardize_targets(
     targets: torch.Tensor,
-    cumulant_mean: float,
-    cumulant_square_mean: float,
-    cumulant_gamma: float,
-    step: int,
-) -> torch.Tensor:
-    """Standardize targets using a running mean and variance."""
-    cumulant_mean = cumulant_gamma * cumulant_mean + (1 - cumulant_gamma) * targets.mean()
-    cumulant_square_mean = cumulant_gamma * cumulant_square_mean + (1 - cumulant_gamma) * targets.square().mean()
-    bias_correction = 1 / (1 - cumulant_gamma ** (step + 1))
-    curr_mean = cumulant_mean * bias_correction
-    curr_square_mean = cumulant_square_mean * bias_correction
-    std_dev = (curr_square_mean - curr_mean.square()).sqrt()
-    std_dev = 1 if std_dev == 0 else std_dev
-    targets = (targets - curr_mean) / std_dev
-    return targets, cumulant_mean, cumulant_square_mean
+    stats: StandardizationStats,
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, StandardizationStats]:
+    """Exponentially-weighted Welford normalisation (EW-Welford).
+
+    Normalises a 2-D tensor of shape ``(batch, 1)`` so that its running mean
+    approaches zero and its running standard deviation approaches one, while
+    keeping **O(1)** state and compute per call.  Statistics adapt to concept
+    drift via the forgetting factor ``gamma``.
+
+    Args:
+        targets: Input tensor of shape ``(batch, 1)`` on any device / dtype.
+        stats: StandardizationStats object containing running statistics.
+        eps: Small constant added for numerical stability; safeguards against
+            division by zero and negative variance caused by round-off.
+
+    Returns:
+        Tuple containing:
+            - **z** (*torch.Tensor*): Normalised tensor with the same shape as
+              ``targets``.
+            - **new_stats** (*StandardizationStats*): Updated running statistics.
+
+    Example:
+        ```python
+        stats = StandardizationStats(gamma=0.99, device="cuda")
+
+        for batch in data_stream:               # batch shape: (B, 1)
+            batch = batch.cuda()
+            z, stats = standardize_targets(batch, stats)
+            # ... use z for loss / back-prop ...
+        ```
+    """
+    # --------------------------------------------------------------------- #
+    # 1. Normalise the current batch using statistics **from the prev step**.
+    # --------------------------------------------------------------------- #
+    var_safe = stats.running_var.clamp_min(eps)  # ensure σ² ≥ eps
+    std = torch.sqrt(var_safe)
+    z = (targets - stats.running_mean) / std
+
+    # --------------------------------------------------------------------- #
+    # 2. Update running statistics with the batch mean (EW-Welford update).
+    # --------------------------------------------------------------------- #
+    alpha = 1.0 - stats.gamma                    # EW learning rate
+    batch_mean = targets.mean()                  # scalar (dim == 1)
+    delta = batch_mean - stats.running_mean
+    stats.running_mean.add_(alpha * delta)       # μ_t
+
+    delta2 = batch_mean - stats.running_mean
+    stats.running_var.mul_(stats.gamma).add_(alpha * delta * delta2)
+
+    # Numerical hygiene: clamp and squash accidental NaNs.
+    stats.running_var.clamp_min_(eps)
+    if torch.isnan(stats.running_var):
+        stats.running_var.fill_(eps)
+
+    stats.step.add_(1)
+    return z, stats
 
 
 def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
