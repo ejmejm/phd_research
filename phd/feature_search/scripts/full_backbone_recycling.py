@@ -301,7 +301,6 @@ def run_experiment(
         step += 1
 
     pbar.close()
-    wandb.finish()
 
 
 @hydra.main(config_path='../conf', config_name='full_backbone_recycling')
@@ -309,7 +308,7 @@ def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
 
-    init_experiment(cfg.project, cfg)
+    cfg = init_experiment(cfg.project, cfg)
 
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_experiment(cfg)
@@ -327,6 +326,8 @@ def main(cfg: DictConfig) -> None:
         cfg, task, task_iterator, model, criterion,
         optimizer, cbp_tracker, distractor_tracker,
     )
+    
+    finish_experiment(cfg)
 
 
 if __name__ == '__main__':

@@ -13,7 +13,7 @@ import omegaconf
 from omegaconf import DictConfig
 
 
-COMET_META_PARAMS = ['config_name', 'sweep_command', 'sweep_name', 'sweep_project']
+COMET_META_PARAMS = ['config-name', 'sweep_command', 'sweep_name', 'sweep_project']
 
 
 wandb = None
@@ -87,18 +87,18 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
         stream_handler.setLevel(logging.ERROR)
         logger = logging.getLogger(experiment_module_name)
         logger.addHandler(stream_handler)
-
+            
+        api = comet_ml.api.API()
+        workspace = config.get('comet_ml_workspace', None)
+        if workspace is None:
+            workspace = api.get()[0]
+            logger.log(f'CometML workspace not specified, using retrieved default: {workspace}')
+                
         if comet_sweep_id:
-            api = comet_ml.api.API()
             opt = comet_ml.Optimizer(comet_sweep_id, verbose=0)
             project = opt.status()['parameters'].get('sweep_project')
             if project is not None:
                 project = project['values'][0]
-            
-            workspace = config.get('comet_ml_workspace', None)
-            if workspace is None:
-                workspace = api.get()[0]
-                logger.log(f'CometML workspace not specified, using retrieved default: {workspace}')
             
             experiment = opt.next(project_name=project, workspace=workspace)
             
@@ -139,14 +139,14 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
             config = omegaconf.OmegaConf.create(config_dict)
             
             # Combine new sweep-sepecific overrides with base config
-            comet_config = omegaconf.OmegaConf.merge(config, sweep_overrides)
+            config = omegaconf.OmegaConf.unsafe_merge(config, sweep_overrides)
             
+            # Log the parameters to the experiment
             raw_dict_config = omegaconf.OmegaConf.to_container(
                 config, resolve=True, throw_on_missing=True)
             
             # comet_config = process_args(comet_config)
             experiment.log_parameters(raw_dict_config)
-            config = comet_config
 
             # Pretty print chosen args for sweep
             print('Sweep args:')
@@ -158,7 +158,7 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
                     experiment.add_tag(tag)
 
         else:
-            experiment = comet_ml.Experiment(project_name=project, workspace='ejmejm')
+            experiment = comet_ml.Experiment(project_name=project, workspace=workspace)
             error_log = log_capture_string.getvalue()
 
             if 'run will not be logged' in error_log.lower():
@@ -166,11 +166,11 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
                 if 'was already uploaded' in error_log.lower():
                     print('Creating an `ExistingExperiment` after error')
                     experiment = comet_ml.ExistingExperiment(
-                        project_name=project, workspace='ejmejm')
+                        project_name=project, workspace=workspace)
                 else:
                     print('Creating an `OfflineExperiment` after error')
                     experiment = comet_ml.OfflineExperiment(
-                        project_name=project, workspace='ejmejm')
+                        project_name=project, workspace=workspace)
 
             comet_ml.config.set_global_experiment(experiment)
             raw_dict_config = omegaconf.OmegaConf.to_container(
