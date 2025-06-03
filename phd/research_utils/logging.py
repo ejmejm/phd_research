@@ -8,6 +8,7 @@ import sys
 import tempfile
 
 import numpy as np
+import omegaconf
 from omegaconf import DictConfig
 
 
@@ -52,9 +53,14 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
     
     if config and config.wandb:
         import wandb
+    
+        raw_dict_config = omegaconf.OmegaConf.to_container(
+            config, resolve=True, throw_on_missing=True)
+        wandb.init(
+            project=project, config=raw_dict_config, tags=config.get('tags', None),
+            settings=wandb.Settings(start_method='thread'), allow_val_change=True,
+        )
         
-        wandb.init(project=project, config=config, tags=config.get('tags', None),
-            settings=wandb.Settings(start_method='thread'), allow_val_change=True)
         # config = wandb.config # TODO: Make sure this is still a DictConfig and has the right values
 
     comet_sweep_id = get_comet_sweep_id()
@@ -77,12 +83,18 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
         logger.addHandler(stream_handler)
 
         if comet_sweep_id:
+            api = comet_ml.api.API()
             opt = comet_ml.Optimizer(comet_sweep_id, verbose=0)
             project = opt.status()['parameters'].get('sweep_project')
             if project is not None:
                 project = project['values'][0]
-
-            experiment = opt.next(project_name=project, workspace='ejmejm')
+            
+            workspace = config.get('comet_ml_workspace', None)
+            if workspace is None:
+                workspace = api.get()[0]
+                logger.log(f'CometML workspace not specified, using retrieved default: {workspace}')
+            
+            experiment = opt.next(project_name=project, workspace=workspace)
             
             error_log = log_capture_string.getvalue()
 
@@ -91,15 +103,14 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
                 if 'was already uploaded' in error_log.lower():
                     print('Creating an `ExistingExperiment` after error')
                     new_experiment = comet_ml.ExistingExperiment(
-                        project_name=project, workspace='ejmejm',
+                        project_name=project, workspace=workspace,
                         experiment_key=experiment.get_key())
                 else:
                     print('Creating an `OfflineExperiment` after error')
                     new_experiment = comet_ml.OfflineExperiment(
-                        project_name=project, workspace='ejmejm')
+                        project_name=project, workspace=workspace)
 
                 # Get parameters from original experiment
-                api = comet_ml.api.API()
                 api_exp = api.get_experiment_by_id(experiment.id)
                 param_summary = api_exp.get_parameters_summary()
                 params = {x['name']: x['valueCurrent'] for x in param_summary}
@@ -113,8 +124,13 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
             
             # Combine new params dict with old config
             comet_config = DictConfig({**config, **experiment.params}) # TODO: Make sure config is formatted correctly
+            
+            
+            raw_dict_config = omegaconf.OmegaConf.to_container(
+                config, resolve=True, throw_on_missing=True)
+            
             # comet_config = process_args(comet_config)
-            experiment.log_parameters(comet_config)
+            experiment.log_parameters(raw_dict_config)
             if not config.wandb:
                 config = comet_config
 
