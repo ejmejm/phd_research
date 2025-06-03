@@ -13,9 +13,19 @@ from comet_ml import Optimizer
 # Create args
 parser = argparse.ArgumentParser()
 
-parser.add_argument('-s', '--sweep_id', default=None)
-parser.add_argument('-c', '--count', type=int, default=1)
-parser.add_argument('-p', '--config', type=str, nargs='*', default=None)
+parser.add_argument(
+    '-s', '--sweep_id', default=None,
+    help='Will perform run(s) for the sweep with the given ID.',
+)
+parser.add_argument(
+    '-c', '--count', type=int, default=1,
+    help='Number of runs to perform for the sweep.',
+)
+parser.add_argument(
+    '-p', '--config', type=str, nargs='*', default=None,
+    help='Path to a YAML or JSON file containing sweep configuration. '
+         'A sweep will be created for each file provided.',
+)
 
 
 def run_sweep(sweep_id):
@@ -124,8 +134,15 @@ def create_sweep(config_path):
     return opts
 
 
-if __name__ == '__main__':
+def main():
+    """Main entry point for the comet_sweep command-line tool."""
     args = parser.parse_args()
+    
+    # If no arguments provided, show help
+    if args.sweep_id is None and args.config is None:
+        print('You must provide either a sweep id or a config file.')
+        parser.print_help()
+        return
 
     if args.config:
         config_ids = []
@@ -143,3 +160,7 @@ if __name__ == '__main__':
             args.sweep_id = new_ids[-1]
         for _ in range(args.count):
             run_sweep(args.sweep_id)
+
+
+if __name__ == '__main__':
+    main()
