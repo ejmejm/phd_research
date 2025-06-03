@@ -6,10 +6,14 @@ import random
 import string
 import sys
 import tempfile
+import warnings
 
 import numpy as np
 import omegaconf
 from omegaconf import DictConfig
+
+
+COMET_META_PARAMS = ['config_name', 'sweep_command', 'sweep_name', 'sweep_project']
 
 
 wandb = None
@@ -27,7 +31,9 @@ def update_params(config: DictConfig) -> None:
         wandb.config.update(config, allow_val_change=True)
     elif config.comet_ml:
         experiment = comet_ml.get_global_experiment()
-        experiment.log_parameters(config)
+        raw_dict_config = omegaconf.OmegaConf.to_container(
+            config, resolve=True, throw_on_missing=True)
+        experiment.log_parameters(raw_dict_config)
 
 
 def get_comet_sweep_id() -> Optional[str]:
@@ -122,17 +128,25 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
                 print('No more experiments to run in sweep!')
                 sys.exit(0)
             
-            # Combine new params dict with old config
-            comet_config = DictConfig({**config, **experiment.params}) # TODO: Make sure config is formatted correctly
+            sweep_overrides_list = [f'{k}={v}' for k, v in experiment.params.items()]
+            sweep_overrides = omegaconf.OmegaConf.from_dotlist(sweep_overrides_list)
             
+            # Add fields for meta parameters used for running comet sweeps
+            config_dict = omegaconf.OmegaConf.to_container(config)
+            for param in COMET_META_PARAMS:
+                if param not in config_dict:
+                    config_dict[param] = ''
+            config = omegaconf.OmegaConf.create(config_dict)
+            
+            # Combine new sweep-sepecific overrides with base config
+            comet_config = omegaconf.OmegaConf.merge(config, sweep_overrides)
             
             raw_dict_config = omegaconf.OmegaConf.to_container(
                 config, resolve=True, throw_on_missing=True)
             
             # comet_config = process_args(comet_config)
             experiment.log_parameters(raw_dict_config)
-            if not config.wandb:
-                config = comet_config
+            config = comet_config
 
             # Pretty print chosen args for sweep
             print('Sweep args:')
@@ -159,7 +173,9 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
                         project_name=project, workspace='ejmejm')
 
             comet_ml.config.set_global_experiment(experiment)
-            experiment.log_parameters(config)
+            raw_dict_config = omegaconf.OmegaConf.to_container(
+                config, resolve=True, throw_on_missing=True)
+            experiment.log_parameters(raw_dict_config)
             if config.get('tags', None) is not None:
                 for tag in config.tags:
                     experiment.add_tag(tag)
