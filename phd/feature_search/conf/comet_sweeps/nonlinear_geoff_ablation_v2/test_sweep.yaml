@@ -1,0 +1,21 @@
+name: test_sweep
+project: test-project
+command: python scripts/full_backbone_recycling.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+trials: 1
+
+parameters:
+  device: cpu
+  train.total_steps: 15_000
+  model.hidden_dim: [20480]
+  task.distractor_chance: 0.5
+  seed:
+    type: integer
+    min: 1
+    max: 50
