@@ -287,7 +287,7 @@ def run_experiment(
             metrics.update(get_model_statistics(
                 model, features, param_inputs, distractor_feature_masks, metric_prefix='distractor_'))
 
-            log_metrics(metrics, cfg)
+            log_metrics(metrics, cfg, step=step)
             
             pbar.set_postfix(loss=metrics['loss'])
             pbar.update(cfg.train.log_freq)
