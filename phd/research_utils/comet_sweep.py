@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import time
+import yaml
 
 from comet_ml import Optimizer
 
@@ -68,9 +69,13 @@ def run_sweep(sweep_id):
             'seconds',
         )
 
+
 def create_sweep(config_path):
     with open(config_path, 'r') as f:
-        config = ast.literal_eval(f.read())
+        if config_path.endswith(('.yml', '.yaml')):
+            config = yaml.safe_load(f)
+        else:
+            config = ast.literal_eval(f.read())
 
     if 'project' in config:
         config['parameters']['sweep_project'] = config['project']
@@ -117,6 +122,7 @@ def create_sweep(config_path):
         opts.append(opt.id)
         print('Created sweep with id:\n', opt.id)
     return opts
+
 
 if __name__ == '__main__':
     args = parser.parse_args()
