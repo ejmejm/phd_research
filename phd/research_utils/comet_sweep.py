@@ -32,7 +32,8 @@ parser.add_argument(
 )
 
 
-def run_sweep(sweep_id):
+def run_sweep(sweep_id) -> str:
+    """Run a sweep and returns the status of the optimizer after the run."""
     if 'COMET_OPTIMIZER_ID' in os.environ:
         del os.environ['COMET_OPTIMIZER_ID']
     opt = Optimizer(sweep_id, verbose=0)
@@ -82,6 +83,9 @@ def run_sweep(sweep_id):
             (results['endTime'] - results['startTime']) / 1000.0,
             'seconds',
         )
+    
+    opt_status = opt.status()['status']
+    return opt_status
 
 
 def create_sweep(config_path):
@@ -163,7 +167,10 @@ def main():
         if args.sweep_id == 'new':
             args.sweep_id = new_ids[-1]
         for _ in range(args.count):
-            run_sweep(args.sweep_id)
+            status = run_sweep(args.sweep_id)
+            if status == 'completed':
+                print('Sweep completed!')
+                break
 
 
 if __name__ == '__main__':
