@@ -22,11 +22,11 @@ parser.add_argument(
     help='Will perform run(s) for the sweep with the given ID.',
 )
 parser.add_argument(
-    '-c', '--count', type=int, default=1,
+    '-n', '--count', type=int, default=1,
     help='Number of runs to perform for the sweep.',
 )
 parser.add_argument(
-    '-p', '--config', type=str, nargs='*', default=None,
+    '-c', '--config', type=str, nargs='*', default=None,
     help='Path to a YAML or JSON file containing sweep configuration. '
          'A sweep will be created for each file provided.',
 )
@@ -132,13 +132,6 @@ def create_sweep(config_path):
         del os.environ['COMET_OPTIMIZER_ID']
     opts = []
     for config in final_configs:
-        if not config.get('comet_ml', False):
-            logger.warning(
-                'CometML was not enabled in the config, but is required for CometML logging. '
-                'It will be forcefully enabled.'
-            )
-        config['comet_ml'] = True
-            
         opt = Optimizer(config)
         opts.append(opt.id)
         print('Created sweep with id:\n', opt.id)
