@@ -38,6 +38,9 @@ def run_sweep(sweep_id) -> str:
         del os.environ['COMET_OPTIMIZER_ID']
     opt = Optimizer(sweep_id, verbose=0)
     config = opt.status()
+    if config['status'] == 'completed':
+        return 'completed'
+    
     command = config['parameters']['sweep_command']['values'][0].split()
     
     environ = os.environ.copy()
