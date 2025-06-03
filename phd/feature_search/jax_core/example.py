@@ -4,7 +4,7 @@ from jax import random
 import time
 
 from phd.feature_search.core.tasks import NonlinearGEOFFTask as TorchNonlinearGEOFFTask
-from .tasks import NonlinearGEOFFTask
+from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
 
 # Set JAX to use CPU
 import jax

@@ -4,7 +4,7 @@ defaults:
   - /full_backbone_recycling
   - _self_
 
-wandb: true
+comet_ml: true
 device: cpu
 
 task:
