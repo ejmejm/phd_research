@@ -1,6 +1,7 @@
 import ast
 import argparse
 import copy
+import logging
 import os
 import signal
 import subprocess
@@ -8,6 +9,9 @@ import time
 import yaml
 
 from comet_ml import Optimizer
+
+
+logger = logging.getLogger(__name__)
 
 
 # Create args
@@ -128,6 +132,13 @@ def create_sweep(config_path):
         del os.environ['COMET_OPTIMIZER_ID']
     opts = []
     for config in final_configs:
+        if not config.get('comet_ml', False):
+            logger.warning(
+                'CometML was not enabled in the config, but is required for CometML logging. '
+                'It will be forcefully enabled.'
+            )
+        config['comet_ml'] = True
+            
         opt = Optimizer(config)
         opts.append(opt.id)
         print('Created sweep with id:\n', opt.id)
