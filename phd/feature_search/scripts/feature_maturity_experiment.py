@@ -341,7 +341,7 @@ def run_experiment(
                 'step': step,
                 'samples': step * cfg.train.batch_size,
                 'loss': loss_acc / n_steps_since_log,
-                'cumulative_loss': cumulative_loss,
+                'cumulative_loss': float(cumulative_loss),
                 'accuracy': accuracy_acc / n_steps_since_log if isinstance(criterion, nn.CrossEntropyLoss) else None,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,

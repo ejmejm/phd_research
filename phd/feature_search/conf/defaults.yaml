@@ -3,6 +3,8 @@ defaults:
 
 seed: null
 wandb: false
+comet_ml: false
+comet_ml_workspace: phd-research
 project: feature-recycling
 device: cuda
 

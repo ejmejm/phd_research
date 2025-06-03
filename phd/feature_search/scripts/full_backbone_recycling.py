@@ -19,6 +19,7 @@ from phd.feature_search.core.idbd import IDBD
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *
 from phd.feature_search.scripts.feature_maturity_experiment import *
+from phd.research_utils.logging import *
 
 
 logger = logging.getLogger(__name__)
@@ -286,7 +287,7 @@ def run_experiment(
             metrics.update(get_model_statistics(
                 model, features, param_inputs, distractor_feature_masks, metric_prefix='distractor_'))
 
-            wandb.log(metrics)
+            log_metrics(metrics, cfg)
             
             pbar.set_postfix(loss=metrics['loss'])
             pbar.update(cfg.train.log_freq)
@@ -307,6 +308,8 @@ def run_experiment(
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
+
+    init_experiment(cfg.project, cfg)
 
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_experiment(cfg)

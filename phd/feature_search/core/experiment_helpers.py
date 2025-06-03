@@ -271,13 +271,6 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     """Prepare the components based on configuration."""
     base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
     
-    if not cfg.wandb:
-        os.environ['WANDB_DISABLED'] = 'true'
-    
-    # Initialize wandb
-    wandb_config = omegaconf.OmegaConf.to_container(
-        cfg, resolve=True, throw_on_missing=True)
-    wandb.init(project=cfg.project, config=wandb_config, allow_val_change=True)
     task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
