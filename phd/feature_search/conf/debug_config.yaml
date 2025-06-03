@@ -1,49 +1,14 @@
 defaults:
-  - nonlinear_geoff
+  - sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+  - _self_
 
-wandb: true
-seed: 1
-device: cuda
-
-task:
-  activation: ltu
-  flip_rate: 0.0
-  hidden_dim: 20
-  n_features: 20
-  n_layers: 2
-  n_real_features: 20
-  sparsity: 0.0
-  weight_init: binary
-  weight_scale: 1.0
-  n_stationary_layers: 1
-
-input_recycling:
-  use_cbp_utility: false
-  distractor_chance: 0.0
-  recycle_rate: 0.0
-
-feature_recycling:
-  use_cbp_utility: true
-  utility_decay: 0.99
-  recycle_rate: 0.00005
-  feature_protection_steps: 500
-
-train:
-  total_steps: 1000000
-  log_freq: 100
-  batch_size: 1
-  optimizer: idbd
-  standardize_cumulants: false
-  learning_rate: 0.01
+wandb: false
+comet_ml: true
 
 model:
-  n_layers: 2
-  weight_init_method: binary
-  hidden_dim: 100
-  n_frozen_layers: 1
-  activation: ltu
+  hidden_dim: 20480
 
-idbd:
-  meta_learning_rate: 0.01
-  version: squared_grads
-  autostep: true
+task:
+  distractor_chance: 0.99
+
+seed: 107
