@@ -91,7 +91,7 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
         api = comet_ml.api.API()
         workspace = config.get('comet_ml_workspace', None)
         if workspace is None:
-            workspace = api.get()[0]
+            workspace = api.get_default_workspace()
             logger.log(f'CometML workspace not specified, using retrieved default: {workspace}')
                 
         if comet_sweep_id:
