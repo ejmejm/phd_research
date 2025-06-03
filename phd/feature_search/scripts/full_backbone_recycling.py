@@ -259,7 +259,7 @@ def run_experiment(
                 'step': step,
                 'samples': step * cfg.train.batch_size,
                 'loss': loss_accum / n_steps_since_log,
-                'cumulative_loss': cumulative_loss,
+                'cumulative_loss': float(cumulative_loss),
                 'mean_prediction_loss': mean_pred_loss_accum / n_steps_since_log,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
                 'units_pruned': total_pruned,
