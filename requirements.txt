@@ -3,3 +3,4 @@ numpy==2.1.2
 torch==2.6.0
 tqdm==4.67.1
 wandb==0.19.8
+comet_ml==3.49.10
