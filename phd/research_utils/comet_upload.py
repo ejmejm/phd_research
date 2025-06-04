@@ -34,31 +34,6 @@ except ImportError:
 logger = logging.getLogger('comet_uploader')
 
 
-class UploadStats:
-    """Thread-safe class to track upload statistics."""
-    
-    def __init__(self):
-        self._lock = threading.Lock()
-        self.success_count = 0
-        self.fail_count = 0
-        self.processed_files = []
-        self.failed_files = []
-    
-    def add_success(self, filename: str):
-        with self._lock:
-            self.success_count += 1
-            self.processed_files.append(filename)
-    
-    def add_failure(self, filename: str):
-        with self._lock:
-            self.fail_count += 1
-            self.failed_files.append(filename)
-    
-    def get_counts(self):
-        with self._lock:
-            return self.success_count, self.fail_count
-
-
 def get_parser_arguments(parser):
     """Add command line arguments to the parser."""
     parser.add_argument(
@@ -67,7 +42,8 @@ def get_parser_arguments(parser):
         help = "the offline experiment archives to upload"
     )
     parser.add_argument(
-        "--force-upload",
+        "--force",
+        dest = "force_upload",
         help = "force upload offline experiments that were already uploaded",
         action = "store_true",
         default = False,
@@ -91,11 +67,36 @@ def get_parser_arguments(parser):
         default = False,
     )
     parser.add_argument(
-        "--n-threads",
+        "--n_threads",
         type = int,
-        default = 1,
+        default = 4,
         help = "number of threads to use for parallel uploads (default: 1)",
     )
+
+
+class UploadStats:
+    """Thread-safe class to track upload statistics."""
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.success_count = 0
+        self.fail_count = 0
+        self.processed_files = []
+        self.failed_files = []
+    
+    def add_success(self, filename: str):
+        with self._lock:
+            self.success_count += 1
+            self.processed_files.append(filename)
+    
+    def add_failure(self, filename: str):
+        with self._lock:
+            self.fail_count += 1
+            self.failed_files.append(filename)
+    
+    def get_counts(self):
+        with self._lock:
+            return self.success_count, self.fail_count
 
 
 def rename_uploaded_file(filepath: str) -> bool:
@@ -123,11 +124,12 @@ def upload_single_file(
     """Upload a single file and update progress."""
     try:
         success = upload_single_offline_experiment(
-            offline_archive_path=filename,
-            api_key=api_key,
-            force_upload=force_upload,
-            override_workspace=override_workspace,
-            override_project_name=override_project_name,
+            offline_archive_path = filename,
+            api_key = api_key,
+            force_upload = force_upload,
+            override_workspace = override_workspace,
+            override_project_name = override_project_name,
+            display_level = 'debug',
         )
         
         if success:
@@ -264,7 +266,10 @@ def main(args=None):
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    
+
+    # Set comet_ml logger to warning level to suppress info messages
+    logging.getLogger('comet_ml').setLevel(logging.WARNING)
+
     upload_files(parsed_args)
 
 
