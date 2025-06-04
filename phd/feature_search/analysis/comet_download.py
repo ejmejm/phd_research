@@ -71,6 +71,19 @@ def parse_args() -> argparse.Namespace:
             help = "Metric to use as the index of the CSV file. "
                    "CometML's builtin step index (separate from metrics) will be used if not provided.",
         )
+        parser.add_argument(
+            '--include_crashed',
+            action = 'store_true',
+            default = False,
+            help = "Include experiments that crashed in the output.",
+        )
+        parser.add_argument(
+            '--include_running',
+            action = 'store_true',
+            default = False,
+            help = "Include experiments that crashed in the output.",
+        )
+        
         return parser.parse_args()
 
 
@@ -118,6 +131,7 @@ def get_experiment_data(
         experiment: comet_ml.api.APIExperiment,
         metric_names: List[str],
         param_names: List[str],
+        args: argparse.Namespace,
         index_metric: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Convert a CometML experiment into a dictionary of paramters and a list of metric rows.
@@ -128,6 +142,9 @@ def get_experiment_data(
         param_names: List of parameter names to include.
         index_metric: Optional metric to use as the index of the CSV file.
     """
+    if filter_experiment(experiment, args):
+        return {}, []
+    
     all_metrics = experiment.get_metrics()
     
     metric_names = set(metric_names)
@@ -167,6 +184,32 @@ def get_experiment_data(
     return param_dict, metric_rows
 
 
+def filter_experiment(
+        experiment: comet_ml.api.APIExperiment,
+        args: argparse.Namespace,
+    ) -> bool:
+    """Determine if an experiment should be filtered based on its state.
+    
+    Args:
+        experiment: CometML experiment object.
+        args: Command line arguments.
+        
+    Returns:
+        True if experiment should be filtered, False if it should be included.
+    """
+    state = experiment.get_state()
+    
+    if state == 'finished':
+        return False
+    elif state == 'crashed' and args.include_crashed:
+        return False
+    elif state == 'running' and args.include_running:
+        return False
+    else:
+        logger.warning(f"Experiment {experiment.id} has unknown state {state}, skipping...")
+        return True
+
+
 def main():
     args = parse_args()
 
@@ -201,7 +244,7 @@ def main():
     n_valid_runs = 0
     for experiment in tqdm(experiments):
         params, metric_rows = get_experiment_data(
-            experiment, metrics, params, index_metric=args.index_metric)
+            experiment, metrics, params, args, index_metric=args.index_metric)
 
         if len(metric_rows) > 0 and len(params) > 0:
             n_valid_runs += 1
