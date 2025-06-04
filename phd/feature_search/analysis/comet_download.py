@@ -185,9 +185,9 @@ def get_experiment_data(
     param_dict = {x['name']: x['valueCurrent'] for x in param_data if x['name'] in param_names}
     
     # Add experiment key to the param dict and metric rows so they are joinable
-    param_dict.update({'experiment_key': experiment.id})
+    param_dict.update({'run_id': experiment.id})
     for row in metric_rows:
-        row.update({'experiment_key': experiment.id})
+        row.update({'run_id': experiment.id})
     
     return param_dict, metric_rows
 
