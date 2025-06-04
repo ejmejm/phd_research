@@ -8,6 +8,7 @@ import subprocess
 import time
 import yaml
 
+import comet_ml
 from comet_ml import Optimizer
 
 
@@ -30,13 +31,19 @@ parser.add_argument(
     help='Path to a YAML or JSON file containing sweep configuration. '
          'A sweep will be created for each file provided.',
 )
+parser.add_argument(
+    '--offline', action='store_true',
+    help='Run the sweeps in offline mode. Note that this flag must be '
+         'enabled when you run sweeps, not when you create them.',
+)
 
 
-def run_sweep(sweep_id) -> str:
+def run_sweep(sweep_id, offline=False) -> str:
     """Run a sweep and returns the status of the optimizer after the run."""
     if 'COMET_OPTIMIZER_ID' in os.environ:
         del os.environ['COMET_OPTIMIZER_ID']
-    opt = Optimizer(sweep_id, verbose=0)
+    experiment_class = comet_ml.OfflineExperiment if offline else comet_ml.Experiment
+    opt = Optimizer(sweep_id, verbose=0, experiment_class=experiment_class)
     config = opt.status()
     if config['status'] == 'completed':
         return 'completed'
@@ -45,6 +52,7 @@ def run_sweep(sweep_id) -> str:
     
     environ = os.environ.copy()
     environ['COMET_OPTIMIZER_ID'] = opt.id
+    environ['COMET_MODE'] = 'offline' if offline else 'online'
 
     # This is adapted from comet_optimize.py
 
@@ -170,7 +178,7 @@ def main():
         if args.sweep_id == 'new':
             args.sweep_id = new_ids[-1]
         for _ in range(args.count):
-            status = run_sweep(args.sweep_id)
+            status = run_sweep(args.sweep_id, offline=args.offline)
             if status == 'completed':
                 print('Sweep completed!')
                 break

@@ -93,9 +93,15 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
         if workspace is None:
             workspace = api.get_default_workspace()
             logger.log(f'CometML workspace not specified, using retrieved default: {workspace}')
-                
+        
+        # Determine whether experiments should be run online or offline
+        experiment_cls = comet_ml.Experiment
+        if os.environ.get('COMET_MODE', 'online') == 'offline':
+            experiment_cls = comet_ml.OfflineExperiment
+            logger.info('\n========== Running Comet in offline mode! ==========\n')
+
         if comet_sweep_id:
-            opt = comet_ml.Optimizer(comet_sweep_id, verbose=0)
+            opt = comet_ml.Optimizer(comet_sweep_id, verbose=0, experiment_class=experiment_cls)
             project = opt.status()['parameters'].get('sweep_project')
             if project is not None:
                 project = project['values'][0]
@@ -158,7 +164,7 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
                     experiment.add_tag(tag)
 
         else:
-            experiment = comet_ml.Experiment(project_name=project, workspace=workspace)
+            experiment = experiment_cls(project_name=project, workspace=workspace)
             error_log = log_capture_string.getvalue()
 
             if 'run will not be logged' in error_log.lower():
