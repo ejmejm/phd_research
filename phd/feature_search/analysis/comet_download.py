@@ -1,0 +1,228 @@
+"""Download run data from CometML and convert it into a CSV file."""
+
+import argparse
+from collections import defaultdict
+import logging
+from pathlib import Path
+import random
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import comet_ml
+from comet_ml.api import API
+import pandas as pd
+from tqdm import tqdm
+
+
+logger = logging.getLogger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+        """Create and return argument parser for Comet data download.
+        
+        Returns:
+            argparse.Namespace: Parsed command line arguments.
+        """
+        parser = argparse.ArgumentParser(
+            description="Download experiment data from CometML and save as CSV"
+        )
+        parser.add_argument(
+            '--project', 
+            type = str, 
+            required = True,
+            help = "CometML project name",
+        )
+        parser.add_argument(
+            '--workspace', 
+            type = str, 
+            default = None,
+            help = "CometML workspace name",
+        )
+        parser.add_argument(
+            '--history_vars', 
+            nargs = '*', 
+            type = str, 
+            default = None,
+            help = "Specific metrics to download (default: all available)",
+        )
+        parser.add_argument(
+            '--params', 
+            nargs = '*', 
+            type = str, 
+            default = None,
+            help = "Specific parameters to download (default: all available)",
+        )
+        parser.add_argument(
+            '--max_experiments',
+            type = int,
+            default = None,
+            help = "Maximum number of experiments to process (for testing)",
+        )
+        parser.add_argument(
+            '--output_dir',
+            type = str,
+            default = None,
+            help = "Output directory for the CSV file. If not provided, the "
+                   "CSV will be saved in the current working directory.",
+        )
+        parser.add_argument(
+            '--index_metric',
+            type = str,
+            default = None,
+            help = "Metric to use as the index of the CSV file. "
+                   "CometML's builtin step index (separate from metrics) will be used if not provided.",
+        )
+        return parser.parse_args()
+
+
+METRIC_PARAM_DISCOVERY_SAMPLES = 10
+
+
+def discover_all_metrics_and_params(experiments: List[Any]) -> Tuple[Set[str], Set[str]]:
+    """Discover all available metrics and parameters from experiments.
+    
+    Args:
+        experiments: List of CometML experiment objects.
+        
+    Returns:
+        tuple: (set of all metric names, set of all parameter names)
+    """
+    logger.info("Discovering available metrics and parameters...")
+    all_metrics = set()
+    all_params = set()
+    
+    # Sample a random subset of experiments to discover available metrics/params
+    sample_size = min(METRIC_PARAM_DISCOVERY_SAMPLES, len(experiments))
+    indices = list(range(len(experiments)))
+    random.shuffle(indices)
+    sample_experiments = [experiments[i] for i in indices[:sample_size]]
+    
+    for experiment in tqdm(sample_experiments, desc='Sampling experiments'):
+        try:
+            param_names = [p['name'] for p in experiment.get_parameters_summary()]
+            all_params.update(param_names)
+            
+            system_metric_names = experiment.get_system_metric_names()
+            metric_names = [m['name'] for m in experiment.get_metrics_summary()]
+            metric_names = list(set(metric_names) - set(system_metric_names))
+            all_metrics.update(metric_names)
+            
+        except Exception as e:
+            logger.warning(f"Failed to get metrics/params for experiment {experiment.id}: {e}")
+            continue
+    
+    logger.info(f"Discovered {len(all_metrics)} unique metrics and {len(all_params)} unique parameters")
+    return all_metrics, all_params
+
+
+def get_experiment_data(
+        experiment: comet_ml.api.APIExperiment,
+        metric_names: List[str],
+        param_names: List[str],
+        index_metric: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Convert a CometML experiment into a dictionary of paramters and a list of metric rows.
+    
+    Args:
+        experiment: CometML experiment object.
+        metric_names: List of metric names to include.
+        param_names: List of parameter names to include.
+        index_metric: Optional metric to use as the index of the CSV file.
+    """
+    all_metrics = experiment.get_metrics()
+    
+    metric_names = set(metric_names)
+    param_names = set(param_names)
+    
+    # Default is to use Comet's builtin step index, separate from metrics
+    if index_metric is None:
+        rows = defaultdict(dict)
+        for entry in all_metrics:
+            if entry['metricName'] in metric_names and entry['step'] is not None:
+                rows[entry['step']][entry['metricName']] = entry['metricValue']
+
+        metric_rows = [v for k, v in sorted(rows.items())]
+    
+    # If an index metric is provided, use it to index the rows
+    else:
+        valid_timesteps = [x['timestamp'] for x in all_metrics if x['metricName'] == index_metric]
+        if len(valid_timesteps) == 0:
+            raise ValueError(f"The index metric {index_metric} is not present in the experiments!")
+        
+        rows = {t: {} for t in valid_timesteps}
+        for entry in all_metrics:
+            timestamp = entry['timestamp']
+            if entry['metricName'] in metric_names and timestamp in rows:
+                rows[timestamp][entry['metricName']] = entry['metricValue']
+        
+        metric_rows = list(sorted(rows.values(), key=lambda x: float(x[index_metric])))
+    
+    param_data = experiment.get_parameters_summary()
+    param_dict = {x['name']: x['valueCurrent'] for x in param_data if x['name'] in param_names}
+    
+    # Add experiment key to the param dict and metric rows so they are joinable
+    param_dict.update({'experiment_key': experiment.id})
+    for row in metric_rows:
+        row.update({'experiment_key': experiment.id})
+    
+    return param_dict, metric_rows
+
+
+def main():
+    args = parse_args()
+
+    api = API()
+    api.use_cache(True)
+    
+    if args.workspace is None:
+        args.workspace = api.get_default_workspace()
+
+    logger.info("Looking for experiments...")
+    experiments = api.get_experiments(args.workspace, args.project)
+    logger.info(f"Found {len(experiments)} experiments")
+    
+    if args.max_experiments is not None:
+        logger.info(f"Limiting to {args.max_experiments} experiments")
+        experiments = experiments[:args.max_experiments]
+
+    if not args.history_vars or not args.params:
+        logger.info("Discovering available metrics and parameters...")
+        all_metrics, all_params = discover_all_metrics_and_params(experiments)
+        
+    metrics = args.history_vars if args.history_vars is not None else all_metrics
+    params = args.params if args.params is not None else all_params
+    
+    logger.info(f"\nParameters to collect: {params}")
+    logger.info(f"\nMetrics to collect: {metrics}\n")
+
+    logger.info("Querying experiment data...")
+
+    all_param_rows = []
+    all_metric_rows = []
+    n_valid_runs = 0
+    for experiment in tqdm(experiments):
+        params, metric_rows = get_experiment_data(
+            experiment, metrics, params, index_metric=args.index_metric)
+
+        if len(metric_rows) > 0 and len(params) > 0:
+            n_valid_runs += 1
+            all_metric_rows.extend(metric_rows)
+            all_param_rows.append(params)
+
+    logger.info("Saving data to csv...")
+    
+    output_dir = Path(args.output_dir) if args.output_dir is not None else Path.cwd()
+    
+    params_df = pd.DataFrame(all_param_rows)
+    params_df.reset_index(drop=True, inplace=True)
+    params_df.to_csv(output_dir / f"{args.project}_params.csv")
+    
+    metrics_df = pd.DataFrame(all_metric_rows)
+    metrics_df.reset_index(drop=True, inplace=True)
+    metrics_df.to_csv(output_dir / f"{args.project}_metrics.csv")
+
+    logger.info(f"{n_valid_runs}/{len(experiments)} runs saved.")
+    logger.info(f"{len(all_metric_rows)} metric rows saved.")
+
+
+if __name__ == '__main__':
+        main()
