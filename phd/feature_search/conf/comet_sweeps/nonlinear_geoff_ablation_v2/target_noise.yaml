@@ -1,0 +1,16 @@
+name: target_noise
+project: feature_recycling-nlg_ablation_v2
+command: python scripts/full_backbone_recycling.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.total_steps: 2_000_000
+
+  model.hidden_dim: [320, 1280, 5120, 20480]
+  task.noise_std: [0.0, 1.0, 2.0, 4.0, 8.0]
+  seed: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]

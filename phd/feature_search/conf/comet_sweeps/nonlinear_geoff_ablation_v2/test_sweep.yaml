@@ -12,8 +12,8 @@ trials: 1
 
 parameters:
   device: cpu
-  train.total_steps: 15_000
-  model.hidden_dim: [300]
+  train.total_steps: ${model.hidden_dim}
+  model.hidden_dim: [2000]
   task.distractor_chance: 0.5
   seed:
     type: integer
