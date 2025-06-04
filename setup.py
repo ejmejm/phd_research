@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="phd",
-    version="0.2.0",
+    version="0.3.0",
     packages=find_packages(),
     author="Edan Meyer",
     author_email="ejmejm98@gmail.com",
@@ -18,7 +18,8 @@ setup(
     python_requires='>=3.10',
     entry_points={
         'console_scripts': [
-            'comet_sweep=phd.research_utils.comet_sweep:main',
+            'comet_sweep=phd.research_utils.scripts.comet_sweep:main',
+            'comet_upload=phd.research_utils.scripts.comet_upload:main',
         ],
     },
 )
