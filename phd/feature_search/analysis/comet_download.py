@@ -2,6 +2,7 @@
 
 import argparse
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from pathlib import Path
 import random
@@ -83,6 +84,12 @@ def parse_args() -> argparse.Namespace:
             action = 'store_true',
             default = False,
             help = "Include experiments that crashed in the output.",
+        )
+        parser.add_argument(
+            '--n_threads',
+            type = int,
+            default = 8,
+            help = "Number of threads to use for parallel processing (default: 4).",
         )
         
         return parser.parse_args()
@@ -211,6 +218,30 @@ def filter_experiment(
         return True
 
 
+def process_single_experiment(
+        experiment: comet_ml.api.APIExperiment,
+        metrics: List[str],
+        params: List[str],
+        args: argparse.Namespace,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Process a single experiment and return its data.
+    
+    Args:
+        experiment: CometML experiment object.
+        metrics: List of metric names to include.
+        params: List of parameter names to include.
+        args: Command line arguments.
+        
+    Returns:
+        Tuple of (param_dict, metric_rows) or ({}, []) if experiment should be filtered.
+    """
+    try:
+        return get_experiment_data(experiment, metrics, params, args, index_metric=args.index_metric)
+    except Exception as e:
+        logger.warning(f"Failed to process experiment {experiment.id}: {e}")
+        return {}, []
+
+
 def main():
     args = parse_args()
 
@@ -238,19 +269,33 @@ def main():
     logger.info(f"\nParameters to collect: {params}")
     logger.info(f"\nMetrics to collect: {metrics}\n")
 
-    logger.info("Querying experiment data...")
+    logger.info(f"Querying experiment data using {args.n_threads} threads...")
 
     all_param_rows = []
     all_metric_rows = []
     n_valid_runs = 0
-    for experiment in tqdm(experiments):
-        params, metric_rows = get_experiment_data(
-            experiment, metrics, params, args, index_metric=args.index_metric)
-
-        if len(metric_rows) > 0 and len(params) > 0:
-            n_valid_runs += 1
-            all_metric_rows.extend(metric_rows)
-            all_param_rows.append(params)
+    
+    # Use ThreadPoolExecutor for parallel processing
+    with ThreadPoolExecutor(max_workers=args.n_threads) as executor:
+        # Submit all tasks
+        future_to_experiment = {
+            executor.submit(process_single_experiment, experiment, metrics, params, args): experiment
+            for experiment in experiments
+        }
+        
+        # Process completed tasks with progress bar
+        for future in tqdm(as_completed(future_to_experiment), total=len(experiments), desc="Processing experiments"):
+            experiment = future_to_experiment[future]
+            try:
+                param_dict, metric_rows = future.result()
+                
+                if len(metric_rows) > 0 and len(param_dict) > 0:
+                    n_valid_runs += 1
+                    all_metric_rows.extend(metric_rows)
+                    all_param_rows.append(param_dict)
+                    
+            except Exception as e:
+                logger.warning(f"Failed to get result for experiment {experiment.id}: {e}")
 
     logger.info("Saving data to csv...")
     
