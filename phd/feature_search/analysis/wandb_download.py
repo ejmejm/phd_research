@@ -1,3 +1,5 @@
+"""Download run data from Wandb and convert it into a CSV file."""
+
 # Source: https://docs.wandb.ai/guides/track/public-api-guide
 
 import argparse
