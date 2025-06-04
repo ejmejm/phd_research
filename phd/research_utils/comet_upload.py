@@ -60,17 +60,27 @@ def get_parser_arguments(parser):
         help = "upload all offline experiment archives to that project instead of the original project",
         action = "store",
     )
-    parser.add_argument(
+    
+    # Create mutually exclusive group for file handling options
+    file_handling_group = parser.add_mutually_exclusive_group()
+    file_handling_group.add_argument(
         "--mark",
         help = "rename successfully uploaded files to {filename}.uploaded",
         action = "store_true",
         default = False,
     )
+    file_handling_group.add_argument(
+        "--delete",
+        help = "delete successfully uploaded files",
+        action = "store_true",
+        default = False,
+    )
+    
     parser.add_argument(
         "--n_threads",
         type = int,
         default = 4,
-        help = "number of threads to use for parallel uploads (default: 1)",
+        help = "number of threads to use for parallel uploads (default: 4)",
     )
 
 
@@ -111,6 +121,16 @@ def rename_uploaded_file(filepath: str) -> bool:
         return False
 
 
+def delete_uploaded_file(filepath: str) -> bool:
+    """Delete a file after successful upload. Returns True if successful."""
+    try:
+        os.remove(filepath)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to delete {filepath}: {str(e)}")
+        return False
+
+
 def upload_single_file(
     filename: str,
     api_key: str,
@@ -118,6 +138,7 @@ def upload_single_file(
     override_workspace: Optional[str],
     override_project_name: Optional[str],
     mark_uploaded: bool,
+    delete_uploaded: bool,
     stats: UploadStats,
     pbar: tqdm,
 ) -> None:
@@ -133,17 +154,21 @@ def upload_single_file(
         )
         
         if success:
-            # Mark file as uploaded if requested
-            rename_success = True
+            # Handle file after successful upload
+            file_handled = True
             if mark_uploaded:
-                rename_success = rename_uploaded_file(filename)
+                file_handled = rename_uploaded_file(filename)
+            elif delete_uploaded:
+                file_handled = delete_uploaded_file(filename)
             
-            if rename_success:
+            if file_handled:
                 stats.add_success(filename)
-                logger.debug(f"Successfully uploaded: {filename}")
+                action = "deleted" if delete_uploaded else "renamed" if mark_uploaded else "uploaded"
+                logger.debug(f"Successfully {action}: {filename}")
             else:
                 stats.add_failure(filename)
-                logger.error(f"Upload succeeded but failed to rename: {filename}")
+                action = "delete" if delete_uploaded else "rename"
+                logger.error(f"Upload succeeded but failed to {action}: {filename}")
         else:
             stats.add_failure(filename)
             logger.error(f"Upload failed: {filename}")
@@ -210,6 +235,7 @@ def upload_files(args) -> None:
                     override_workspace = args.override_workspace,
                     override_project_name = args.override_project_name,
                     mark_uploaded = args.mark,
+                    delete_uploaded = args.delete,
                     stats = stats,
                     pbar = pbar,
                 )
