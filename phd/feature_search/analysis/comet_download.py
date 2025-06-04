@@ -12,7 +12,8 @@ from comet_ml.api import API
 import pandas as pd
 from tqdm import tqdm
 
-
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
