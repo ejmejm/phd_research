@@ -210,9 +210,18 @@ def log_metrics(metrics: Dict[str, Union[int, float]], config: DictConfig,
         step: Optional step number for the metrics.
     """
     if config.wandb:
+        if step is not None:
+            metrics['step'] = step
         prefix = prefix + '/' if prefix else ''
         wandb.log({f'{prefix}{k}': v for k, v in metrics.items()}) #, step=step)
+    
     if config.comet_ml:
+        if 'step' in metrics:
+            if step is None:
+                step = metrics['step']
+            else:
+                assert metrics['step'] == step, 'Step mismatch in metrics and explicit step argument!'
+        
         experiment = comet_ml.get_global_experiment()
         experiment.log_metrics(metrics, prefix=prefix, step=step)
 
