@@ -6,7 +6,6 @@ from torch import nn
 import numpy as np
 
 
-
 class DummyTask:
     def __init__(self, feature_dim: int, n_classes: int, task_type: str = 'classification'):
         """Initialize data generator.
