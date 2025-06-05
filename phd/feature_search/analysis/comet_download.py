@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
             default = 8,
             help = "Number of threads to use for parallel processing (default: 4).",
         )
+        parser.add_argument(
+            '--save_batch_size',
+            type = int,
+            default = 300,
+            help = "Number of experiments to process before saving data to disk (default: 100).",
+        )
         
         return parser.parse_args()
 
@@ -242,11 +248,46 @@ def process_single_experiment(
         return {}, []
 
 
+def save_batch_data(
+        all_param_rows: List[Dict[str, Any]], 
+        all_metric_rows: List[Dict[str, Any]], 
+        params_file: Path, 
+        metrics_file: Path, 
+    ) -> None:
+    """Save current batch data to CSV files and clear memory.
+    
+    Args:
+        all_param_rows: List of parameter dictionaries to save.
+        all_metric_rows: List of metric dictionaries to save.
+        params_file: Path to the parameters CSV file.
+        metrics_file: Path to the metrics CSV file.
+    """
+    if len(all_param_rows) > 0:
+        params_df = pd.DataFrame(all_param_rows)
+        params_df.reset_index(drop=True, inplace=True)
+        
+        # Append to existing file or create new one
+        if params_file.exists():
+            params_df.to_csv(params_file, mode='a', header=False, index=False)
+        else:
+            params_df.to_csv(params_file, index=False)
+    
+    if len(all_metric_rows) > 0:
+        metrics_df = pd.DataFrame(all_metric_rows)
+        metrics_df.reset_index(drop=True, inplace=True)
+        
+        # Append to existing file or create new one
+        if metrics_file.exists():
+            metrics_df.to_csv(metrics_file, mode='a', header=False, index=False)
+        else:
+            metrics_df.to_csv(metrics_file, index=False)
+
+
 def main():
     args = parse_args()
 
     api = API()
-    api.use_cache(True)
+    api.use_cache(False)
     
     if args.workspace is None:
         args.workspace = api.get_default_workspace()
@@ -274,43 +315,69 @@ def main():
     all_param_rows = []
     all_metric_rows = []
     n_valid_runs = 0
+    batch_size = args.save_batch_size
+    processed_count = 0
     
-    # Use ThreadPoolExecutor for parallel processing
-    with ThreadPoolExecutor(max_workers=args.n_threads) as executor:
-        # Submit all tasks
-        future_to_experiment = {
-            executor.submit(process_single_experiment, experiment, metrics, params, args): experiment
-            for experiment in experiments
-        }
-        
-        # Process completed tasks with progress bar
-        for future in tqdm(as_completed(future_to_experiment), total=len(experiments), desc="Processing experiments"):
-            experiment = future_to_experiment[future]
-            try:
-                param_dict, metric_rows = future.result()
-                
-                if len(metric_rows) > 0 and len(param_dict) > 0:
-                    n_valid_runs += 1
-                    all_metric_rows.extend(metric_rows)
-                    all_param_rows.append(param_dict)
-                    
-            except Exception as e:
-                logger.warning(f"Failed to get result for experiment {experiment.id}: {e}")
-
-    logger.info("Saving data to csv...")
-    
+    # Setup output directory and file paths
     output_dir = Path(args.output_dir) if args.output_dir is not None else Path.cwd()
+    params_file = output_dir / f"{args.project}_params.csv"
+    metrics_file = output_dir / f"{args.project}_metrics.csv"
     
-    params_df = pd.DataFrame(all_param_rows)
-    params_df.reset_index(drop=True, inplace=True)
-    params_df.to_csv(output_dir / f"{args.project}_params.csv")
+    # Remove existing files to start fresh
+    if params_file.exists():
+        params_file.unlink()
+    if metrics_file.exists():
+        metrics_file.unlink()
     
-    metrics_df = pd.DataFrame(all_metric_rows)
-    metrics_df.reset_index(drop=True, inplace=True)
-    metrics_df.to_csv(output_dir / f"{args.project}_metrics.csv")
+    # Process experiments in batches to control memory usage
+    for batch_start in range(0, len(experiments), batch_size):
+        batch_end = min(batch_start + batch_size, len(experiments))
+        batch = experiments[batch_start:batch_end]
+        current_batch_num = batch_start // batch_size + 1
+        total_batches = (len(experiments) + batch_size - 1) // batch_size
+        
+        logger.info(f"Processing batch {current_batch_num}/{total_batches} ({len(batch)} experiments)")
+        
+        # Process this batch in parallel
+        with ThreadPoolExecutor(max_workers=args.n_threads) as executor:
+            # Submit all experiments in this batch
+            future_to_experiment = {
+                executor.submit(process_single_experiment, experiment, metrics, params, args): experiment
+                for experiment in batch
+            }
+            
+            # Process completed tasks in this batch
+            for future in tqdm(as_completed(future_to_experiment), total=len(batch), desc=f"Batch {current_batch_num}"):
+                experiment = future_to_experiment[future]
+                try:
+                    param_dict, metric_rows = future.result()
+                    
+                    if len(metric_rows) > 0 and len(param_dict) > 0:
+                        n_valid_runs += 1
+                        all_metric_rows.extend(metric_rows)
+                        all_param_rows.append(param_dict)
+                    
+                    processed_count += 1
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to get result for experiment {experiment.id}: {e}")
+                    processed_count += 1
+        
+        # Save batch data and clear memory after each batch
+        if len(all_param_rows) > 0 or len(all_metric_rows) > 0:
+            save_batch_data(all_param_rows, all_metric_rows, params_file, metrics_file)
+            all_param_rows.clear()
+            all_metric_rows.clear()
+            logger.info(f"Saved and cleared batch {current_batch_num} data after processing {processed_count} experiments")
 
     logger.info(f"{n_valid_runs}/{len(experiments)} runs saved.")
-    logger.info(f"{len(all_metric_rows)} metric rows saved.")
+    
+    # Count total metric rows in the final file
+    if metrics_file.exists():
+        final_metrics_df = pd.read_csv(metrics_file)
+        logger.info(f"{len(final_metrics_df)} metric rows saved.")
+    else:
+        logger.info("0 metric rows saved.")
 
 
 if __name__ == '__main__':
