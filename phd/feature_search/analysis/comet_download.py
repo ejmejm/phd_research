@@ -252,8 +252,12 @@ def save_batch_data(
         all_param_rows: List[Dict[str, Any]], 
         all_metric_rows: List[Dict[str, Any]], 
         params_file: Path, 
-        metrics_file: Path, 
-    ) -> None:
+        metrics_file: Path,
+        param_columns: Optional[List[str]] = None,
+        metric_columns: Optional[List[str]] = None,
+        param_start_index: int = 0,
+        metric_start_index: int = 0,
+    ) -> Tuple[int, int]:
     """Save current batch data to CSV files and clear memory.
     
     Args:
@@ -261,26 +265,54 @@ def save_batch_data(
         all_metric_rows: List of metric dictionaries to save.
         params_file: Path to the parameters CSV file.
         metrics_file: Path to the metrics CSV file.
+        param_columns: Fixed column order for parameters.
+        metric_columns: Fixed column order for metrics.
+        param_start_index: Starting index for parameters DataFrame.
+        metric_start_index: Starting index for metrics DataFrame.
+        
+    Returns:
+        Tuple of (next_param_index, next_metric_index) for the next batch.
     """
+    next_param_index = param_start_index
+    next_metric_index = metric_start_index
+    
     if len(all_param_rows) > 0:
         params_df = pd.DataFrame(all_param_rows)
-        params_df.reset_index(drop=True, inplace=True)
+        
+        # Ensure consistent column ordering
+        if param_columns is not None:
+            # Reorder columns to match the fixed order, fill missing columns with NaN
+            params_df = params_df.reindex(columns=param_columns)
+        
+        # Set continuous index starting from param_start_index
+        params_df.index = range(param_start_index, param_start_index + len(params_df))
+        next_param_index = param_start_index + len(params_df)
         
         # Append to existing file or create new one
         if params_file.exists():
-            params_df.to_csv(params_file, mode='a', header=False, index=False)
+            params_df.to_csv(params_file, mode='a', header=False, index=True)
         else:
-            params_df.to_csv(params_file, index=False)
+            params_df.to_csv(params_file, index=True)
     
     if len(all_metric_rows) > 0:
         metrics_df = pd.DataFrame(all_metric_rows)
-        metrics_df.reset_index(drop=True, inplace=True)
+        
+        # Ensure consistent column ordering
+        if metric_columns is not None:
+            # Reorder columns to match the fixed order, fill missing columns with NaN
+            metrics_df = metrics_df.reindex(columns=metric_columns)
+        
+        # Set continuous index starting from metric_start_index
+        metrics_df.index = range(metric_start_index, metric_start_index + len(metrics_df))
+        next_metric_index = metric_start_index + len(metrics_df)
         
         # Append to existing file or create new one
         if metrics_file.exists():
-            metrics_df.to_csv(metrics_file, mode='a', header=False, index=False)
+            metrics_df.to_csv(metrics_file, mode='a', header=False, index=True)
         else:
-            metrics_df.to_csv(metrics_file, index=False)
+            metrics_df.to_csv(metrics_file, index=True)
+    
+    return next_param_index, next_metric_index
 
 
 def main():
@@ -307,6 +339,10 @@ def main():
     metrics = args.history_vars if args.history_vars is not None else all_metrics
     params = args.params if args.params is not None else all_params
     
+    # Create consistent column ordering with run_id as first column
+    param_columns = ['run_id'] + sorted(list(params))  # run_id first, then sorted params
+    metric_columns = ['run_id'] + sorted(list(metrics))  # run_id first, then sorted metrics
+    
     logger.info(f"\nParameters to collect: {params}")
     logger.info(f"\nMetrics to collect: {metrics}\n")
 
@@ -317,6 +353,10 @@ def main():
     n_valid_runs = 0
     batch_size = args.save_batch_size
     processed_count = 0
+    
+    # Initialize continuous index tracking
+    param_index = 0
+    metric_index = 0
     
     # Setup output directory and file paths
     output_dir = Path(args.output_dir) if args.output_dir is not None else Path.cwd()
@@ -358,14 +398,23 @@ def main():
                         all_param_rows.append(param_dict)
                     
                     processed_count += 1
-                        
+                    
                 except Exception as e:
                     logger.warning(f"Failed to get result for experiment {experiment.id}: {e}")
                     processed_count += 1
         
         # Save batch data and clear memory after each batch
         if len(all_param_rows) > 0 or len(all_metric_rows) > 0:
-            save_batch_data(all_param_rows, all_metric_rows, params_file, metrics_file)
+            param_index, metric_index = save_batch_data(
+                all_param_rows, 
+                all_metric_rows, 
+                params_file, 
+                metrics_file,
+                param_columns = param_columns,
+                metric_columns = metric_columns,
+                param_start_index = param_index,
+                metric_start_index = metric_index
+            )
             all_param_rows.clear()
             all_metric_rows.clear()
             logger.info(f"Saved and cleared batch {current_batch_num} data after processing {processed_count} experiments")
