@@ -1,12 +1,12 @@
 name: target_flip_rate
 project: feature_recycling-nlg_ablation_v2
-command: python scripts/full_backbone_recycling.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v2/target_flip_rate.yaml
+command: python scripts/full_backbone_recycling.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
 algorithm: grid
 
 spec:
   metric: cumulative_loss
   objective: minimize
-  retryAssignLimit: 
+  retryAssignLimit: 4
 
 parameters:
   model.hidden_dim: [320, 1280, 5120, 20480]
