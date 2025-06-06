@@ -241,7 +241,7 @@ def standardize_targets(
         ```
     """
     # --------------------------------------------------------------------- #
-    # 1. Normalise the current batch using statistics **from the prev step**.
+    # 1. Normalize the current batch using statistics **from the prev step**.
     # --------------------------------------------------------------------- #
     var_safe = stats.running_var.clamp_min(eps)  # ensure σ² ≥ eps
     std = torch.sqrt(var_safe)
@@ -302,7 +302,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
         use_cbp_utility = cfg.input_recycling.use_cbp_utility,
         feature_protection_steps = cfg.input_recycling.feature_protection_steps,
         n_start_real_features = cfg.input_recycling.get('n_start_real_features', -1),
-        device = cfg.device,
+        device = 'cpu',
         seed = seed_from_string(base_seed, 'recycler'),
     )
     
