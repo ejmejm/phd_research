@@ -411,6 +411,8 @@ def reset_input_weights(idxs: Union[int, Sequence[int]], model: MLP, optimizer: 
         state = optimizer.state[first_layer.weight]
         state['beta'][:, idxs] = math.log(cfg.train.learning_rate)
         state['h'][:, idxs] = 0
+        if 'v' in state:
+            state['v'][:, idxs] = 0
     else:
         raise ValueError(f'Invalid optimizer type: {type(optimizer)}')
 
