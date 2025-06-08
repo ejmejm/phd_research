@@ -39,9 +39,9 @@ train:
 
 model:
   n_layers: 2
-  weight_init_method: binary
+  weight_init_method: binary # Only affects the first layer
   hidden_dim: 100
-  n_frozen_layers: 1
+  n_frozen_layers: 1 # The first layer is frozen (no backprop)
   output_dim: 1
   activation: ltu
 
