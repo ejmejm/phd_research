@@ -1,3 +1,12 @@
+"""
+This script nearly replicates the task used in Rupam and Rich's 2013 paper,
+"Representation Search through Generate and Test": http://incompleteideas.net/papers/MS-AAAIws-2013.pdf.
+
+Note that there are some minor differences, notably, all of the LTU units in the task share the
+same threshold of 0.1 * n_features. Support for gadient descent in the first layer of the prediction network
+while using autostep in the second layer is also not supported.
+"""
+
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
