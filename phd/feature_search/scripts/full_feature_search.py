@@ -257,6 +257,10 @@ def run_experiment(
 
         # Generate batch of data
         inputs, targets = next(task_iterator)
+
+        # Add noise to targets
+        if cfg.task.noise_std > 0:
+            targets += torch.randn_like(targets) * cfg.task.noise_std
         
         with torch.no_grad():
             standardized_targets, cumulant_stats = standardize_targets(targets, cumulant_stats)
@@ -266,10 +270,6 @@ def run_experiment(
         target_buffer.extend(targets.view(-1).tolist())
         
         features, targets = inputs.to(cfg.device), targets.to(cfg.device)
-
-        # Add noise to targets
-        if cfg.task.noise_std > 0:
-            targets += torch.randn_like(targets) * cfg.task.noise_std
 
         # Reset weights and optimizer states for recycled features
         if cbp_tracker is not None:
