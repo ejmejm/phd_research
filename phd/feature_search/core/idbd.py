@@ -35,7 +35,7 @@ class IDBD(Optimizer):
         meta_lr: float = 0.01,
         init_lr: float = 0.01,
         weight_decay: float = 0.0,
-        version: str = 'squared_grads', # squared_inputs, squared_grads, hvp, hessian_diagonal,
+        version: str = 'squared_grads', # {squared_inputs, squared_grads}
         autostep: bool = False,
         tau: float = 1e4,
     ):
@@ -48,8 +48,8 @@ class IDBD(Optimizer):
         self.autostep = autostep
         self.tau = tau
         
-        assert self.version in ['squared_inputs', 'squared_grads', 'hvp', 'hessian_diagonal'], \
-            f"Invalid version: {self.version}. Must be one of: squared_inputs, squared_grads, hvp, hessian_diagonal."
+        assert self.version in ['squared_inputs', 'squared_grads'], \
+            f"Invalid version: {self.version}. Must be one of: squared_inputs, squared_grads."
         
         if autostep:
             # Check that parameters match a linear layer structure
