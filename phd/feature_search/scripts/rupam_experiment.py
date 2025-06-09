@@ -3,17 +3,16 @@ This script nearly replicates the task used in Rupam and Rich's 2013 paper,
 "Representation Search through Generate and Test": http://incompleteideas.net/papers/MS-AAAIws-2013.pdf.
 
 Note that there are some minor differences, notably, all of the LTU units in the task share the
-same threshold of 0.1 * n_features. Support for gadient descent in the first layer of the prediction network
-while using autostep in the second layer is also not supported.
+same threshold of 0, and there is no target noise. Support for gadient descent in the first layer of
+the prediction network while using autostep in the second layer is also not supported.
 """
 
-import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from typing import Iterator, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim import Optimizer
 from tqdm import tqdm
 
 import hydra
@@ -26,10 +25,9 @@ from phd.feature_search.core.experiment_helpers import *
 from phd.research_utils.logging import *
 
 
-@hydra.main(config_path='../conf', config_name='rupam_task')
-def main(cfg: DictConfig) -> None:
-    """Run the feature recycling experiment."""
-    init_experiment(cfg.project, cfg)
+def prepare_ltu_geoff_experiment(cfg: DictConfig):
+    set_seed(cfg.seed)
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
     
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_components(cfg)
@@ -49,20 +47,36 @@ def main(cfg: DictConfig) -> None:
         cbp_tracker.incoming_weight_init = 'binary'
     
     # Init target output weights to kaiming uniform and predictor output weights to zero
+    task_init_generator = torch.Generator(device=task.weights[-1].device)
+    task_init_generator.manual_seed(seed_from_string(base_seed, 'task_init_generator'))
     torch.nn.init.kaiming_uniform_(
         task.weights[-1],
         mode = 'fan_in',
         nonlinearity = 'linear',
+        generator = task_init_generator,
     )
     torch.nn.init.zeros_(model.layers[-1].weight)
     
     # Change LTU threshold for target and predictors
-    ltu_threshold = 0.1 * cfg.task.n_features
+    ltu_threshold = 0.0 # 0.1 * cfg.task.n_features
     for layer in model.layers:
         if isinstance(layer, LTU):
             layer.threshold = ltu_threshold
     task.activation_fn.threshold = ltu_threshold
 
+    torch.manual_seed(seed_from_string(base_seed, 'experiment_setup'))
+
+    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker
+
+
+def run_experiment(
+        cfg: DictConfig,
+        task_iterator: Iterator[Tuple[torch.Tensor, torch.Tensor]],
+        model: MLP,
+        criterion: nn.Module,
+        optimizer: Optimizer,
+        cbp_tracker: CBPTracker,
+    ):
     # Training loop
     step = 0
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
@@ -153,6 +167,15 @@ def main(cfg: DictConfig) -> None:
         pbar.update(1)
     
     pbar.close()
+
+
+@hydra.main(config_path='../conf', config_name='rupam_task')
+def main(cfg: DictConfig) -> None:
+    """Run the feature recycling experiment."""
+    init_experiment(cfg.project, cfg)
+    task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
+        prepare_ltu_geoff_experiment(cfg)
+    run_experiment(cfg, task_iterator, model, criterion, optimizer, cbp_tracker)
     finish_experiment()
 
 
