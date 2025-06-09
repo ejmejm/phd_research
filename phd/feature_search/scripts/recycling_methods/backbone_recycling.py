@@ -14,7 +14,7 @@ from omegaconf import DictConfig
 from phd.feature_search.core.idbd import IDBD
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *
-from phd.feature_search.scripts.feature_maturity_experiment import *
+from phd.feature_search.scripts.old.feature_maturity_experiment import *
 
 
 logger = logging.getLogger(__name__)

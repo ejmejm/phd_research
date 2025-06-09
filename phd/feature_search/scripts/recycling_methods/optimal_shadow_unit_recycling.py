@@ -23,7 +23,7 @@ from omegaconf import DictConfig, open_dict
 from phd.feature_search.core.models import ACTIVATION_MAP, LTU, MLP
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *
-from phd.feature_search.scripts.feature_maturity_experiment import *
+from phd.feature_search.scripts.old.feature_maturity_experiment import *
 
 
 CONVERGENCE_N_SAMPLES = 200_000

@@ -1,5 +1,12 @@
 """
-Rupam's problem setup, but with distractors
+Rupam's problem setup, but with distractors and other additions.
+
+This script is a more complete version of the `rupam_experiment.py` script, which adds the following features:
+- Distractors in the input
+- Target noise
+- Gradient descent in the first layer of the prediction network
+- Autostep in the second layer of the prediction network
+- CBP tracking
 """
 
 import logging
@@ -11,14 +18,13 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from tqdm import tqdm
 
-import wandb
 import hydra
 from omegaconf import DictConfig
 
 from phd.feature_search.core.idbd import IDBD
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *
-from phd.feature_search.scripts.feature_maturity_experiment import *
+from phd.feature_search.scripts.rupam_experiment import prepare_ltu_geoff_experiment
 from phd.research_utils.logging import *
 
 
@@ -311,7 +317,7 @@ def main(cfg: DictConfig) -> None:
     cfg = init_experiment(cfg.project, cfg)
 
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
-        prepare_experiment(cfg)
+        prepare_ltu_geoff_experiment(cfg)
     model.forward = model_distractor_forward_pass.__get__(model)
     
     distractor_tracker = DistractorTracker(

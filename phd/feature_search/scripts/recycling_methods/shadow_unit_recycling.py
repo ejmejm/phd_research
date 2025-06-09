@@ -17,7 +17,7 @@ from phd.feature_search.core.models import MLP, ACTIVATION_MAP
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.feature_recycling import CBPTracker as OriginalCBPTracker
 from phd.feature_search.core.experiment_helpers import *
-from phd.feature_search.scripts.feature_maturity_experiment import *
+from phd.feature_search.scripts.old.feature_maturity_experiment import *
 
 
 logger = logging.getLogger(__name__)
