@@ -9,7 +9,7 @@ device: cpu
 
 task:
   distractor_chance: 0.0
-  noise_std: 1.0
+  noise_std: 0.0
 
 feature_recycling:
   use_cbp_utility: true
