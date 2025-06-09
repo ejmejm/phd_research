@@ -16,20 +16,21 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-import wandb
 import hydra
 from omegaconf import DictConfig
 
-from phd.feature_search.core.feature_recycling import reset_input_weights
 from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
 from phd.feature_search.core.models import LTU
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *
+from phd.research_utils.logging import *
 
 
-@hydra.main(config_path='../conf', config_name='defaults')
+@hydra.main(config_path='../conf', config_name='rupam_task')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
+    init_experiment(cfg.project, cfg)
+    
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
         prepare_components(cfg)
 
@@ -138,7 +139,7 @@ def main(cfg: DictConfig) -> None:
             }
             # Add model statistics
             metrics.update(get_model_statistics(model, features, param_inputs))
-            wandb.log(metrics)
+            log_metrics(metrics, cfg, step=step)
             
             pbar.set_postfix(loss=metrics['loss'], accuracy=metrics['accuracy'])
             
@@ -152,7 +153,7 @@ def main(cfg: DictConfig) -> None:
         pbar.update(1)
     
     pbar.close()
-    wandb.finish()
+    finish_experiment()
 
 
 if __name__ == '__main__':

@@ -26,7 +26,7 @@ input_recycling:
 feature_recycling:
   use_cbp_utility: true
   utility_decay: 0.99
-  recycle_rate: 0.0
+  recycle_rate: 0.005
   feature_protection_steps: 0
 
 train:
@@ -40,7 +40,7 @@ train:
 model:
   n_layers: 2
   weight_init_method: binary # Only affects the first layer
-  hidden_dim: 100
+  hidden_dim: 1024
   n_frozen_layers: 1 # The first layer is frozen (no backprop)
   output_dim: 1
   activation: ltu
