@@ -138,6 +138,40 @@ A generalized version of the Geoff task supporting:
 
 This task is demonstrated in [this talk](https://youtu.be/qcdNaVAyeQ4?si=Tc2xkqTTvVJnKu_S) and detailed in [Mahmood & Sutton (2013)](http://incompleteideas.net/papers/MS-AAAIws-2013.pdf).
 
+## Analysis
+
+### Downloading Experiment Data
+
+Use the `wandb_download.py` script to download experiment results from Weights & Biases:
+
+```bash
+python phd/feature_search/analysis/wandb_download.py [options]
+```
+
+**Common usage patterns:**
+
+```bash
+# Download all data from a project
+python wandb_download.py --project your_project_name
+
+# Download data from specific sweeps
+python wandb_download.py --project your_project_name --sweeps sweep_id1 sweep_id2
+```
+
+**Key options:**
+- `--sweeps`: Download data from specific sweep IDs
+- `--tags`: Download data from runs with specific tags
+- `--data_type`: Choose `run` (default, for metrics) or `table` (for artifact data)
+- `--history_vars`: Specify which metrics to download (default: all)
+- `--include_crashed`: Include crashed runs in download
+
+**Output:**
+The script generates two CSV files:
+- `{project}_config_data.csv`: Run configurations and metadata
+- `{project}_{data_type}_data.csv`: Logged metrics and results
+
+View existing analysis notebooks in the `analysis/` directory for examples of how to process and visualize the downloaded data.
+
 ## References
 
 - Sutton, R. S. (1992). Adapting bias by gradient descent: An incremental version of delta-bar-delta. *Proceedings of the Tenth National Conference on Artificial Intelligence*.
