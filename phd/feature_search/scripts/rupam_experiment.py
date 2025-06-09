@@ -25,17 +25,12 @@ from phd.feature_search.core.experiment_helpers import *
 from phd.research_utils.logging import *
 
 
-def prepare_ltu_geoff_experiment(
-        cfg: DictConfig, 
-        prepare_components_fn: Optional[Callable] = None,
-    ):
+def prepare_ltu_geoff_experiment(cfg: DictConfig):
     set_seed(cfg.seed)
     base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
     
-    if prepare_components_fn is None:
-        prepare_components_fn = prepare_components
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
-        prepare_components_fn(cfg)
+        prepare_components(cfg)
 
     assert isinstance(task, NonlinearGEOFFTask)
     

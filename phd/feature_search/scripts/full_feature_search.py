@@ -4,6 +4,7 @@ Rupam's problem setup, but with distractors and other additions.
 This script is a more complete version of the `rupam_experiment.py` script, which adds the following features:
 - Distractors in the input
 - Target noise
+- Separate optimizers for the intermediate and output layers
 """
 
 import logging
@@ -19,17 +20,17 @@ import hydra
 from omegaconf import DictConfig
 
 from phd.feature_search.core.experiment_helpers import (
+    get_model_statistics,
     prepare_task,
     prepare_optimizer,
     seed_from_string,
-    get_model_statistics,
+    set_seed,
     standardize_targets,
     StandardizationStats,
 )
 from phd.feature_search.core.idbd import IDBD
-from phd.feature_search.core.models import MLP
+from phd.feature_search.core.models import LTU, MLP
 from phd.feature_search.core.feature_recycling import InputRecycler, CBPTracker
-from phd.feature_search.scripts.rupam_experiment import prepare_ltu_geoff_experiment
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.research_utils.logging import *
 
@@ -71,6 +72,7 @@ class DistractorTracker():
 
         self.distractor_values = None  # Will be initialized on first use
     
+    @torch.no_grad()
     def process_new_features(self, new_feature_idxs: List[int]):
         if len(new_feature_idxs) == 0:
             return
@@ -99,9 +101,9 @@ class DistractorTracker():
         # Zero out weights and biases for distractor features
         distractor_idxs = [idx for idx in new_feature_idxs if self.distractor_mask[idx]]
         if len(distractor_idxs) > 0:
-            self.model.layers[0].weight[distractor_idxs] = 0
+            self.model.layers[0].weight[distractor_idxs] = 0.0
             if self.model.layers[0].bias is not None:
-                self.model.layers[0].bias[distractor_idxs] = 0
+                self.model.layers[0].bias[distractor_idxs] = 0.0
     
     def replace_features(self, x: torch.Tensor) -> torch.Tensor:
         """Replace distractor feature values with random values.
@@ -190,7 +192,21 @@ def prepare_components(cfg: DictConfig):
     
     criterion = (nn.CrossEntropyLoss() if cfg.task.type == 'classification'
                 else nn.MSELoss())
-    optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
+    
+    # Determine if we need separate optimizers for the intermediate and output layers
+    repr_optimizer_name = cfg.get('representation_optimizer', {}).get('name')
+    assert repr_optimizer_name != 'idbd', "IDBD is not supported for the representation optimizer!"
+    repr_module = model.layers[:-1]
+    n_repr_trainable_layers = len([p for p in repr_module.parameters() if p.requires_grad])
+    
+    if repr_optimizer_name is not None and n_repr_trainable_layers > 0:
+        # Use separate optimizers for the intermediate and output layers
+        repr_optimizer = prepare_optimizer(repr_module, repr_optimizer_name, cfg.representation_optimizer)
+        optimizer = prepare_optimizer(model.layers[-1], cfg.optimizer.name, cfg.optimizer)
+    else:
+        # Only use one optimizer
+        repr_optimizer = None
+        optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
     
     # Initialize feature recycler
     recycler = InputRecycler(
@@ -219,7 +235,51 @@ def prepare_components(cfg: DictConfig):
     else:
         cbp_tracker = None
         
-    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker
+    return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker
+
+
+def prepare_ltu_geoff_experiment(cfg: DictConfig):
+    set_seed(cfg.seed)
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
+    
+    task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker = \
+        prepare_components(cfg)
+
+    assert isinstance(task, NonlinearGEOFFTask)
+    
+    assert cfg.model.weight_init_method == 'binary', \
+        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
+    assert cfg.task.weight_init == 'binary', \
+        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
+    assert cfg.model.activation == 'ltu', \
+        "LTU activations are required for reproducing Mahmood and Sutton (2013)"
+    assert cfg.task.activation == 'ltu', \
+        "LTU activations are required for reproducing Mahmood and Sutton (2013)"
+
+    if cbp_tracker is not None:
+        cbp_tracker.incoming_weight_init = 'binary'
+    
+    # Init target output weights to kaiming uniform and predictor output weights to zero
+    task_init_generator = torch.Generator(device=task.weights[-1].device)
+    task_init_generator.manual_seed(seed_from_string(base_seed, 'task_init_generator'))
+    torch.nn.init.kaiming_uniform_(
+        task.weights[-1],
+        mode = 'fan_in',
+        nonlinearity = 'linear',
+        generator = task_init_generator,
+    )
+    torch.nn.init.zeros_(model.layers[-1].weight)
+    
+    # Change LTU threshold for target and predictors
+    ltu_threshold = 0.0 # 0.1 * cfg.task.n_features
+    for layer in model.layers:
+        if isinstance(layer, LTU):
+            layer.threshold = ltu_threshold
+    task.activation_fn.threshold = ltu_threshold
+
+    torch.manual_seed(seed_from_string(base_seed, 'experiment_setup'))
+
+    return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker
 
 
 def run_experiment(
@@ -229,6 +289,7 @@ def run_experiment(
         model: MLP,
         criterion: nn.Module,
         optimizer: Optimizer,
+        repr_optimizer: Optional[Optimizer],
         cbp_tracker: CBPTracker,
         distractor_tracker: DistractorTracker,
     ):
@@ -303,6 +364,9 @@ def run_experiment(
 
         # Backward pass
         optimizer.zero_grad()
+        if repr_optimizer is not None:
+            repr_optimizer.zero_grad()
+        
         if isinstance(optimizer, IDBD):
             # Mean over batch dimension
             param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
@@ -312,6 +376,9 @@ def run_experiment(
         else:
             loss.backward()
             optimizer.step()
+            
+        if repr_optimizer is not None:
+            repr_optimizer.step()
         
         # Accumulate metrics
         loss_accum += loss.item()
@@ -379,8 +446,8 @@ def main(cfg: DictConfig) -> None:
 
     cfg = init_experiment(cfg.project, cfg)
 
-    task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
-        prepare_ltu_geoff_experiment(cfg, prepare_components)
+    task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker = \
+        prepare_ltu_geoff_experiment(cfg)
     model.forward = model_distractor_forward_pass.__get__(model)
     
     distractor_tracker = DistractorTracker(
@@ -392,8 +459,8 @@ def main(cfg: DictConfig) -> None:
     )
     
     run_experiment(
-        cfg, task, task_iterator, model, criterion,
-        optimizer, cbp_tracker, distractor_tracker,
+        cfg, task, task_iterator, model, criterion, optimizer,
+        repr_optimizer, cbp_tracker, distractor_tracker,
     )
     
     finish_experiment(cfg)
