@@ -111,7 +111,7 @@ For experiments requiring functionality not supported by existing scripts, creat
 |--------|-------------|
 | `experiment_template.py` | Simple, extendable example for linear regression problems |
 | `rupam_experiment.py` | Framework implementing experiments from [Mahmood & Sutton (2013)](http://incompleteideas.net/papers/MS-AAAIws-2013.pdf) |
-| `full_backbone_recycling.py` | Extended version of `rupam_experiment.py` with additional features like distractor hidden units and target noise |
+| `full_feature_search.py` | Extended version of `rupam_experiment.py` with additional features like distractor hidden units and target noise |
 
 ## Available Tasks
 
