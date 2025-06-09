@@ -16,7 +16,9 @@ Before using this repository, complete the following setup steps:
    pip install -e .
    ```
 
-## Quick Start
+## Running Experiments
+
+### Quick Start
 
 To run your first experiment:
 
@@ -31,6 +33,27 @@ To run your first experiment:
    ```
 
 The `experiment_template` script demonstrates a simple regression problem where a single-layer prediction network learns to predict the output of a single-layer target network with 10 distractors in the input.
+
+### Running Sweeps
+
+To run parameter sweeps using Weights & Biases:
+
+1. **Create or select a sweep configuration:**
+   Example sweep configs can be found in `conf/wandb_sweeps/`
+
+2. **Initialize the sweep from the feature_search directory:**
+   ```bash
+   cd phd/feature_search
+   wandb sweep path_to_sweep_config.yaml
+   ```
+
+3. **Run the sweep agent:**
+   After initializing, you'll receive a command in the format:
+   ```bash
+   wandb agent sweep_id
+   ```
+   
+   Copy and run this command to start executing sweep runs.
 
 ## Creating Custom Experiments
 
