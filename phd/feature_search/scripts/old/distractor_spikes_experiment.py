@@ -11,7 +11,7 @@ import hydra
 import omegaconf
 from omegaconf import DictConfig
 
-from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
+from phd.feature_search.core.idbd import IDBD
 from phd.feature_search.core.models import MLP
 from phd.feature_search.core.feature_recycling import reset_input_weights
 from phd.feature_search.core.experiment_helpers import *
@@ -157,13 +157,10 @@ def main(cfg: DictConfig) -> None:
         
         # Backward pass
         optimizer.zero_grad()
-        if isinstance(optimizer, RMSPropIDBD):
-            loss.backward(create_graph=True)
-            optimizer.step(param_inputs)
-            if cfg.train.normalize_loss:
-                raise NotImplementedError('Normalize loss not supported for RMSPropIDBD')
-        elif isinstance(optimizer, IDBD):
-            optimizer.step(loss, outputs, param_inputs)
+        if isinstance(optimizer, IDBD):
+            retain_graph = optimizer.version == 'squared_grads'
+            loss.backward(retain_graph=retain_graph)
+            optimizer.step(outputs, param_inputs)
             if cfg.train.normalize_loss:
                 raise NotImplementedError('Normalize loss not supported for IDBD')
         else:

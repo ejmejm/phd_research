@@ -73,7 +73,9 @@ def run_experiment(
         if isinstance(optimizer, IDBD):
             # Mean over batch dimension
             param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
-            optimizer.step(loss, outputs, param_inputs)
+            retain_graph = optimizer.version == 'squared_grads'
+            loss.backward(retain_graph=retain_graph)
+            optimizer.step(outputs, param_inputs)
         else:
             loss.backward()
             optimizer.step()

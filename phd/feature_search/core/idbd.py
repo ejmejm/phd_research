@@ -79,7 +79,6 @@ class IDBD(Optimizer):
     @torch.no_grad()
     def step(
         self,
-        loss: torch.Tensor,
         predictions: torch.Tensor,
         param_inputs: Dict[torch.nn.parameter.Parameter, torch.Tensor],
         retain_graph: bool = False,
@@ -87,26 +86,25 @@ class IDBD(Optimizer):
         """Performs a single optimization step.
         
         Args:
-            loss: Loss tensor of shape ()
             predictions: Predictions tensor of shape (batch_size, n_classes).
                 Only needed for `squared_grads` and `hvp` versions of IDBD.
             param_inputs: Dictionary mapping linear layer weight parameters to their inputs
                 Only needed for `squared_inputs` version of IDBD.
             retain_graph: Whether to retain the graph of the computation
         """
-        if self.version == 'squared_grads':
+        if self.version == 'squared_inputs':
+            assert param_inputs is not None, "Parameter inputs are required for squared_inputs version of IDBD"
+        
+        elif self.version == 'squared_grads':
             all_params = [p for group in self.param_groups for p in group['params']]
             with torch.enable_grad():
                 prediction_sum = torch.sum(predictions)
             prediction_grads = torch.autograd.grad(
                 outputs = prediction_sum,
                 inputs = all_params,
-                retain_graph = True,
+                retain_graph = retain_graph,
             )
             prediction_grads = {p: g for p, g in zip(all_params, prediction_grads)}
-        
-        # Compute gradients for all model parameters
-        loss.backward(retain_graph=retain_graph)
 
         param_updates = []
         for group in self.param_groups:
@@ -119,14 +117,15 @@ class IDBD(Optimizer):
                 
                 grad = p.grad
                 
-                if p in param_inputs:
-                    assert len(param_inputs[p].shape) == 1, "Inputs must be 1D tensors"
-                    inputs = param_inputs[p].unsqueeze(0)
-                elif len(grad.shape) == 1:
-                    # This branch is currently not used because I disabled support for bias parameters
-                    inputs = torch.ones_like(grad)
-                else:
-                    raise ValueError(f"Parameter {p} not found in activations dictionary.")
+                if self.version == 'squared_inputs':
+                    if p in param_inputs:
+                        assert len(param_inputs[p].shape) == 1, "Inputs must be 1D tensors"
+                        inputs = param_inputs[p].unsqueeze(0)
+                    elif len(grad.shape) == 1:
+                        # This branch is currently not used because I disabled support for bias parameters
+                        inputs = torch.ones_like(grad)
+                    else:
+                        raise ValueError(f"Parameter {p} not found in activations dictionary.")
                 
                 # Get state variables
                 state = self.state[p]
@@ -179,8 +178,6 @@ class IDBD(Optimizer):
                 
         for p, param_update in param_updates:
             p.add_(param_update)
-
-        return loss
 
 
 if __name__ == '__main__':

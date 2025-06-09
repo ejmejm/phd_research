@@ -14,7 +14,7 @@ from torch import nn
 import torch.optim as optim
 
 from .adam import Adam
-from .idbd import IDBD, RMSPropIDBD
+from .idbd import IDBD
 from .models import MLP
 
 
@@ -306,7 +306,7 @@ class InputRecycler:
         first_layer_weights = model.layers[0].weight
         if len(optimizer.state[first_layer_weights]) > 0:
             
-            if isinstance(optimizer, (IDBD, RMSPropIDBD)):
+            if isinstance(optimizer, IDBD):
                 idbd_beta = optimizer.state[first_layer_weights]['beta']
                 learning_rates = torch.exp(idbd_beta).mean(dim=0)
                 stats['mean_learning_rate_real'] = learning_rates[real_indices].mean().item() if real_indices else 0

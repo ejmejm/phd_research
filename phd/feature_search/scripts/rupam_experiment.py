@@ -18,7 +18,7 @@ from tqdm import tqdm
 import hydra
 from omegaconf import DictConfig
 
-from phd.feature_search.core.idbd import IDBD, RMSPropIDBD
+from phd.feature_search.core.idbd import IDBD
 from phd.feature_search.core.models import LTU
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *
@@ -121,15 +121,12 @@ def run_experiment(
 
         # Backward pass
         optimizer.zero_grad()
-        if isinstance(optimizer, RMSPropIDBD):
-            loss.backward(create_graph=True)
+        if isinstance(optimizer, IDBD):
             # Mean over batch dimension
             param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
-            optimizer.step(param_inputs)
-        elif isinstance(optimizer, IDBD):
-            # Mean over batch dimension
-            param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
-            optimizer.step(loss, outputs, param_inputs)
+            retain_graph = optimizer.version == 'squared_grads'
+            loss.backward(retain_graph=retain_graph)
+            optimizer.step(outputs, param_inputs)
         else:
             loss.backward()
             optimizer.step()

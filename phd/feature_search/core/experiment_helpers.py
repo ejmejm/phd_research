@@ -14,7 +14,7 @@ from omegaconf import DictConfig
 
 from .adam import Adam
 from .feature_recycling import InputRecycler, CBPTracker
-from .idbd import IDBD, RMSPropIDBD
+from .idbd import IDBD
 from .models import MLP
 from .tasks import DummyTask, GEOFFTask, NonlinearGEOFFTask
 
