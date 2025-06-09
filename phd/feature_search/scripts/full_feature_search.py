@@ -4,9 +4,6 @@ Rupam's problem setup, but with distractors and other additions.
 This script is a more complete version of the `rupam_experiment.py` script, which adds the following features:
 - Distractors in the input
 - Target noise
-- Gradient descent in the first layer of the prediction network
-- Autostep in the second layer of the prediction network
-- CBP tracking
 """
 
 import logging
@@ -124,7 +121,7 @@ class DistractorTracker():
         self.distractor_values.mul_(self.distractor_stds.unsqueeze(0))
         self.distractor_values.add_(self.distractor_means.unsqueeze(0))
         
-        # TODO: Fix this taking so long
+        # TODO: Fix this taking so long on gpu
         # x = x * ~self.distractor_mask + self.distractor_values * self.distractor_mask
         x[:, self.distractor_mask] = self.distractor_values[:, self.distractor_mask]
         return x
@@ -309,7 +306,7 @@ def run_experiment(
     pbar.close()
 
 
-@hydra.main(config_path='../conf', config_name='full_backbone_recycling')
+@hydra.main(config_path='../conf', config_name='full_feature_search')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"

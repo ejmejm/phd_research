@@ -1,4 +1,4 @@
-program: scripts/full_backbone_recycling.py
+program: scripts/full_feature_search.py
 method: grid
 project: feature_recycling-nlg_ablation_v2
 name: test_sweep

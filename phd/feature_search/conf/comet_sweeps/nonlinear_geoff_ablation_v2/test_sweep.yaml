@@ -1,6 +1,6 @@
 name: test_sweep
 project: test-project
-command: python scripts/full_backbone_recycling.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
 algorithm: grid
 
 spec:

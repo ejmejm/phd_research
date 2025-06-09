@@ -1,4 +1,4 @@
-program: scripts/full_backbone_recycling.py
+program: scripts/full_feature_search.py
 method: grid
 project: feature_recycling-rupam_distractors_task-hyper_search
 name: target_input_features_n_features
@@ -8,7 +8,7 @@ command:
   - ${env}
   - python
   - ${program}
-  - --config-name=full_backbone_recycling.yaml
+  - --config-name=full_feature_search.yaml
   - ${args_no_hyphens}
 
 
