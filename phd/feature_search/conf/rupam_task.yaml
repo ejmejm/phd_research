@@ -1,6 +1,6 @@
 defaults:
-  - nonlinear_geoff
-  - _self_
+- nonlinear_geoff
+- _self_
 
 wandb: false
 seed: null
@@ -33,9 +33,11 @@ train:
   total_steps: 1_000_000
   log_freq: 200
   batch_size: 1
-  optimizer: idbd
   standardize_cumulants: false
-  learning_rate: 0.001
+
+optimizer:
+  name: idbd
+  autostep: true
 
 model:
   n_layers: 2
@@ -44,8 +46,3 @@ model:
   n_frozen_layers: 1 # The first layer is frozen (no backprop)
   output_dim: 1
   activation: ltu
-
-idbd:
-  meta_learning_rate: 0.005
-  version: squared_grads
-  autostep: true

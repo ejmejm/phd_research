@@ -472,7 +472,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             shadow_weights = model.shadow_layers[-1].weight,
         )
     else:
-        optimizer = prepare_optimizer(model, cfg)
+        optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
     
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:

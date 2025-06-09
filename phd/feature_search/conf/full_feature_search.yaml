@@ -1,21 +1,19 @@
 defaults:
-  - rupam_task
-  - _self_
+- rupam_task
+- _self_
 
 task:
   distractor_chance: 0.5
-  distractor_mean_range: [-0.5, 0.5]
-  distractor_std_range: [0.1, 1.0]
+  distractor_mean_range: [ -0.5, 0.5 ]
+  distractor_std_range: [ 0.1, 1.0 ]
   noise_std: 0.0
 
-train:
-  backprop_enabled: false
-  backprop_step_size: 0.001
-
-idbd:
-  version: squared_grads
-  autostep: true
-  meta_learning_rate: 0.005
+# Optimizer used for all but the last layer, if name is null, then this is the same as the primary optimizer
+# and the learning rate is the same as the primary optimizer
+representation_optimizer:
+  name: null # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  weight_decay: 0
+  learning_rate: 0.001
 
 model:
   log_model_stats: false

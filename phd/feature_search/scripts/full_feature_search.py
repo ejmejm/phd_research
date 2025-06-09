@@ -18,10 +18,19 @@ from tqdm import tqdm
 import hydra
 from omegaconf import DictConfig
 
+from phd.feature_search.core.experiment_helpers import (
+    prepare_task,
+    prepare_optimizer,
+    seed_from_string,
+    get_model_statistics,
+    standardize_targets,
+    StandardizationStats,
+)
 from phd.feature_search.core.idbd import IDBD
-from phd.feature_search.core.tasks import NonlinearGEOFFTask
-from phd.feature_search.core.experiment_helpers import *
+from phd.feature_search.core.models import MLP
+from phd.feature_search.core.feature_recycling import InputRecycler, CBPTracker
 from phd.feature_search.scripts.rupam_experiment import prepare_ltu_geoff_experiment
+from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.research_utils.logging import *
 
 
@@ -157,6 +166,60 @@ def model_distractor_forward_pass(
 
     param_inputs[self.layers[-1].weight] = x
     return self.layers[-1](x), param_inputs
+
+
+def prepare_components(cfg: DictConfig):
+    """Prepare the components based on configuration."""
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
+    
+    task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
+    task_iterator = task.get_iterator(cfg.train.batch_size)
+    
+    # Initialize model and optimizer
+    model = MLP(
+        input_dim = cfg.task.n_features,
+        output_dim = cfg.model.output_dim,
+        n_layers = cfg.model.n_layers,
+        hidden_dim = cfg.model.hidden_dim,
+        weight_init_method = cfg.model.weight_init_method,
+        activation = cfg.model.activation,
+        n_frozen_layers = cfg.model.n_frozen_layers,
+        seed = seed_from_string(base_seed, 'model'),
+    )
+    model.to(cfg.device)
+    
+    criterion = (nn.CrossEntropyLoss() if cfg.task.type == 'classification'
+                else nn.MSELoss())
+    optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
+    
+    # Initialize feature recycler
+    recycler = InputRecycler(
+        n_features = cfg.task.n_features,
+        n_real_features = cfg.task.n_real_features,
+        distractor_chance = cfg.input_recycling.distractor_chance,
+        recycle_rate = cfg.input_recycling.recycle_rate,
+        utility_decay = cfg.input_recycling.utility_decay,
+        use_cbp_utility = cfg.input_recycling.use_cbp_utility,
+        feature_protection_steps = cfg.input_recycling.feature_protection_steps,
+        n_start_real_features = cfg.input_recycling.get('n_start_real_features', -1),
+        device = 'cpu',
+        seed = seed_from_string(base_seed, 'recycler'),
+    )
+    
+    # Initialize CBP tracker
+    if cfg.feature_recycling.use_cbp_utility:
+        cbp_tracker = CBPTracker(
+            optimizer = optimizer,
+            replace_rate = cfg.feature_recycling.recycle_rate,
+            decay_rate = cfg.feature_recycling.utility_decay,
+            maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+            seed = seed_from_string(base_seed, 'cbp_tracker'),
+        )
+        cbp_tracker.track_sequential(model.layers)
+    else:
+        cbp_tracker = None
+        
+    return task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker
 
 
 def run_experiment(
@@ -315,7 +378,7 @@ def main(cfg: DictConfig) -> None:
     cfg = init_experiment(cfg.project, cfg)
 
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
-        prepare_ltu_geoff_experiment(cfg)
+        prepare_ltu_geoff_experiment(cfg, prepare_components)
     model.forward = model_distractor_forward_pass.__get__(model)
     
     distractor_tracker = DistractorTracker(

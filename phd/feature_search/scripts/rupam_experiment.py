@@ -7,7 +7,7 @@ same threshold of 0, and there is no target noise. Support for gadient descent i
 the prediction network while using autostep in the second layer is also not supported.
 """
 
-from typing import Iterator, Tuple
+from typing import Callable, Iterator, Optional, Tuple
 
 import numpy as np
 import torch
@@ -25,12 +25,17 @@ from phd.feature_search.core.experiment_helpers import *
 from phd.research_utils.logging import *
 
 
-def prepare_ltu_geoff_experiment(cfg: DictConfig):
+def prepare_ltu_geoff_experiment(
+        cfg: DictConfig, 
+        prepare_components_fn: Optional[Callable] = None,
+    ):
     set_seed(cfg.seed)
     base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
     
+    if prepare_components_fn is None:
+        prepare_components_fn = prepare_components
     task, task_iterator, model, criterion, optimizer, recycler, cbp_tracker = \
-        prepare_components(cfg)
+        prepare_components_fn(cfg)
 
     assert isinstance(task, NonlinearGEOFFTask)
     

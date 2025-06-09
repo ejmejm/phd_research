@@ -1,7 +1,7 @@
 import hashlib
 import os
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -55,54 +55,80 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
         )
 
 
-def prepare_optimizer(model: nn.Module, cfg: DictConfig):
-    """Prepare the optimizer based on configuration."""
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    if cfg.train.optimizer == 'adam':
-        return Adam(
-            trainable_params,
-            lr=cfg.train.learning_rate,
-            weight_decay=cfg.train.weight_decay,
-        )
-    elif cfg.train.optimizer == 'rmsprop':
-        return Adam(
-            trainable_params,
-            lr=cfg.train.learning_rate,
-            betas=(0, 0.999),
-            weight_decay=cfg.train.weight_decay,
-        )
-    elif cfg.train.optimizer == 'sgd':
-        return optim.SGD(
-            trainable_params,
-            lr=cfg.train.learning_rate,
-            weight_decay=cfg.train.weight_decay,
-        )
-    elif cfg.train.optimizer == 'sgd_momentum':
-        return optim.SGD(
-            trainable_params,
-            lr=cfg.train.learning_rate,
-            weight_decay=cfg.train.weight_decay,
-            momentum=0.9,
-        )
-    elif cfg.train.optimizer == 'idbd':
-        return IDBD(
-            trainable_params,
-            init_lr=cfg.train.learning_rate,
-            meta_lr=cfg.idbd.meta_learning_rate,
-            version=cfg.idbd.version,
-            weight_decay=cfg.train.weight_decay,
-            autostep=cfg.idbd.autostep,
-        )
-    elif cfg.train.optimizer == 'rmsprop_idbd':
-        return RMSPropIDBD(
-            trainable_params,
-            init_lr=cfg.train.learning_rate,
-            meta_lr=cfg.idbd.meta_learning_rate,
-            trace_diagonal_approx=cfg.idbd.diagonal_approx,
-            weight_decay=cfg.train.weight_decay,
-        )
+def prepare_optimizer(
+        model: Union[nn.Module, List[nn.Module]], 
+        optimizer_name: str,
+        optimizer_kwargs: DictConfig,
+    ):
+    """Prepare the optimizer based on configuration.
+    
+    Uses default values for parameters not specified in config, while allowing
+    irrelevant parameters to be specified without causing errors.
+    """
+    if isinstance(model, nn.Module):
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
     else:
-        raise ValueError(f'Invalid optimizer type: {cfg.train.optimizer}')
+        trainable_params = []
+        for m in model:
+            trainable_params.extend([p for p in m.parameters() if p.requires_grad])
+
+    def _extract_kwargs(param_names, defaults = None):
+        """Extract specified parameters from config, using defaults when not provided."""
+        if defaults is None:
+            defaults = {}
+        
+        kwargs = {}
+        for param_name in param_names:
+            value = optimizer_kwargs.get(param_name)
+            if value is not None:
+                kwargs[param_name] = value
+            elif param_name in defaults:
+                kwargs[param_name] = defaults[param_name]
+        return kwargs
+
+    if optimizer_name == 'adam':
+        kwargs = _extract_kwargs(['learning_rate', 'weight_decay'], {'weight_decay': 0})
+        # Map learning_rate to lr for consistency with PyTorch API
+        if 'learning_rate' in kwargs:
+            kwargs['lr'] = kwargs.pop('learning_rate')
+        return Adam(trainable_params, **kwargs)
+        
+    elif optimizer_name == 'rmsprop':
+        kwargs = _extract_kwargs(['learning_rate', 'weight_decay'], {'weight_decay': 0})
+        if 'learning_rate' in kwargs:
+            kwargs['lr'] = kwargs.pop('learning_rate')
+        return Adam(
+            trainable_params,
+            betas=(0, 0.999),
+            **kwargs
+        )
+        
+    elif optimizer_name == 'sgd':
+        kwargs = _extract_kwargs(['learning_rate', 'weight_decay'], {'weight_decay': 0})
+        if 'learning_rate' in kwargs:
+            kwargs['lr'] = kwargs.pop('learning_rate')
+        return optim.SGD(trainable_params, **kwargs)
+        
+    elif optimizer_name == 'sgd_momentum':
+        kwargs = _extract_kwargs(['learning_rate', 'weight_decay'], {'weight_decay': 0, 'momentum': 0.9})
+        if 'learning_rate' in kwargs:
+            kwargs['lr'] = kwargs.pop('learning_rate')
+        return optim.SGD(trainable_params, **kwargs)
+        
+    elif optimizer_name == 'idbd':
+        kwargs = _extract_kwargs(
+            ['learning_rate', 'meta_learning_rate', 'version', 'weight_decay', 'autostep'], 
+            {'version': 'squared_grads', 'weight_decay': 0, 'autostep': True}
+        )
+        # Map learning_rate to init_lr for IDBD API
+        if 'learning_rate' in kwargs:
+            kwargs['init_lr'] = kwargs.pop('learning_rate')
+        if 'meta_learning_rate' in kwargs:
+            kwargs['meta_lr'] = kwargs.pop('meta_learning_rate')
+        return IDBD(trainable_params, **kwargs)
+        
+    else:
+        raise ValueError(f'Invalid optimizer type: {optimizer_name}')
 
 
 def set_seed(seed: Optional[int]):
@@ -290,7 +316,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     
     criterion = (nn.CrossEntropyLoss() if cfg.task.type == 'classification'
                 else nn.MSELoss())
-    optimizer = prepare_optimizer(model, cfg)
+    optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
     
     # Initialize feature recycler
     recycler = InputRecycler(

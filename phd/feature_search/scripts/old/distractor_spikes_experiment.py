@@ -94,7 +94,7 @@ def main(cfg: DictConfig) -> None:
     
     criterion = (nn.CrossEntropyLoss() if cfg.task.type == 'classification'
                 else nn.MSELoss())
-    optimizer = prepare_optimizer(model, cfg)
+    optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
     
     # Initialize feature recycler
     recycler = InputRecycler(
