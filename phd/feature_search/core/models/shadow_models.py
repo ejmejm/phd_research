@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Iterator, List
+from typing import Any, Dict, Optional, Iterator, List, Tuple
 
 from .base import ACTIVATION_MAP
 
@@ -90,6 +90,16 @@ class DynamicShadowMLP(nn.Module):
         self._zero_init_layer(self.active_output_layer)
         self._zero_init_layer(self.inactive_output_layer)
         
+        # Freeze layers as necessary
+        if n_frozen_layers >= 1:
+            self.input_layer.weight.requires_grad = False
+        if n_frozen_layers == 2:
+            self.active_output_layer.weight.requires_grad = False
+            self.inactive_output_layer.weight.requires_grad = False
+        if n_frozen_layers > 2:
+            raise ValueError("DynamicShadowMLP only supports up to 2 frozen layers!")
+        
+        # Set up feature mask and utilities
         active_feature_mask = torch.zeros(hidden_dim, dtype=torch.bool)
         active_feature_mask[:n_initial_real_features] = True
         self.register_buffer('active_feature_mask', active_feature_mask)
@@ -210,7 +220,7 @@ class DynamicShadowMLP(nn.Module):
         x: torch.Tensor,
         target: Optional[torch.Tensor] = None,
         update_state: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Dict[nn.Module, torch.Tensor], Dict[str, Any]]:
         assert len(x.shape) == 1, "DynamicMLP does not support batching!"
         
         aux = {}
