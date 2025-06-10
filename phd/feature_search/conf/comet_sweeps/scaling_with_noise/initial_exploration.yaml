@@ -1,0 +1,16 @@
+name: target_noise
+project: scaling_with_noise
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/scaling_with_noise/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.total_steps: 500_000
+
+  model.hidden_dim: [ 100, 800, 6400 ]
+  task.noise_std: [ 0.0, 0.5, 2.0 ]
+  seed: [ 101, 102 ]
