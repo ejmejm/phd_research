@@ -8,7 +8,6 @@
 #     globals().update({name: getattr(_module, name) for name in dir(_module) if not name.startswith('_')})
 
 from .idbd import *
-from .models import *
 from .tasks import *
 from .experiment_helpers import *
 from .feature_recycling import *
