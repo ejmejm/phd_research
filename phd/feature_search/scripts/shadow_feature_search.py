@@ -159,8 +159,8 @@ def model_distractor_forward_pass(
             - Output tensor
             - Dictionary of parameter inputs
     """
-    assert len(x.shape) == 1, "DynamicMLP does not support batching!"
-        
+    assert len(x.shape) == 2
+    
     aux = {}
     if update_state:
         aux['promoted_features'] = self._handle_promotions()
@@ -171,14 +171,14 @@ def model_distractor_forward_pass(
     if distractor_callback is not None:
         hidden_features = distractor_callback(hidden_features)
     
-    active_hidden_features = hidden_features * self.active_feature_mask
-    inactive_hidden_features = hidden_features * ~self.active_feature_mask
+    active_hidden_features = hidden_features * self.active_feature_mask.unsqueeze(0)
+    inactive_hidden_features = hidden_features * ~self.active_feature_mask.unsqueeze(0)
 
     # Need to update this if there is more than one prediction
-    active_feature_contribs = self.active_output_layer.weight.squeeze(0) * active_hidden_features
-    target_pred = torch.sum(active_feature_contribs)
+    active_feature_contribs = self.active_output_layer.weight * active_hidden_features
+    target_preds = torch.sum(active_feature_contribs, dim=1, keepdim=True)
     
-    residual_preds = self.inactive_output_layer.weight.squeeze(0) * inactive_hidden_features
+    residual_preds = self.inactive_output_layer.weight * inactive_hidden_features
 
     param_inputs = {
         self.active_output_layer.weight: active_hidden_features,
@@ -187,24 +187,17 @@ def model_distractor_forward_pass(
 
     # Calculate losses if applicable
     if target is not None:
-        target_error = target - target_pred
-        target_loss = target_error ** 2
-        residual_errors = target_loss.detach() - residual_preds
-        residual_losses = residual_errors ** 2
+        target_error = target - target_preds
+        target_loss = (target_error ** 2).mean()
+        residual_errors = target_error.detach() - residual_preds
+        residual_losses = (residual_errors ** 2).mean(dim=0)
         cumulative_loss = target_loss + residual_losses.sum()
-
-        assert len(target.shape) == 0, "Target must be a scalar"
-        assert len(active_feature_contribs.shape) == 1, "Active feature contributions must be a 1D tensor"
-        assert len(residual_losses.shape) == 1, "Residual losses must be a 1D tensor"
-        assert len(residual_preds.shape) == 1, "Residual predictions must be a 1D tensor"
-        assert len(target_error.shape) == 0, "Target error must be a scalar"
-        assert len(target_loss.shape) == 0, "Target loss must be a scalar"
 
         aux = {
             'loss': cumulative_loss,
             'target_loss': target_loss,
             'residual_losses': residual_losses,
-            'target_pred': target_pred,
+            'target_preds': target_preds,
             'residual_preds': residual_preds,
         }
         
@@ -216,24 +209,25 @@ def model_distractor_forward_pass(
                 
                 self.active_feature_utilities = (
                     self.utility_decay * self.active_feature_utilities +
-                    (1 - self.utility_decay) * active_utilities
+                    (1 - self.utility_decay) * active_utilities.mean(dim=0)
                 )
                 self.inactive_feature_utilities = (
                     self.utility_decay * self.inactive_feature_utilities +
-                    (1 - self.utility_decay) * residual_utilities
+                    (1 - self.utility_decay) * residual_utilities.mean(dim=0)
                 )
                 
                 self.target_error_trace = (
                     self.utility_decay * self.target_error_trace +
-                    (1 - self.utility_decay) * torch.abs(target_error)
+                    (1 - self.utility_decay) * torch.abs(target_error).mean()
                 )
                 self.target_trace = (
                     self.utility_decay * self.target_trace +
-                    (1 - self.utility_decay) * torch.abs(target)
+                    (1 - self.utility_decay) * torch.abs(target).mean()
                 )
+            # TODO: Consider updating based on number of samples in batch
             self.update_step += 1
     
-    return target_pred, param_inputs, aux
+    return target_preds, param_inputs, aux
 
 
 def prepare_components(cfg: DictConfig):
@@ -442,9 +436,8 @@ def run_experiment(
                 )
     
         # Perform parameter updates
-        active_optimizer.step(param_inputs, predictions)
-        # TODO: Add in the weights_independent flag
-        inactive_optimizer.step(param_inputs, aux['shadow_preds'], weights_independent=True)
+        active_optimizer.step(predictions, param_inputs)
+        inactive_optimizer.step(aux['residual_preds'], param_inputs, features_independent=True)
         
         if repr_optimizer is not None:
             repr_optimizer.step()

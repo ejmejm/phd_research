@@ -82,7 +82,7 @@ class IDBD(Optimizer):
         predictions: torch.Tensor,
         param_inputs: Dict[torch.nn.parameter.Parameter, torch.Tensor],
         retain_graph: bool = False,
-        weights_independent: bool = False,
+        features_independent: bool = False,
     ) -> Optional[float]:
         """Performs a single optimization step.
         
@@ -92,7 +92,7 @@ class IDBD(Optimizer):
             param_inputs: Dictionary mapping linear layer weight parameters to their inputs
                 Only needed for `squared_inputs` version of IDBD.
             retain_graph: Whether to retain the graph of the computation
-            weights_independent: Whether to treat each unit as an independent predictor
+            features_independent: Whether to treat each unit as an independent predictor
         """
         if self.version == 'squared_inputs':
             assert param_inputs is not None, "Parameter inputs are required for squared_inputs version of IDBD"
@@ -162,7 +162,7 @@ class IDBD(Optimizer):
                     )
                     
                     # Normalize the step-size
-                    if weights_independent:
+                    if features_independent:
                         effective_step_size = torch.clamp(alpha * h_decay_term, min=1.0)
                     else:
                         effective_step_size = torch.clamp(torch.sum(alpha * h_decay_term, dim=-1), min=1.0)

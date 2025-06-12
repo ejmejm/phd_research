@@ -35,7 +35,7 @@ class DynamicShadowMLP(nn.Module):
             output_dim: Number of output classes
             n_layers: Number of layers (including output)
             hidden_dim: Size of hidden layers
-            weight_init_method: How to initialize weights ('zeros' or 'kaiming')
+            weight_init_method: How to initialize input weights ('zeros', 'binary', or 'kaiming')
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             n_frozen_layers: Number of frozen layers
             utility_decay: Rate at which feature utilities are decayed.
@@ -71,7 +71,6 @@ class DynamicShadowMLP(nn.Module):
         self.promotion_accumulator = 0.0
         self.demotion_accumulator = 0.0
 
-        assert self.weight_init_method == 'zeros', "DynamicShadowMLP only supports weight initialization to zero"
         assert n_layers == 2, "DynamicShadowMLP must have exactly 2 layers!"
 
         # Create a generator if seed is provided
@@ -87,6 +86,7 @@ class DynamicShadowMLP(nn.Module):
         self.inactive_output_layer = nn.Linear(hidden_dim, output_dim, bias=False)
 
         # Initialize weights
+        self._initialize_weights(self.input_layer, weight_init_method)
         self._zero_init_layer(self.active_output_layer)
         self._zero_init_layer(self.inactive_output_layer)
         
@@ -115,6 +115,24 @@ class DynamicShadowMLP(nn.Module):
 
     def _zero_init_layer(self, layer: nn.Linear):
         nn.init.zeros_(layer.weight)
+    
+    def _initialize_weights(self, layer: nn.Module, method: str):
+        """Initialize weights according to specified method."""
+        if method == 'zeros':
+            nn.init.zeros_(layer.weight)
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+        elif method == 'kaiming_uniform':
+            nn.init.kaiming_uniform_(layer.weight, generator=self.generator)
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+        elif method == 'binary':
+            layer.weight.data = torch.randint(
+                0, 2, layer.weight.shape, device=layer.weight.device, generator=self.generator).float() * 2 - 1
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+        else:
+            raise ValueError(f'Invalid weight initialization method: {method}')
     
     # TODO: Handle setting step size on promotions (and demotions and maybe adjusting other step sizes?)
     @torch.no_grad()
@@ -221,7 +239,7 @@ class DynamicShadowMLP(nn.Module):
         target: Optional[torch.Tensor] = None,
         update_state: bool = False,
     ) -> Tuple[torch.Tensor, Dict[nn.Module, torch.Tensor], Dict[str, Any]]:
-        assert len(x.shape) == 1, "DynamicMLP does not support batching!"
+        assert len(x.shape) == 2
         
         aux = {}
         if update_state:
@@ -229,14 +247,14 @@ class DynamicShadowMLP(nn.Module):
             aux['demoted_features'] = self._handle_demotions()
 
         hidden_features = self.input_layer(x)
-        active_hidden_features = hidden_features * self.active_feature_mask
-        inactive_hidden_features = hidden_features * ~self.active_feature_mask
+        active_hidden_features = hidden_features * self.active_feature_mask.unsqueeze(0)
+        inactive_hidden_features = hidden_features * ~self.active_feature_mask.unsqueeze(0)
 
         # Need to update this if there is more than one prediction
-        active_feature_contribs = self.active_output_layer.weight.squeeze(0) * active_hidden_features
-        target_pred = torch.sum(active_feature_contribs)
+        active_feature_contribs = self.active_output_layer.weight * active_hidden_features
+        target_preds = torch.sum(active_feature_contribs, dim=1, keepdim=True)
         
-        residual_preds = self.inactive_output_layer.weight.squeeze(0) * inactive_hidden_features
+        residual_preds = self.inactive_output_layer.weight * inactive_hidden_features
 
         param_inputs = {
             self.active_output_layer.weight: active_hidden_features,
@@ -245,24 +263,17 @@ class DynamicShadowMLP(nn.Module):
 
         # Calculate losses if applicable
         if target is not None:
-            target_error = target - target_pred
-            target_loss = target_error ** 2
-            residual_errors = target_loss.detach() - residual_preds
-            residual_losses = residual_errors ** 2
+            target_error = target - target_preds
+            target_loss = (target_error ** 2).mean()
+            residual_errors = target_error.detach() - residual_preds
+            residual_losses = (residual_errors ** 2).mean(dim=0)
             cumulative_loss = target_loss + residual_losses.sum()
-
-            assert len(target.shape) == 0, "Target must be a scalar"
-            assert len(active_feature_contribs.shape) == 1, "Active feature contributions must be a 1D tensor"
-            assert len(residual_losses.shape) == 1, "Residual losses must be a 1D tensor"
-            assert len(residual_preds.shape) == 1, "Residual predictions must be a 1D tensor"
-            assert len(target_error.shape) == 0, "Target error must be a scalar"
-            assert len(target_loss.shape) == 0, "Target loss must be a scalar"
 
             aux = {
                 'loss': cumulative_loss,
                 'target_loss': target_loss,
                 'residual_losses': residual_losses,
-                'target_pred': target_pred,
+                'target_preds': target_preds,
                 'residual_preds': residual_preds,
             }
             
@@ -274,21 +285,22 @@ class DynamicShadowMLP(nn.Module):
                     
                     self.active_feature_utilities = (
                         self.utility_decay * self.active_feature_utilities +
-                        (1 - self.utility_decay) * active_utilities
+                        (1 - self.utility_decay) * active_utilities.mean(dim=0)
                     )
                     self.inactive_feature_utilities = (
                         self.utility_decay * self.inactive_feature_utilities +
-                        (1 - self.utility_decay) * residual_utilities
+                        (1 - self.utility_decay) * residual_utilities.mean(dim=0)
                     )
                     
                     self.target_error_trace = (
                         self.utility_decay * self.target_error_trace +
-                        (1 - self.utility_decay) * torch.abs(target_error)
+                        (1 - self.utility_decay) * torch.abs(target_error).mean()
                     )
                     self.target_trace = (
                         self.utility_decay * self.target_trace +
-                        (1 - self.utility_decay) * torch.abs(target)
+                        (1 - self.utility_decay) * torch.abs(target).mean()
                     )
+                # TODO: Consider updating based on number of samples in batch
                 self.update_step += 1
         
-        return target_pred, param_inputs, aux
+        return target_preds, param_inputs, aux
