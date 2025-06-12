@@ -161,10 +161,12 @@ def model_distractor_forward_pass(
     for i in range(0, len(self.layers) - 2, 2):
         param_inputs[self.layers[i].weight] = x
         x = self.layers[i](x) # Linear layer
+        
+        if i == 0 and distractor_callback is not None:
+            x = distractor_callback(x)
+        
         x = self.layers[i + 1](x) # Activation
     
-    if distractor_callback is not None:
-        x = distractor_callback(x)
 
     param_inputs[self.layers[-1].weight] = x
     return self.layers[-1](x), param_inputs
@@ -346,8 +348,8 @@ def run_experiment(
 
                 # Log pruning statistics
                 pruned_accum += len(new_feature_idxs)
-                for new_feature_idx in new_feature_idxs:
-                    pruned_newest_feature_accum += int(new_feature_idx in prev_pruned_idxs)
+                n_new_pruned_features = len(set(new_feature_idxs).intersection(prev_pruned_idxs))
+                pruned_newest_feature_accum += n_new_pruned_features
                 prev_pruned_idxs = set(new_feature_idxs)
         
         # Forward pass
