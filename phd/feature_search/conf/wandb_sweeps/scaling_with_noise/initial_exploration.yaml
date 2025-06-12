@@ -1,0 +1,28 @@
+program: scripts/full_feature_search.py
+method: grid
+project: scaling_with_noise
+name: initial_exploration_v3
+
+command:
+- ${env}
+- python
+- ${program}
+- --config-name=wandb_sweeps/scaling_with_noise/base_config.yaml
+- ${args_no_hyphens}
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+parameters:
+  train.total_steps:
+    value: 300_000
+  task.flip_rate:
+    value: [ 1.0e-7, 1.0e-6, 1.0e-5 ]
+
+  model.hidden_dim:
+    values: [ 100, 500 ] # , 2000 ]
+  task.noise_std:
+    values: [ 0.0, 0.5 ] #, 1.0 ]
+  seed:
+    values: [ 101, 102 ]

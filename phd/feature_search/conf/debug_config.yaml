@@ -1,14 +1,26 @@
 defaults:
-  - sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
-  - _self_
+- full_feature_search
+- _self_
 
 wandb: false
-comet_ml: true
+comet_ml: false
 
 model:
-  hidden_dim: 20480
+  hidden_dim: 20_000
 
 task:
-  distractor_chance: 0.99
+  distractor_chance: 0.95
+  noise_std: 0.0
 
-seed: 107
+feature_recycling:
+  recycle_rate: 0.005
+
+train:
+  total_steps: 200_000
+  standardize_cumulants: true
+
+optimizer:
+  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
+
+
+seed: 200

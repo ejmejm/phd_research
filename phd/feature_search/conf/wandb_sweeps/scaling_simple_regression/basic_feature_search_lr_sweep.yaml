@@ -1,0 +1,27 @@
+program: scripts/full_feature_search.py
+method: grid
+project: scaling_simple_regression
+name: basic_feature_search_lr_sweep
+
+command:
+- ${env}
+- python
+- ${program}
+- --config-name=wandb_sweeps/scaling_simple_regression/base_config.yaml
+- ${args_no_hyphens}
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+parameters:
+  train.total_steps:
+    value: 100_000
+
+  model.hidden_dim:
+    value: 2000
+
+  optimizer.learning_rate:
+    values: [ 0.00001, 0.00005, 0.0001, 0.0005, 0.001]
+  seed:
+    values: [ 101, 102, 103 ]

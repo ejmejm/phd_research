@@ -1,4 +1,4 @@
-name: target_noise
+name: initial_exploration_v2
 project: scaling_with_noise
 command: python scripts/full_feature_search.py --config-name=comet_sweeps/scaling_with_noise/base_config.yaml
 algorithm: grid
@@ -9,8 +9,8 @@ spec:
   retryAssignLimit: 4
 
 parameters:
-  train.total_steps: 500_000
+  train.total_steps: 100_000
 
-  model.hidden_dim: [ 100, 800, 6400 ]
-  task.noise_std: [ 0.0, 0.5, 2.0 ]
-  seed: [ 101, 102 ]
+  model.hidden_dim: [ 100, 500, 2000 ]
+  task.noise_std: [ 0.0, 0.5, 1.0 ]
+  seed: [ 101 ]

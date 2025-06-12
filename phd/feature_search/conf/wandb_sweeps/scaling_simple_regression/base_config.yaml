@@ -1,15 +1,21 @@
 # @package _global_
 
 defaults:
-  - /full_feature_search
-  - _self_
+- /full_feature_search
+- _self_
 
-comet_ml: true
+wandb: true
 device: cpu
 
 task:
-  distractor_chance: 0.0
+  hidden_dim: 10
+  n_features: 10
+  n_real_features: 10
+  n_layers: 2
   noise_std: 0.0
+  distractor_chance: 0.0
+  n_stationary_layers: 0
+  flip_rate: 0.0
 
 feature_recycling:
   use_cbp_utility: true
@@ -21,9 +27,12 @@ train:
   total_steps: 1_000_000
   standardize_cumulants: true
 
-optimizer:
-  name: idbd
+idbd:
   version: squared_grads
   autostep: true
-  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
   meta_learning_rate: 0.005
+
+optimizer:
+  name: idbd
+  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
+  autostep: true

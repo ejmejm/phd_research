@@ -12,5 +12,5 @@ parameters:
   train.total_steps: 2_000_000
 
   model.hidden_dim: [ 100, 800, 6400 ]
-  task.noise_std: [ 0.0, 0.5, 1.0, 2.0 ]
-  seed: [ 101, 102, 103 ]
+  task.noise_std: [ 0.0, 0.5, 2.0 ]
+  seed: [ 101, 102 ]

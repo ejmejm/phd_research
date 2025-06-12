@@ -1,0 +1,30 @@
+program: scripts/full_feature_search.py
+method: grid
+project: scaling_with_noise
+name: batch_size_ablation
+
+command:
+- ${env}
+- python
+- ${program}
+- --config-name=wandb_sweeps/scaling_with_noise/base_config.yaml
+- ${args_no_hyphens}
+
+metric:
+  name: cumulative_loss
+  goal: minimize
+
+parameters:
+  train.total_steps:
+    value: "\"${eval:300_000 // ${train.batch_size}}\""
+  task.flip_rate:
+    value: "\"${eval:1.0e-5 * ${train.batch_size}}\""
+
+  train.batch_size:
+    values: [ 4, 16, 64 ]
+  model.hidden_dim:
+    values: [ 100, 500, 2000 ]
+  task.noise_std:
+    values: [ 0.0, 1.0 ]
+  seed:
+    values: [ 101, 102, 103 ]
