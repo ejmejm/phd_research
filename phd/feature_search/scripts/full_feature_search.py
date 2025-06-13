@@ -425,6 +425,9 @@ def run_experiment(
                 real_utilities = all_utilities[~distractor_mask]
                 distractor_utilities = all_utilities[distractor_mask]
                 
+                cumulative_utility = all_utilities.sum().item()
+                metrics['cumulative_utility'] = cumulative_utility
+                
                 if len(real_utilities) > 0:
                     metrics['real_utility_median'] = real_utilities.median().item()
                     metrics['real_utility_25th'] = real_utilities.quantile(0.25).item()
