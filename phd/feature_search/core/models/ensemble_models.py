@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -80,3 +80,107 @@ class MultipleLinear(nn.Module):
         output = output.squeeze(0)
             
         return output
+
+
+class EnsembleMLP(nn.Module):
+    def __init__(
+        self, 
+        input_dim: int,
+        output_dim: int,
+        n_layers: int,
+        ensemble_dim: int,
+        n_ensemble_members: int,
+        weight_init_method: str,
+        activation: str = 'tanh',
+        n_frozen_layers: int = 0,
+        seed: Optional[int] = None,
+    ):
+        """
+        Args:
+            input_dim: Number of input features
+            output_dim: Number of output classes
+            n_layers: Number of layers (including output)
+            ensemble_dim: Hidden units per ensemble member
+            n_ensemble_members: Number of ensemble members
+            weight_init_method: How to initialize the first layer weights ('zeros', 'kaiming', or 'binary')
+            activation: Activation function ('relu', 'tanh', or 'sigmoid')
+            n_frozen_layers: Number of frozen layers
+            seed: Optional random seed for reproducibility
+        """
+        assert n_layers == 2, "Ensemble MLPs only support a two layers!"
+        
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.ensemble_dim = ensemble_dim
+        self.n_ensemble_members = n_ensemble_members
+        self.n_frozen_layers = n_frozen_layers
+        
+        # Create a generator if seed is provided
+        self.generator = torch.Generator().manual_seed(seed) if seed is not None else None
+        
+        self.activation = ACTIVATION_MAP[activation]
+        
+        # Build layers
+        self.hidden_dim = ensemble_dim * n_ensemble_members
+        self.input_layer = nn.Linear(input_dim, self.hidden_dim, bias=False)
+        self.prediction_layer = MultipleLinear(
+            self.ensemble_dim, output_dim, self.n_ensemble_members,
+            bias=False, generator=self.generator,
+        )
+        
+        # Initialize weights
+        initialize_layer_weights(self.input_layer, weight_init_method, self.generator)
+        
+        # Freeze layers as necessary
+        if n_frozen_layers >= 1:
+            self.input_layer.weight.requires_grad = False
+        if n_frozen_layers == 2:
+            self.prediction_layer.weight.requires_grad = False
+        if n_frozen_layers > 2:
+            raise ValueError("EnsembleMLP only supports up to 2 frozen layers!")
+        
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        target: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict[nn.Module, torch.Tensor], Dict[str, Any]]:
+        """
+        Args:
+            x: Input tensor of shape (batch_size, in_features)
+            target: Target tensor of shape (batch_size, out_features)
+            
+        Returns:
+            - Prediction tensor of shape (batch_size, output_dim)
+            - Dictionary of input values for each layer
+            - Dictionary of auxiliary information
+        """
+        assert x.dim() == 2, "Input must be a 2D tensor"
+        assert target is None or target.dim() == 2, "Target must be a 2D tensor"
+        
+        aux = {}
+        
+        # Input layer
+        hidden_features = self.input_layer(x) # (batch_size, hidden_dim)
+        ensemble_input_features = hidden_features.view(
+            x.shape[0], self.n_ensemble_members, self.ensemble_dim,
+        ) # (batch_size, n_ensemble_members, ensemble_dim)
+        
+        param_inputs = {
+            self.input_layer.weight: x,
+            self.prediction_layer.weight: ensemble_input_features,
+        }
+        
+        # Make predictions
+        # Output shape: (batch_size, n_ensemble_members, output_dim)
+        ensemble_predictions = self.prediction_layer(ensemble_input_features)
+        aux['ensemble_predictions'] = ensemble_predictions
+        
+        prediction = ensemble_predictions.mean(dim=1) # (batch_size, output_dim)
+        
+        # Straight-through estimator for each ensemble member
+        prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
+        prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
+        
+        return prediction, param_inputs, aux

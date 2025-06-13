@@ -59,8 +59,3 @@ def test_multiple_linear():
     
     # Check values
     torch.testing.assert_close(actual_output, expected_output)
-
-
-if __name__ == '__main__':
-    test_multiple_linear()
-    print("All tests passed!")
