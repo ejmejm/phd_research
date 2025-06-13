@@ -362,7 +362,7 @@ def run_experiment(
                 prev_pruned_idxs = set(new_feature_idxs)
                 
                 if log_pruning_stats:
-                    prune_thresholds.append(pre_prune_utilities.max())
+                    prune_thresholds.append(pre_prune_utilities[new_feature_idxs].max())
         
         # Forward pass
         outputs, param_inputs = model(
@@ -421,7 +421,8 @@ def run_experiment(
                     pruned_newest_feature_accum = 0
                     pruned_accum = 0
                 metrics['units_pruned'] = total_pruned
-                metrics['prune_threshold'] = np.mean(prune_thresholds)
+                if len(prune_thresholds) > 0:
+                    metrics['prune_threshold'] = np.mean(prune_thresholds)
                 prune_thresholds.clear()
             
             if log_utility_stats:
