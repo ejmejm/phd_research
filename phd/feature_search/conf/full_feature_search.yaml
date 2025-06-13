@@ -8,12 +8,14 @@ task:
   distractor_std_range: [ 0.1, 1.0 ]
   noise_std: 0.0
 
+train:
+  log_utility_stats: true
+  log_pruning_stats: true
+  log_model_stats: false
+
 # Optimizer used for all but the last layer, if name is null, then this is the same as the primary optimizer
 # and the learning rate is the same as the primary optimizer
 representation_optimizer:
   name: null # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
   weight_decay: 0
   learning_rate: 0.001
-
-model:
-  log_model_stats: false

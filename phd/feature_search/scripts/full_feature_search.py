@@ -314,6 +314,7 @@ def run_experiment(
     pruned_newest_feature_accum = 0
     n_steps_since_log = 0
     total_pruned = 0
+    prune_thresholds = []
     target_buffer = []
 
     while step < cfg.train.total_steps:
@@ -336,6 +337,9 @@ def run_experiment(
 
         # Reset weights and optimizer states for recycled features
         if cbp_tracker is not None:
+            if cfg.train.log_pruning_stats:
+                pre_prune_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
+
             pruned_idxs = cbp_tracker.prune_features()
             n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
             total_pruned += n_pruned
@@ -351,6 +355,9 @@ def run_experiment(
                 n_new_pruned_features = len(set(new_feature_idxs).intersection(prev_pruned_idxs))
                 pruned_newest_feature_accum += n_new_pruned_features
                 prev_pruned_idxs = set(new_feature_idxs)
+                
+                if cfg.train.log_pruning_stats:
+                    prune_thresholds.append(pre_prune_utilities.max())
         
         # Forward pass
         outputs, param_inputs = model(
@@ -399,15 +406,18 @@ def run_experiment(
                 'cumulative_loss': float(cumulative_loss),
                 'mean_prediction_loss': mean_pred_loss_accum / n_steps_since_log,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
-                'units_pruned': total_pruned,
                 'n_distractors': n_distractors,
                 'n_real_features': n_real_features,
             }
 
-            if pruned_accum > 0:
-                metrics['fraction_pruned_were_new'] = pruned_newest_feature_accum / pruned_accum
-                pruned_newest_feature_accum = 0
-                pruned_accum = 0
+            if cfg.train.log_pruning_stats:
+                if pruned_accum > 0:
+                    metrics['fraction_pruned_were_new'] = pruned_newest_feature_accum / pruned_accum
+                    pruned_newest_feature_accum = 0
+                    pruned_accum = 0
+                metrics['units_pruned'] = total_pruned
+                metrics['prune_threshold'] = np.mean(prune_thresholds)
+                prune_thresholds.clear()
 
             # Add model statistics separately for real and distractor features
             if cfg.model.get('log_model_stats', False):
