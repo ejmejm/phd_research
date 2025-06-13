@@ -20,7 +20,7 @@ import wandb
 import hydra
 from omegaconf import DictConfig, open_dict
 
-from phd.feature_search.core.models import ACTIVATION_MAP, LTU, MLP
+from phd.feature_search.core.models.base import ACTIVATION_MAP, initialize_layer_weights, LTU, MLP
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.experiment_helpers import *
 from phd.feature_search.scripts.old.feature_maturity_experiment import *
@@ -103,7 +103,7 @@ def reset_model(model: MLP):
         for p in model.parameters():
             if p.requires_grad:
                 p.data.zero_()
-        model._initialize_weights(model.shadow_layers[0], 'binary')
+        initialize_layer_weights(model.shadow_layers[0], 'binary')
 
 
 def run_experiment(
@@ -207,7 +207,7 @@ class ShadowUnitsMLP(MLP):
                 layer.bias.requires_grad = False
         
         # Initialize shadow weights
-        self._initialize_weights(self.shadow_layers[0], weight_init_method)
+        initialize_layer_weights(self.shadow_layers[0], weight_init_method)
     
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, Dict[nn.Module, torch.Tensor]]:
         param_inputs = {}

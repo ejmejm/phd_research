@@ -168,25 +168,7 @@ class MLP(nn.Module):
                 layer.bias.requires_grad = False
         
         # Initialize weights
-        self._initialize_weights(self.layers[0], weight_init_method)
-    
-    def _initialize_weights(self, layer: nn.Module, method: str):
-        """Initialize weights according to specified method."""
-        if method == 'zeros':
-            nn.init.zeros_(layer.weight)
-            if layer.bias is not None:
-                nn.init.zeros_(layer.bias)
-        elif method == 'kaiming_uniform':
-            nn.init.kaiming_uniform_(layer.weight, generator=self.generator)
-            if layer.bias is not None:
-                nn.init.zeros_(layer.bias)
-        elif method == 'binary':
-            layer.weight.data = torch.randint(
-                0, 2, layer.weight.shape, device=layer.weight.device, generator=self.generator).float() * 2 - 1
-            if layer.bias is not None:
-                nn.init.zeros_(layer.bias)
-        else:
-            raise ValueError(f'Invalid weight initialization method: {method}')
+        initialize_layer_weights(self.layers[0], weight_init_method, self.generator)
     
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, Dict[nn.Module, torch.Tensor]]:
         param_inputs = {}
@@ -201,3 +183,26 @@ class MLP(nn.Module):
     def get_first_layer_weights(self) -> torch.Tensor:
         """Returns the weights of the first layer for utility calculation."""
         return self.layers[0].weight
+
+    
+def initialize_layer_weights(
+        layer: nn.Module, 
+        method: str, 
+        generator: Optional[torch.Generator] = None,
+    ) -> None:
+    """Initialize weights according to specified method."""
+    if method == 'zeros':
+        nn.init.zeros_(layer.weight)
+        if layer.bias is not None:
+            nn.init.zeros_(layer.bias)
+    elif method == 'kaiming_uniform':
+        nn.init.kaiming_uniform_(layer.weight, generator=generator)
+        if layer.bias is not None:
+            nn.init.zeros_(layer.bias)
+    elif method == 'binary':
+        layer.weight.data = torch.randint(
+            0, 2, layer.weight.shape, device=layer.weight.device, generator=generator).float() * 2 - 1
+        if layer.bias is not None:
+            nn.init.zeros_(layer.bias)
+    else:
+        raise ValueError(f'Invalid weight initialization method: {method}')

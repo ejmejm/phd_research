@@ -13,7 +13,7 @@ import hydra
 from omegaconf import DictConfig
 
 from phd.feature_search.core.idbd import IDBD as OriginalIDBD
-from phd.feature_search.core.models import MLP, ACTIVATION_MAP
+from phd.feature_search.core.models.base import ACTIVATION_MAP, initialize_layer_weights, MLP
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.feature_search.core.feature_recycling import CBPTracker as OriginalCBPTracker
 from phd.feature_search.core.experiment_helpers import *
@@ -79,7 +79,7 @@ class ShadowUnitsMLP(MLP):
                 layer.bias.requires_grad = False
         
         # Initialize shadow weights
-        self._initialize_weights(self.shadow_layers[0], weight_init_method)
+        initialize_layer_weights(self.shadow_layers[0], weight_init_method, self.generator)
     
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, Dict[nn.Module, torch.Tensor]]:
         param_inputs = {}

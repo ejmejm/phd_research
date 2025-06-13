@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Any, Dict, Optional, Iterator, List, Tuple
 
-from .base import ACTIVATION_MAP
+from .base import ACTIVATION_MAP, initialize_layer_weights
 
 
 EPSILON = 1e-8
@@ -86,7 +86,7 @@ class DynamicShadowMLP(nn.Module):
         self.inactive_output_layer = nn.Linear(hidden_dim, output_dim, bias=False)
 
         # Initialize weights
-        self._initialize_weights(self.input_layer, weight_init_method)
+        initialize_layer_weights(self.input_layer, weight_init_method, self.generator)
         self._zero_init_layer(self.active_output_layer)
         self._zero_init_layer(self.inactive_output_layer)
         
@@ -115,24 +115,6 @@ class DynamicShadowMLP(nn.Module):
 
     def _zero_init_layer(self, layer: nn.Linear):
         nn.init.zeros_(layer.weight)
-    
-    def _initialize_weights(self, layer: nn.Module, method: str):
-        """Initialize weights according to specified method."""
-        if method == 'zeros':
-            nn.init.zeros_(layer.weight)
-            if layer.bias is not None:
-                nn.init.zeros_(layer.bias)
-        elif method == 'kaiming_uniform':
-            nn.init.kaiming_uniform_(layer.weight, generator=self.generator)
-            if layer.bias is not None:
-                nn.init.zeros_(layer.bias)
-        elif method == 'binary':
-            layer.weight.data = torch.randint(
-                0, 2, layer.weight.shape, device=layer.weight.device, generator=self.generator).float() * 2 - 1
-            if layer.bias is not None:
-                nn.init.zeros_(layer.bias)
-        else:
-            raise ValueError(f'Invalid weight initialization method: {method}')
     
     # TODO: Handle setting step size on promotions (and demotions and maybe adjusting other step sizes?)
     @torch.no_grad()
