@@ -304,6 +304,11 @@ def run_experiment(
     prev_pruned_idxs = set()
     prune_layer = model.layers[-2]
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
+    
+    # Flags
+    log_utility_stats = cfg.train.get('log_utility_stats', False)
+    log_pruning_stats = cfg.train.get('log_pruning_stats', False)
+    log_model_stats = cfg.train.get('log_model_stats', False)
 
     # Initialize accumulators
     cumulant_stats = StandardizationStats(gamma=0.99)
@@ -337,7 +342,7 @@ def run_experiment(
 
         # Reset weights and optimizer states for recycled features
         if cbp_tracker is not None:
-            if cfg.train.log_pruning_stats:
+            if log_pruning_stats:
                 pre_prune_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
 
             pruned_idxs = cbp_tracker.prune_features()
@@ -356,7 +361,7 @@ def run_experiment(
                 pruned_newest_feature_accum += n_new_pruned_features
                 prev_pruned_idxs = set(new_feature_idxs)
                 
-                if cfg.train.log_pruning_stats:
+                if log_pruning_stats:
                     prune_thresholds.append(pre_prune_utilities.max())
         
         # Forward pass
@@ -410,7 +415,7 @@ def run_experiment(
                 'n_real_features': n_real_features,
             }
 
-            if cfg.train.log_pruning_stats:
+            if log_pruning_stats:
                 if pruned_accum > 0:
                     metrics['fraction_pruned_were_new'] = pruned_newest_feature_accum / pruned_accum
                     pruned_newest_feature_accum = 0
@@ -419,7 +424,7 @@ def run_experiment(
                 metrics['prune_threshold'] = np.mean(prune_thresholds)
                 prune_thresholds.clear()
             
-            if cfg.train.log_utility_stats:
+            if log_utility_stats:
                 all_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
                 distractor_mask = distractor_tracker.distractor_mask
                 real_utilities = all_utilities[~distractor_mask]
@@ -439,7 +444,7 @@ def run_experiment(
                     metrics['distractor_utility_75th'] = distractor_utilities.quantile(0.75).item()
 
             # Add model statistics separately for real and distractor features
-            if cfg.train.get('log_model_stats', False):
+            if log_model_stats:
                 real_feature_masks = [
                     torch.ones(model.layers[0].weight.shape[1], dtype=torch.bool, device=model.layers[0].weight.device),
                     ~distractor_tracker.distractor_mask,
