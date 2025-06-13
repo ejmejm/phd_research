@@ -439,7 +439,7 @@ def run_experiment(
                     metrics['distractor_utility_75th'] = distractor_utilities.quantile(0.75).item()
 
             # Add model statistics separately for real and distractor features
-            if cfg.model.get('log_model_stats', False):
+            if cfg.train.get('log_model_stats', False):
                 real_feature_masks = [
                     torch.ones(model.layers[0].weight.shape[1], dtype=torch.bool, device=model.layers[0].weight.device),
                     ~distractor_tracker.distractor_mask,
