@@ -418,6 +418,22 @@ def run_experiment(
                 metrics['units_pruned'] = total_pruned
                 metrics['prune_threshold'] = np.mean(prune_thresholds)
                 prune_thresholds.clear()
+            
+            if cfg.train.log_utility_stats:
+                all_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
+                distractor_mask = distractor_tracker.distractor_mask
+                real_utilities = all_utilities[~distractor_mask]
+                distractor_utilities = all_utilities[distractor_mask]
+                
+                if len(real_utilities) > 0:
+                    metrics['real_utility_median'] = real_utilities.median().item()
+                    metrics['real_utility_25th'] = real_utilities.quantile(0.25).item()
+                    metrics['real_utility_75th'] = real_utilities.quantile(0.75).item()
+                
+                if len(distractor_utilities) > 0:
+                    metrics['distractor_utility_median'] = distractor_utilities.median().item()
+                    metrics['distractor_utility_25th'] = distractor_utilities.quantile(0.25).item() 
+                    metrics['distractor_utility_75th'] = distractor_utilities.quantile(0.75).item()
 
             # Add model statistics separately for real and distractor features
             if cfg.model.get('log_model_stats', False):
