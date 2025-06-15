@@ -63,7 +63,8 @@ class MultipleLinear(nn.Module):
             Output tensor of shape (batch_size, n_parallel, out_features) or (n_parallel, out_features)
         """
         # Handle single sample case
-        if x.dim() == 2:
+        has_batch_dim = x.dim() == 3
+        if not has_batch_dim:
             x = x.unsqueeze(0)
         
         # Change the weights to the following shape for bmm:
@@ -77,7 +78,8 @@ class MultipleLinear(nn.Module):
             output = output + self.bias.unsqueeze(0)
         
         # Remove batch dimension if input was single sample
-        output = output.squeeze(0)
+        if not has_batch_dim:
+            output = output.squeeze(0)
             
         return output
 
@@ -119,7 +121,7 @@ class EnsembleMLP(nn.Module):
         # Create a generator if seed is provided
         self.generator = torch.Generator().manual_seed(seed) if seed is not None else None
         
-        self.activation = ACTIVATION_MAP[activation]
+        self.activation = ACTIVATION_MAP[activation]()
         
         # Build layers
         self.hidden_dim = ensemble_dim * n_ensemble_members
@@ -163,6 +165,7 @@ class EnsembleMLP(nn.Module):
         
         # Input layer
         hidden_features = self.input_layer(x) # (batch_size, hidden_dim)
+        hidden_features = self.activation(hidden_features)
         ensemble_input_features = hidden_features.view(
             x.shape[0], self.n_ensemble_members, self.ensemble_dim,
         ) # (batch_size, n_ensemble_members, ensemble_dim)

@@ -1,0 +1,7 @@
+defaults:
+- full_feature_search
+- _self_
+
+model:
+  ensemble_dim: 64
+  n_ensemble_members: 16

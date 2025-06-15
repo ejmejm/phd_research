@@ -10,6 +10,7 @@ This script is a more complete version of the `rupam_experiment.py` script, whic
 import logging
 from typing import Iterator, Tuple, Callable, List, Optional
 
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -29,8 +30,9 @@ from phd.feature_search.core.experiment_helpers import (
     StandardizationStats,
 )
 from phd.feature_search.core.idbd import IDBD
-from phd.feature_search.core.models import LTU, MLP
-from phd.feature_search.core.feature_recycling import InputRecycler, CBPTracker
+from phd.feature_search.core.models import LTU, EnsembleMLP, MultipleLinear
+from phd.feature_search.core.feature_recycling import InputRecycler, n_kaiming_uniform
+from phd.feature_search.core.feature_recycling import CBPTracker as OriginalCBPTracker
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.research_utils.logging import *
 
@@ -38,10 +40,60 @@ from phd.research_utils.logging import *
 logger = logging.getLogger(__name__)
 
 
+class CBPTracker(OriginalCBPTracker):
+    def _reinit_output_weights(self, layer: MultipleLinear, idxs: List[int]):
+        """Reinitialize the weights that take in features at the given indices."""
+        # This is how linear layers are initialized in PyTorch
+        weight_data = layer.weight.data
+        
+        # Convert 1D indices to 2D indices
+        ensemble_dim = layer.weight.shape[2]
+        ensemble_idxs = [idx // ensemble_dim for idx in idxs]
+        feature_idxs = [idx % ensemble_dim for idx in idxs]
+        
+        if self.outgoing_weight_init == 'zeros':
+            layer.weight.data[ensemble_idxs, :, feature_idxs] = torch.zeros_like(weight_data[ensemble_idxs, :, feature_idxs])
+        elif self.outgoing_weight_init == 'kaiming_uniform':
+            layer.weight.data[ensemble_idxs, :, feature_idxs] = n_kaiming_uniform(
+                weight_data,
+                weight_data[ensemble_idxs, :, feature_idxs].shape,
+                a=math.sqrt(5),
+                generator=self.rng,
+            )
+        else:
+            raise ValueError(f'Invalid weight initialization: {self.outgoing_weight_init}')
+    
+    def _reset_output_optim_state(self, layer: nn.Module, idxs: List[int]):
+        """
+        Reset the optimizer state for the weights that take in features at the given indices.
+        Currently works for SGD and Adam optimizers.
+        """
+        optim_state = self.optimizer.state[layer.weight]
+        
+        # Convert 1D indices to 2D indices
+        ensemble_dim = layer.weight.shape[2]
+        ensemble_idxs = [idx // ensemble_dim for idx in idxs]
+        feature_idxs = [idx % ensemble_dim for idx in idxs]
+        
+        for key, value in optim_state.items():
+            if value.shape == layer.weight.shape:
+                if value is not None:
+                    optim_state[key][ensemble_idxs, :, feature_idxs] = 0
+            else:
+                warnings.warn(
+                    f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
+                    f"parameter: {layer.weight.shape}, state value: {value.shape}"
+                )
+        
+        # TODO: Consider making different variables for initial step-size of reset outgoing and incoming weights
+        if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
+            optim_state['beta'][ensemble_idxs, :, feature_idxs] = math.log(self.optimizer.init_lr)
+
+
 class DistractorTracker():
     def __init__(
             self,
-            model: MLP,
+            model: EnsembleMLP,
             distractor_chance: float,
             mean_range: Tuple[float, float],
             std_range: Tuple[float, float],
@@ -51,7 +103,7 @@ class DistractorTracker():
         self.distractor_chance = distractor_chance
         self.mean_range = mean_range
         self.std_range = std_range
-        self.n_features = model.layers[-1].in_features
+        self.n_features = model.input_layer.out_features
         self.device = next(model.parameters()).device
 
         # Initialize random number generator with random seed if none provided
@@ -101,9 +153,7 @@ class DistractorTracker():
         # Zero out weights and biases for distractor features
         distractor_idxs = [idx for idx in new_feature_idxs if self.distractor_mask[idx]]
         if len(distractor_idxs) > 0:
-            self.model.layers[0].weight[distractor_idxs] = 0.0
-            if self.model.layers[0].bias is not None:
-                self.model.layers[0].bias[distractor_idxs] = 0.0
+            self.model.input_layer.weight[distractor_idxs] = 0.0
     
     def replace_features(self, x: torch.Tensor) -> torch.Tensor:
         """Replace distractor feature values with random values.
@@ -143,33 +193,54 @@ class DistractorTracker():
 def model_distractor_forward_pass(
         self,
         x: torch.Tensor,
+        target: Optional[torch.Tensor] = None,
         distractor_callback: Callable[[torch.Tensor], torch.Tensor] = None
-    ) -> tuple[torch.Tensor, Dict[nn.Module, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Dict[nn.Module, torch.Tensor], Dict[str, Any]]:
     """Forward pass with a callback that can replace hidden unit outputs with distractor values.
     
     Args:
-        x: Input tensor
+        x: Input tensor of shape (batch_size, in_features)
+        target: Target tensor of shape (batch_size, out_features)
         distractor_callback: Callable that takes a tensor and returns a tensor of the same shape
             which should be a mix of the same values and distractor values.
 
     Returns:
-        tuple[torch.Tensor, Dict[nn.Module, torch.Tensor]]:
-            - Output tensor
-            - Dictionary of parameter inputs
+        - Prediction tensor of shape (batch_size, output_dim)
+        - Dictionary of input values for each layer
+        - Dictionary of auxiliary information
     """
-    param_inputs = {}
-    for i in range(0, len(self.layers) - 2, 2):
-        param_inputs[self.layers[i].weight] = x
-        x = self.layers[i](x) # Linear layer
-        
-        if i == 0 and distractor_callback is not None:
-            x = distractor_callback(x)
-        
-        x = self.layers[i + 1](x) # Activation
+    assert x.dim() == 2, "Input must be a 2D tensor"
+    assert target is None or target.dim() == 2, "Target must be a 2D tensor"
     
-
-    param_inputs[self.layers[-1].weight] = x
-    return self.layers[-1](x), param_inputs
+    aux = {}
+    
+    # Input layer
+    hidden_features = self.input_layer(x) # (batch_size, hidden_dim)
+    if distractor_callback is not None:
+        hidden_features = distractor_callback(hidden_features)
+    hidden_features = self.activation(hidden_features)
+    
+    ensemble_input_features = hidden_features.view(
+        x.shape[0], self.n_ensemble_members, self.ensemble_dim,
+    ) # (batch_size, n_ensemble_members, ensemble_dim)
+    
+    param_inputs = {
+        self.input_layer.weight: x,
+        self.prediction_layer.weight: ensemble_input_features,
+    }
+    
+    # Make predictions
+    # Output shape: (batch_size, n_ensemble_members, output_dim)
+    ensemble_predictions = self.prediction_layer(ensemble_input_features)
+    aux['ensemble_predictions'] = ensemble_predictions
+    
+    prediction = ensemble_predictions.mean(dim=1) # (batch_size, output_dim)
+    
+    # Straight-through estimator for each ensemble member
+    prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
+    prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
+    
+    return prediction, param_inputs, aux
 
 
 def prepare_components(cfg: DictConfig):
@@ -180,11 +251,12 @@ def prepare_components(cfg: DictConfig):
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
     # Initialize model and optimizer
-    model = MLP(
+    model = EnsembleMLP(
         input_dim = cfg.task.n_features,
         output_dim = cfg.model.output_dim,
         n_layers = cfg.model.n_layers,
-        hidden_dim = cfg.model.hidden_dim,
+        ensemble_dim = cfg.model.ensemble_dim,
+        n_ensemble_members = cfg.model.n_ensemble_members,
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
@@ -198,13 +270,14 @@ def prepare_components(cfg: DictConfig):
     # Determine if we need separate optimizers for the intermediate and output layers
     repr_optimizer_name = cfg.get('representation_optimizer', {}).get('name')
     assert repr_optimizer_name != 'idbd', "IDBD is not supported for the representation optimizer!"
-    repr_module = model.layers[:-1]
+    repr_module = model.input_layer
+    prediction_module = model.prediction_layer
     n_repr_trainable_layers = len([p for p in repr_module.parameters() if p.requires_grad])
     
     if repr_optimizer_name is not None and n_repr_trainable_layers > 0:
         # Use separate optimizers for the intermediate and output layers
         repr_optimizer = prepare_optimizer(repr_module, repr_optimizer_name, cfg.representation_optimizer)
-        optimizer = prepare_optimizer(model.layers[-1], cfg.optimizer.name, cfg.optimizer)
+        optimizer = prepare_optimizer(prediction_module, cfg.optimizer.name, cfg.optimizer)
     else:
         # Only use one optimizer
         repr_optimizer = None
@@ -233,7 +306,7 @@ def prepare_components(cfg: DictConfig):
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             seed = seed_from_string(base_seed, 'cbp_tracker'),
         )
-        cbp_tracker.track_sequential(model.layers)
+        cbp_tracker.track(model.input_layer, model.activation, model.prediction_layer)
     else:
         cbp_tracker = None
         
@@ -270,13 +343,12 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
         nonlinearity = 'linear',
         generator = task_init_generator,
     )
-    torch.nn.init.zeros_(model.layers[-1].weight)
+    torch.nn.init.zeros_(model.prediction_layer.weight)
     
     # Change LTU threshold for target and predictors
     ltu_threshold = 0.0 # 0.1 * cfg.task.n_features
-    for layer in model.layers:
-        if isinstance(layer, LTU):
-            layer.threshold = ltu_threshold
+    if isinstance(model.activation, LTU):
+        model.activation.threshold = ltu_threshold
     task.activation_fn.threshold = ltu_threshold
 
     torch.manual_seed(seed_from_string(base_seed, 'experiment_setup'))
@@ -288,7 +360,7 @@ def run_experiment(
         cfg: DictConfig,
         task: NonlinearGEOFFTask,
         task_iterator: Iterator[Tuple[torch.Tensor, torch.Tensor]],
-        model: MLP,
+        model: EnsembleMLP,
         criterion: nn.Module,
         optimizer: Optimizer,
         repr_optimizer: Optional[Optimizer],
@@ -296,13 +368,13 @@ def run_experiment(
         distractor_tracker: DistractorTracker,
     ):
     # Distractor setup
-    n_hidden_units = model.layers[-1].in_features
+    n_hidden_units = model.input_layer.out_features
     distractor_tracker.process_new_features(list(range(n_hidden_units)))
 
     # Training loop
     step = 0
     prev_pruned_idxs = set()
-    prune_layer = model.layers[-2]
+    prune_layer = model.prediction_layer
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
     
     # Flags
@@ -365,8 +437,8 @@ def run_experiment(
                     prune_thresholds.append(pre_prune_utilities[new_feature_idxs].max())
         
         # Forward pass
-        outputs, param_inputs = model(
-            features, distractor_tracker.replace_features)
+        outputs, param_inputs, aux = model(
+            features, targets, distractor_tracker.replace_features)
         loss = criterion(outputs, targets)
         
         with torch.no_grad():

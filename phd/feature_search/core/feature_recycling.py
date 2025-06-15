@@ -15,7 +15,7 @@ import torch.optim as optim
 
 from .adam import Adam
 from .idbd import IDBD
-from .models import MLP
+from .models import MLP, MultipleLinear
 
 
 EPSILON = 1e-8
@@ -434,6 +434,9 @@ def n_kaiming_uniform(tensor, shape, a=0, mode='fan_in', nonlinearity='relu', ge
     return result
 
 
+VALID_CBP_MODULES = (nn.Linear, MultipleLinear)
+
+
 class CBPTracker():
     """Perform CBP for recycling features."""
     
@@ -475,7 +478,7 @@ class CBPTracker():
 
     def track(self, previous_module: nn.Module, current_module: nn.Module, next_module: nn.Module):
         """Track a list of layers used for CBP calculations."""
-        if not isinstance(previous_module, nn.Linear) or not isinstance(next_module, nn.Linear):
+        if not isinstance(previous_module, VALID_CBP_MODULES) or not isinstance(next_module, VALID_CBP_MODULES):
             raise NotImplementedError('CBP is only implemented for linear layers.')
         
         # Init generator if not already initialized
@@ -509,7 +512,12 @@ class CBPTracker():
 
     def _get_output_weight_sums(self, layer: nn.Module) -> torch.Tensor:
         """Return the sum of the absolute values of the weights for each inputted feature."""
-        return torch.sum(torch.abs(layer.weight), dim=0)
+        if isinstance(layer, nn.Linear):
+            return torch.sum(torch.abs(layer.weight), dim=0)
+        elif isinstance(layer, MultipleLinear):
+            return torch.sum(torch.abs(layer.weight), dim=1).view(-1)
+        else:
+            raise NotImplementedError(f"Output weight sums not implemented for layer type: {type(layer)}")
 
     def _reinit_input_weights(self, layer: nn.Module, idxs: List[int]):
         """Reinitialize the weights that output features at the given indices."""
