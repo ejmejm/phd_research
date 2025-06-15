@@ -53,7 +53,7 @@ class IDBD(Optimizer):
         
         if autostep:
             # Check that parameters match a linear layer structure
-            weights = [p for p in param_list if len(p.shape) == 2]
+            weights = [p for p in param_list if len(p.shape) in (2, 3)]
             biases = [p for p in param_list if len(p.shape) == 1]
             
             assert len(biases) == 0, "AutoStep optimizer does not support biases!"
@@ -166,7 +166,7 @@ class IDBD(Optimizer):
                         effective_step_size = torch.clamp(alpha * h_decay_term, min=1.0)
                     else:
                         effective_step_size = torch.clamp(torch.sum(alpha * h_decay_term, dim=-1), min=1.0)
-                        effective_step_size = effective_step_size.unsqueeze(1)
+                        effective_step_size = effective_step_size.unsqueeze(-1)
                     alpha = alpha / effective_step_size
                     state['beta'] = torch.log(alpha)
                 else:
