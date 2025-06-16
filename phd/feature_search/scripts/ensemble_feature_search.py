@@ -218,15 +218,15 @@ def model_distractor_forward_pass(
     
     aux = {}
     
-    global model, cbp_tracker
-    
     # Input layer
     hidden_features = self.input_layer(x) # (batch_size, hidden_dim)
     if distractor_callback is not None:
         hidden_features = distractor_callback(hidden_features)
     hidden_features = self.activation(hidden_features)
     
-    ensemble_input_features = hidden_features.view(
+    # Get the input features for each ensemble member
+    ensemble_input_features = self._get_ensemble_input_features(hidden_features)
+    ensemble_input_features = ensemble_input_features.view(
         x.shape[0], self.n_ensemble_members, self.ensemble_dim,
     ) # (batch_size, n_ensemble_members, ensemble_dim)
     
@@ -240,10 +240,7 @@ def model_distractor_forward_pass(
     ensemble_predictions = self.prediction_layer(ensemble_input_features)
     aux['ensemble_predictions'] = ensemble_predictions
     
-    # TODO: Test a couple things here
     prediction = ensemble_predictions.mean(dim=1) # (batch_size, output_dim)
-    # best_ensemble_idxs = self.ensemble_utilities.sort(descending=True).indices[:self.n_ensemble_members // 2]
-    # prediction = ensemble_predictions[:, best_ensemble_idxs, :].mean(dim=1) # (batch_size, output_dim)
     
     # Straight-through estimator for each ensemble member
     prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
@@ -264,20 +261,20 @@ def model_distractor_forward_pass(
                 # TODO: Given the signed utility didn't work well for features here,
                 #       maybe just try the negative of the loss per ensemble for ensemble utilities?
                 ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(prediction_errors)
-                ensemble_utilities = ensemble_utilities.sum(dim=2) # Shape: (batch_size, n_ensemble_members,)
+                ensemble_utilities = ensemble_utilities.sum(dim=2).mean(0) # Shape: (n_ensemble_members,)
                 
                 # Need to update this if there is more than one prediction
                 assert self.prediction_layer.weight.shape[1] == 1, \
                     "Only one prediction is supported for now!"
                 
                 # Measure how much each feature is reducing the loss within its ensemble
-                # Features shape: (batch, n_ensemble_members, in_dim)
-                # Weights shape: (n_ensemble_members, out_dim, in_dim) -> (1, n_ensemble_members, in_dim)
+                # Features shape: (batch, n_ensemble_members, ensemble_dim)
+                # Weights shape: (n_ensemble_members, out_dim, ensemble_dim) -> (1, n_ensemble_members, ensemble_dim)
                 feature_contribs = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
                 
                 # Calculate how much much each feature individually contributed to decreasing the loss
                 # (e.g. if the feature was 0, how much worse would the error be?)
-                # Shape: (batch_size, n_ensemble_members, in_dim)
+                # Shape: (batch_size, n_ensemble_members, ensemble_dim)
                 
                 # Signed utility version, did not work well in testing:
                 # feature_utilities = (
@@ -286,15 +283,38 @@ def model_distractor_forward_pass(
                 # )
                 
                 # CBP utility version:
-                feature_utilities = torch.abs(feature_contribs)
+                # TODO: Back compute utilities to their original features
+                # feature_utilities = torch.abs(feature_contribs).mean(dim=0).ravel()
+                
+                
+                
+                
+                # Shape: (batch_size, n_ensemble_members, ensemble_dim) -> (n_ensemble_members, ensemble_dim)
+                ensemble_input_utilities = torch.abs(feature_contribs).mean(dim=0)
+                feature_utilities = torch.zeros(
+                    (self.n_ensemble_members, self.hidden_dim),
+                    dtype=torch.float32, device=feature_contribs.device,
+                )
+                for i in range(self.n_ensemble_members):
+                    feature_utilities[i, self.ensemble_input_ids[i]] = ensemble_input_utilities[i]
+                
+                # TODO: Also try max here or median???
+                feature_utilities = feature_utilities.mean(0)
+                
+                
+                
+                
+                
+                # feature_utilities[self.ensemble_input_ids.ravel()] = ensemble_input_utilities
+                
                 
                 self.ensemble_utilities = (
                     self.utility_decay * self.ensemble_utilities +
-                    (1 - self.utility_decay) * ensemble_utilities.mean(dim=0)
+                    (1 - self.utility_decay) * ensemble_utilities
                 )
                 self.feature_utilities = (
                     self.utility_decay * self.feature_utilities +
-                    (1 - self.utility_decay) * feature_utilities.mean(dim=0)
+                    (1 - self.utility_decay) * feature_utilities
                 )
                 self.target_trace = (
                     self.utility_decay * self.target_trace +
@@ -320,6 +340,7 @@ def prepare_components(cfg: DictConfig):
         input_dim = cfg.task.n_features,
         output_dim = cfg.model.output_dim,
         n_layers = cfg.model.n_layers,
+        hidden_dim = cfg.model.hidden_dim,
         ensemble_dim = cfg.model.ensemble_dim,
         n_ensemble_members = cfg.model.n_ensemble_members,
         weight_init_method = cfg.model.weight_init_method,
@@ -364,17 +385,18 @@ def prepare_components(cfg: DictConfig):
     )
     
     # Initialize CBP tracker
-    if cfg.feature_recycling.use_cbp_utility:
-        cbp_tracker = CBPTracker(
-            optimizer = optimizer,
-            replace_rate = cfg.feature_recycling.recycle_rate,
-            decay_rate = cfg.feature_recycling.utility_decay,
-            maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-            seed = seed_from_string(base_seed, 'cbp_tracker'),
-        )
-        cbp_tracker.track(model.input_layer, model.activation, model.prediction_layer)
-    else:
-        cbp_tracker = None
+    # if cfg.feature_recycling.use_cbp_utility:
+    #     cbp_tracker = CBPTracker(
+    #         optimizer = optimizer,
+    #         replace_rate = cfg.feature_recycling.recycle_rate,
+    #         decay_rate = cfg.feature_recycling.utility_decay,
+    #         maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+    #         seed = seed_from_string(base_seed, 'cbp_tracker'),
+    #     )
+    #     cbp_tracker.track(model.input_layer, model.activation, model.prediction_layer)
+    # else:
+    #     cbp_tracker = None
+    cbp_tracker = None
         
     return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker
 

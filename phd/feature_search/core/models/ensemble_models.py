@@ -95,6 +95,7 @@ class EnsembleMLP(nn.Module):
         input_dim: int,
         output_dim: int,
         n_layers: int,
+        hidden_dim: int,
         ensemble_dim: int,
         n_ensemble_members: int,
         weight_init_method: str,
@@ -108,6 +109,7 @@ class EnsembleMLP(nn.Module):
             input_dim: Number of input features
             output_dim: Number of output classes
             n_layers: Number of layers (including output)
+            hidden_dim: Number of hidden units for the ensembles to pull from
             ensemble_dim: Hidden units per ensemble member
             n_ensemble_members: Number of ensemble members
             weight_init_method: How to initialize the first layer weights ('zeros', 'kaiming', or 'binary')
@@ -122,6 +124,7 @@ class EnsembleMLP(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.ensemble_dim = ensemble_dim
+        self.hidden_dim = hidden_dim
         self.n_ensemble_members = n_ensemble_members
         self.n_frozen_layers = n_frozen_layers
         self.utility_decay = utility_decay
@@ -132,8 +135,7 @@ class EnsembleMLP(nn.Module):
         self.activation = ACTIVATION_MAP[activation]()
         
         # Build layers
-        self.hidden_dim = ensemble_dim * n_ensemble_members
-        self.input_layer = nn.Linear(input_dim, self.hidden_dim, bias=False)
+        self.input_layer = nn.Linear(input_dim, hidden_dim, bias=False)
         self.prediction_layer = MultipleLinear(
             self.ensemble_dim, output_dim, self.n_ensemble_members,
             bias=False, generator=self.generator,
@@ -151,13 +153,29 @@ class EnsembleMLP(nn.Module):
             raise ValueError("EnsembleMLP only supports up to 2 frozen layers!")
         
         self.ensemble_utilities = torch.zeros(n_ensemble_members, dtype=torch.float32)
-        self.feature_utilities = torch.zeros((n_ensemble_members, ensemble_dim), dtype=torch.float32)
+        self.feature_utilities = torch.zeros(hidden_dim, dtype=torch.float32)
+        
+        # Maps the input features to each ensemble member, shape: (n_ensemble_members, ensemble_dim)
+        self.ensemble_input_ids = torch.stack([
+            torch.randperm(hidden_dim, generator=self.generator)[:ensemble_dim]
+            for _ in range(n_ensemble_members)
+        ])
 
         self.update_step = 0
 
         # Trace the target to allow for normalizing the utilities if necessary
         self.register_buffer('target_trace', torch.zeros(1, dtype=torch.float32))
+    
+    
+    def _get_ensemble_input_features(self, hidden_features: torch.Tensor) -> torch.Tensor:
+        """Get the input features for each ensemble member.
         
+        Args:
+            hidden_features: The hidden features from the input layer,
+                Shape: (batch_size, n_ensemble_members * ensemble_dim)
+        """
+        return hidden_features[:, self.ensemble_input_ids.ravel()]
+    
     
     def forward(
         self,
@@ -184,7 +202,10 @@ class EnsembleMLP(nn.Module):
         # Input layer
         hidden_features = self.input_layer(x) # (batch_size, hidden_dim)
         hidden_features = self.activation(hidden_features)
-        ensemble_input_features = hidden_features.view(
+        
+        # Get the input features for each ensemble member
+        ensemble_input_features = self._get_ensemble_input_features(hidden_features)
+        ensemble_input_features = ensemble_input_features.view(
             x.shape[0], self.n_ensemble_members, self.ensemble_dim,
         ) # (batch_size, n_ensemble_members, ensemble_dim)
         
@@ -219,20 +240,20 @@ class EnsembleMLP(nn.Module):
                     # TODO: Given the signed utility didn't work well for features here,
                     #       maybe just try the negative of the loss per ensemble for ensemble utilities?
                     ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(prediction_errors)
-                    ensemble_utilities = ensemble_utilities.sum(dim=2) # Shape: (batch_size, n_ensemble_members,)
+                    ensemble_utilities = ensemble_utilities.sum(dim=2).mean(0) # Shape: (n_ensemble_members,)
                     
                     # Need to update this if there is more than one prediction
                     assert self.prediction_layer.weight.shape[1] == 1, \
                         "Only one prediction is supported for now!"
                     
                     # Measure how much each feature is reducing the loss within its ensemble
-                    # Features shape: (batch, n_ensemble_members, in_dim)
-                    # Weights shape: (n_ensemble_members, out_dim, in_dim) -> (1, n_ensemble_members, in_dim)
+                    # Features shape: (batch, n_ensemble_members, ensemble_dim)
+                    # Weights shape: (n_ensemble_members, out_dim, ensemble_dim) -> (1, n_ensemble_members, ensemble_dim)
                     feature_contribs = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
                     
                     # Calculate how much much each feature individually contributed to decreasing the loss
                     # (e.g. if the feature was 0, how much worse would the error be?)
-                    # Shape: (batch_size, n_ensemble_members, in_dim)
+                    # Shape: (batch_size, n_ensemble_members, ensemble_dim)
                     
                     # Signed utility version, did not work well in testing:
                     # feature_utilities = (
@@ -241,15 +262,38 @@ class EnsembleMLP(nn.Module):
                     # )
                     
                     # CBP utility version:
-                    feature_utilities = torch.abs(feature_contribs)
+                    # TODO: Back compute utilities to their original features
+                    # feature_utilities = torch.abs(feature_contribs).mean(dim=0).ravel()
+                    
+                    
+                    
+                    
+                    # Shape: (batch_size, n_ensemble_members, ensemble_dim) -> (n_ensemble_members, ensemble_dim)
+                    ensemble_input_utilities = torch.abs(feature_contribs).mean(dim=0)
+                    feature_utilities = torch.zeros(
+                        (self.n_ensemble_members, self.hidden_dim),
+                        dtype=torch.float32, device=feature_contribs.device,
+                    )
+                    for i in range(self.n_ensemble_members):
+                        feature_utilities[i, self.ensemble_input_ids[i]] = ensemble_input_utilities[i]
+                    
+                    # TODO: Also try max here
+                    feature_utilities = feature_utilities.mean(0)
+                    
+                    
+                    
+                    
+                    
+                    # feature_utilities[self.ensemble_input_ids.ravel()] = ensemble_input_utilities
+                    
                     
                     self.ensemble_utilities = (
                         self.utility_decay * self.ensemble_utilities +
-                        (1 - self.utility_decay) * ensemble_utilities.mean(dim=0)
+                        (1 - self.utility_decay) * ensemble_utilities
                     )
                     self.feature_utilities = (
                         self.utility_decay * self.feature_utilities +
-                        (1 - self.utility_decay) * feature_utilities.mean(dim=0)
+                        (1 - self.utility_decay) * feature_utilities
                     )
                     self.target_trace = (
                         self.utility_decay * self.target_trace +
