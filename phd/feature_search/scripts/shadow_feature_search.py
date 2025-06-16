@@ -167,9 +167,9 @@ def model_distractor_forward_pass(
         aux['demoted_features'] = self._handle_demotions()
 
     hidden_features = self.input_layer(x)
-    
     if distractor_callback is not None:
         hidden_features = distractor_callback(hidden_features)
+    hidden_features = self.activation(hidden_features)
     
     active_hidden_features = hidden_features * self.active_feature_mask.unsqueeze(0)
     inactive_hidden_features = hidden_features * ~self.active_feature_mask.unsqueeze(0)

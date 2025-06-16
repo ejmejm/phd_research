@@ -76,7 +76,7 @@ class DynamicShadowMLP(nn.Module):
         # Create a generator if seed is provided
         self.generator = torch.Generator().manual_seed(seed) if seed is not None else None(seed) if seed is not None else None
         
-        self.activation = ACTIVATION_MAP[activation]
+        self.activation = ACTIVATION_MAP[activation]()
         
         # Build layers
         # Really the combined real and shadow features together should add up to a total count of 
@@ -229,6 +229,7 @@ class DynamicShadowMLP(nn.Module):
             aux['demoted_features'] = self._handle_demotions()
 
         hidden_features = self.input_layer(x)
+        hidden_features = self.activation(hidden_features)
         active_hidden_features = hidden_features * self.active_feature_mask.unsqueeze(0)
         inactive_hidden_features = hidden_features * ~self.active_feature_mask.unsqueeze(0)
 
