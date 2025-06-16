@@ -215,6 +215,9 @@ class EnsembleMLP(nn.Module):
                     # Measure how much each ensemble is reducing the loss
                     # Shape: (batch_size, n_ensemble_members, output_dim)
                     prediction_errors = target.unsqueeze(1) - ensemble_predictions
+                    
+                    # TODO: Given the signed utility didn't work well for features here,
+                    #       maybe just try the negative of the loss per ensemble for ensemble utilities?
                     ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(prediction_errors)
                     ensemble_utilities = ensemble_utilities.sum(dim=2) # Shape: (batch_size, n_ensemble_members,)
                     
@@ -230,10 +233,15 @@ class EnsembleMLP(nn.Module):
                     # Calculate how much much each feature individually contributed to decreasing the loss
                     # (e.g. if the feature was 0, how much worse would the error be?)
                     # Shape: (batch_size, n_ensemble_members, in_dim)
-                    feature_utilities = (
-                        torch.abs(prediction_errors + feature_contribs) - \
-                        torch.abs(prediction_errors)
-                    )
+                    
+                    # Signed utility version, did not work well in testing:
+                    # feature_utilities = (
+                    #     torch.abs(prediction_errors + feature_contribs) - \
+                    #     torch.abs(prediction_errors)
+                    # )
+                    
+                    # CBP utility version:
+                    feature_utilities = torch.abs(feature_contribs)
                     
                     self.ensemble_utilities = (
                         self.utility_decay * self.ensemble_utilities +

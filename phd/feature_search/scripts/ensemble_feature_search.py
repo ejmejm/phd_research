@@ -218,6 +218,8 @@ def model_distractor_forward_pass(
     
     aux = {}
     
+    global model, cbp_tracker
+    
     # Input layer
     hidden_features = self.input_layer(x) # (batch_size, hidden_dim)
     if distractor_callback is not None:
@@ -258,6 +260,9 @@ def model_distractor_forward_pass(
                 # Measure how much each ensemble is reducing the loss
                 # Shape: (batch_size, n_ensemble_members, output_dim)
                 prediction_errors = target.unsqueeze(1) - ensemble_predictions
+                
+                # TODO: Given the signed utility didn't work well for features here,
+                #       maybe just try the negative of the loss per ensemble for ensemble utilities?
                 ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(prediction_errors)
                 ensemble_utilities = ensemble_utilities.sum(dim=2) # Shape: (batch_size, n_ensemble_members,)
                 
@@ -274,12 +279,14 @@ def model_distractor_forward_pass(
                 # (e.g. if the feature was 0, how much worse would the error be?)
                 # Shape: (batch_size, n_ensemble_members, in_dim)
                 
-                feature_utilities = (
-                    torch.abs(prediction_errors + feature_contribs) - \
-                    torch.abs(prediction_errors)
-                )
+                # Signed utility version, did not work well in testing:
+                # feature_utilities = (
+                #     torch.abs(prediction_errors + feature_contribs) - \
+                #     torch.abs(prediction_errors)
+                # )
                 
-                # feature_utilities = torch.abs(feature_contribs).mean(dim=0)
+                # CBP utility version:
+                feature_utilities = torch.abs(feature_contribs)
                 
                 self.ensemble_utilities = (
                     self.utility_decay * self.ensemble_utilities +
@@ -307,6 +314,7 @@ def prepare_components(cfg: DictConfig):
     task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
+    global model, cbp_tracker
     # Initialize model and optimizer
     model = EnsembleMLP(
         input_dim = cfg.task.n_features,
@@ -317,6 +325,7 @@ def prepare_components(cfg: DictConfig):
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
+        utility_decay = cfg.feature_recycling.utility_decay,
         seed = seed_from_string(base_seed, 'model'),
     )
     model.to(cfg.device)
