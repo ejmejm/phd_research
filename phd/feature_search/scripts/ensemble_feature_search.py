@@ -426,7 +426,7 @@ def run_experiment(
     # Training loop
     step = 0
     prev_pruned_idxs = set()
-    prune_layer = model.prediction_layer
+    prune_layer = model.activation
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
     
     # Flags
