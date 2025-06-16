@@ -194,6 +194,7 @@ def model_distractor_forward_pass(
         self,
         x: torch.Tensor,
         target: Optional[torch.Tensor] = None,
+        update_state: bool = False,
         distractor_callback: Callable[[torch.Tensor], torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Dict[nn.Module, torch.Tensor], Dict[str, Any]]:
     """Forward pass with a callback that can replace hidden unit outputs with distractor values.
@@ -201,6 +202,7 @@ def model_distractor_forward_pass(
     Args:
         x: Input tensor of shape (batch_size, in_features)
         target: Target tensor of shape (batch_size, out_features)
+        update_state: Whether to update the state of the model (for utility tracking)
         distractor_callback: Callable that takes a tensor and returns a tensor of the same shape
             which should be a mix of the same values and distractor values.
 
@@ -234,13 +236,63 @@ def model_distractor_forward_pass(
     ensemble_predictions = self.prediction_layer(ensemble_input_features)
     aux['ensemble_predictions'] = ensemble_predictions
     
+    # TODO: Test a couple things here
     prediction = ensemble_predictions.mean(dim=1) # (batch_size, output_dim)
+    # best_ensemble_idxs = self.ensemble_utilities.sort(descending=True).indices[:self.n_ensemble_members // 2]
+    # prediction = ensemble_predictions[:, best_ensemble_idxs, :].mean(dim=1) # (batch_size, output_dim)
     
     # Straight-through estimator for each ensemble member
     prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
     prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
     
+    # Calculate losses if applicable
+    if target is not None:
+        loss = torch.mean((target - prediction) ** 2)
+        aux['loss'] = loss
+        
+        # Update utility
+        if update_state:
+            with torch.no_grad():
+                # Measure how much each ensemble is reducing the loss
+                # Shape: (batch_size, n_ensemble_members, output_dim)
+                prediction_errors = target.unsqueeze(1) - ensemble_predictions
+                ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(prediction_errors)
+                ensemble_utilities = ensemble_utilities.sum(dim=2) # Shape: (batch_size, n_ensemble_members,)
+                
+                # Need to update this if there is more than one prediction
+                assert self.prediction_layer.weight.shape[1] == 1, \
+                    "Only one prediction is supported for now!"
+                
+                # Measure how much each feature is reducing the loss within its ensemble
+                # Features shape: (batch, n_ensemble_members, in_dim)
+                # Weights shape: (n_ensemble_members, out_dim, in_dim) -> (1, n_ensemble_members, in_dim)
+                feature_values = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
+                
+                # Calculate how much much each feature individually contributed to decreasing the loss
+                # (e.g. if the feature was 0, how much worse would the error be?)
+                # Shape: (batch_size, n_ensemble_members, in_dim)
+                feature_utilities = (
+                    torch.abs(prediction_errors + feature_values) - \
+                    torch.abs(prediction_errors)
+                )
+                
+                self.ensemble_utilities = (
+                    self.utility_decay * self.ensemble_utilities +
+                    (1 - self.utility_decay) * ensemble_utilities.mean(dim=0)
+                )
+                self.feature_utilities = (
+                    self.utility_decay * self.feature_utilities +
+                    (1 - self.utility_decay) * feature_utilities.mean(dim=0)
+                )
+                self.target_trace = (
+                    self.utility_decay * self.target_trace +
+                    (1 - self.utility_decay) * torch.abs(target).mean()
+                )
+            
+            self.update_step += 1
+    
     return prediction, param_inputs, aux
+
 
 
 def prepare_components(cfg: DictConfig):
@@ -438,8 +490,10 @@ def run_experiment(
         
         # Forward pass
         outputs, param_inputs, aux = model(
-            features, targets, distractor_tracker.replace_features)
-        loss = criterion(outputs, targets)
+            features, targets, update_state=True,
+            distractor_callback=distractor_tracker.replace_features,
+        )
+        loss = aux['loss']
         
         with torch.no_grad():
             if cfg.train.standardize_cumulants:

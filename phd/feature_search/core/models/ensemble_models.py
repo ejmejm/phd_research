@@ -95,6 +95,7 @@ class EnsembleMLP(nn.Module):
         weight_init_method: str,
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
+        utility_decay: float = 0.99,
         seed: Optional[int] = None,
     ):
         """
@@ -107,6 +108,7 @@ class EnsembleMLP(nn.Module):
             weight_init_method: How to initialize the first layer weights ('zeros', 'kaiming', or 'binary')
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             n_frozen_layers: Number of frozen layers
+            utility_decay: Decay rate for the utility tracking
             seed: Optional random seed for reproducibility
         """
         assert n_layers == 2, "Ensemble MLPs only support a two layers!"
@@ -117,6 +119,7 @@ class EnsembleMLP(nn.Module):
         self.ensemble_dim = ensemble_dim
         self.n_ensemble_members = n_ensemble_members
         self.n_frozen_layers = n_frozen_layers
+        self.utility_decay = utility_decay
         
         # Create a generator if seed is provided
         self.generator = torch.Generator().manual_seed(seed) if seed is not None else None
@@ -142,16 +145,26 @@ class EnsembleMLP(nn.Module):
         if n_frozen_layers > 2:
             raise ValueError("EnsembleMLP only supports up to 2 frozen layers!")
         
+        self.ensemble_utilities = torch.zeros(n_ensemble_members, dtype=torch.float32)
+        self.feature_utilities = torch.zeros((n_ensemble_members, ensemble_dim), dtype=torch.float32)
+
+        self.update_step = 0
+
+        # Trace the target to allow for normalizing the utilities if necessary
+        self.register_buffer('target_trace', torch.zeros(1, dtype=torch.float32))
+        
     
     def forward(
         self,
         x: torch.Tensor,
         target: Optional[torch.Tensor] = None,
+        update_state: bool = False,
     ) -> Tuple[torch.Tensor, Dict[nn.Module, torch.Tensor], Dict[str, Any]]:
         """
         Args:
             x: Input tensor of shape (batch_size, in_features)
             target: Target tensor of shape (batch_size, out_features)
+            update_state: Whether to update the state of the model (for utility tracking)
             
         Returns:
             - Prediction tensor of shape (batch_size, output_dim)
@@ -185,5 +198,51 @@ class EnsembleMLP(nn.Module):
         # Straight-through estimator for each ensemble member
         prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
         prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
+        
+        # Calculate losses if applicable
+        if target is not None:
+            loss = torch.mean((target - prediction) ** 2)
+            aux['loss'] = loss
+            
+            # Update utility
+            if update_state:
+                with torch.no_grad():
+                    # Measure how much each ensemble is reducing the loss
+                    # Shape: (batch_size, n_ensemble_members, output_dim)
+                    prediction_errors = target.unsqueeze(1) - ensemble_predictions
+                    ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(prediction_errors)
+                    ensemble_utilities = ensemble_utilities.sum(dim=2) # Shape: (batch_size, n_ensemble_members,)
+                    
+                    # Need to update this if there is more than one prediction
+                    assert self.prediction_layer.weight.shape[1] == 1, \
+                        "Only one prediction is supported for now!"
+                    
+                    # Measure how much each feature is reducing the loss within its ensemble
+                    # Features shape: (batch, n_ensemble_members, in_dim)
+                    # Weights shape: (n_ensemble_members, out_dim, in_dim) -> (1, n_ensemble_members, in_dim)
+                    feature_values = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
+                    
+                    # Calculate how much much each feature individually contributed to decreasing the loss
+                    # (e.g. if the feature was 0, how much worse would the error be?)
+                    # Shape: (batch_size, n_ensemble_members, in_dim)
+                    feature_utilities = (
+                        torch.abs(prediction_errors + feature_values) - \
+                        torch.abs(prediction_errors)
+                    )
+                    
+                    self.ensemble_utilities = (
+                        self.utility_decay * self.ensemble_utilities +
+                        (1 - self.utility_decay) * ensemble_utilities.mean(dim=0)
+                    )
+                    self.feature_utilities = (
+                        self.utility_decay * self.feature_utilities +
+                        (1 - self.utility_decay) * feature_utilities.mean(dim=0)
+                    )
+                    self.target_trace = (
+                        self.utility_decay * self.target_trace +
+                        (1 - self.utility_decay) * torch.abs(target).mean()
+                    )
+                
+                self.update_step += 1
         
         return prediction, param_inputs, aux
