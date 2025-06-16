@@ -268,15 +268,18 @@ def model_distractor_forward_pass(
                 # Measure how much each feature is reducing the loss within its ensemble
                 # Features shape: (batch, n_ensemble_members, in_dim)
                 # Weights shape: (n_ensemble_members, out_dim, in_dim) -> (1, n_ensemble_members, in_dim)
-                feature_values = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
+                feature_contribs = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
                 
                 # Calculate how much much each feature individually contributed to decreasing the loss
                 # (e.g. if the feature was 0, how much worse would the error be?)
                 # Shape: (batch_size, n_ensemble_members, in_dim)
+                
                 feature_utilities = (
-                    torch.abs(prediction_errors + feature_values) - \
+                    torch.abs(prediction_errors + feature_contribs) - \
                     torch.abs(prediction_errors)
                 )
+                
+                # feature_utilities = torch.abs(feature_contribs).mean(dim=0)
                 
                 self.ensemble_utilities = (
                     self.utility_decay * self.ensemble_utilities +
