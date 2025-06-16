@@ -7,6 +7,7 @@ This script is a more complete version of the `rupam_experiment.py` script, whic
 - Separate optimizers for the intermediate and output layers
 """
 
+from dataclasses import dataclass
 import logging
 from typing import Iterator, Tuple, Callable, List, Optional
 
@@ -31,6 +32,7 @@ from phd.feature_search.core.experiment_helpers import (
 )
 from phd.feature_search.core.idbd import IDBD
 from phd.feature_search.core.models import LTU, EnsembleMLP, MultipleLinear
+from phd.feature_search.core.models.ensemble_models import prune_features as prune_ensemble_features
 from phd.feature_search.core.feature_recycling import InputRecycler, n_kaiming_uniform
 from phd.feature_search.core.feature_recycling import CBPTracker as OriginalCBPTracker
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
@@ -408,6 +410,74 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
     return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker
 
 
+@dataclass
+class PruningState:
+    feature_prune_accumulator: float = 0.0
+    ensemble_prune_accumulator: float = 0.0
+
+
+def prune_model(
+    model: EnsembleMLP,
+    optimizer: Optimizer,
+    distractor_tracker: DistractorTracker,
+    pruning_state: PruningState,
+    cfg: DictConfig,
+):
+    """Prune the model, handle distractor replacement, and return pruning metrics.
+    
+    Args:
+        model: The model to prune
+        optimizer: The optimizer that holds the optimization state for the given model
+        distractor_tracker: The tracker that handles the distractor features
+        pruning_state: The state of the pruning process
+        cfg: The configuration
+        
+    Returns:
+        A dictionary containing the pruning results
+    """
+    log_pruning_stats = cfg.train.get('log_pruning_stats', False)
+    
+    # Compute how many features and ensembles to prune
+    n_features = model.input_layer.out_features
+    n_ensembles = model.n_ensemble_members
+    
+    pruning_state.feature_prune_accumulator += n_features * cfg.feature_recycling.recycle_rate
+    pruning_state.ensemble_prune_accumulator += n_ensembles * cfg.feature_recycling.ensemble_recycle_rate
+    
+    n_features_to_prune = int(pruning_state.feature_prune_accumulator)
+    n_ensembles_to_prune = int(pruning_state.ensemble_prune_accumulator)
+    
+    pruning_state.feature_prune_accumulator -= n_features_to_prune
+    pruning_state.ensemble_prune_accumulator -= n_ensembles_to_prune
+    
+    # Determine the indices to prune
+    feature_utilities = model.feature_utilities.cpu().numpy()
+    feature_idxs_to_prune = np.argsort(feature_utilities.ravel())[:n_features_to_prune]
+    
+    ensemble_utilities = model.ensemble_utilities.cpu().numpy()
+    # TODO: Implement ensemble pruning
+    # ensemble_idxs_to_prune = np.argsort(ensemble_utilities)[:n_ensembles_to_prune]
+    ensemble_idxs_to_prune = []
+    
+    # Prune the features
+    prune_ensemble_features(
+        model, optimizer, feature_idxs_to_prune,
+        input_init_type = cfg.model.weight_init_method,
+        output_init_type = 'zeros',
+    )
+     
+    # Replace features with distractors where necessary
+    if len(feature_idxs_to_prune) > 0:
+        distractor_tracker.process_new_features(feature_idxs_to_prune)
+    
+    return {
+        'n_features_pruned': n_features_to_prune,
+        'n_ensembles_pruned': n_ensembles_to_prune,
+        'feature_idxs_pruned': feature_idxs_to_prune,
+        'ensemble_idxs_pruned': ensemble_idxs_to_prune,
+    }
+
+
 def run_experiment(
         cfg: DictConfig,
         task: NonlinearGEOFFTask,
@@ -436,17 +506,21 @@ def run_experiment(
 
     # Initialize accumulators
     cumulant_stats = StandardizationStats(gamma=0.99)
+    pruning_state = PruningState()
     cumulative_loss = np.float128(0.0)
     loss_accum = 0.0
     mean_pred_loss_accum = 0.0
     pruned_accum = 0
     pruned_newest_feature_accum = 0
     n_steps_since_log = 0
-    total_pruned = 0
+    total_features_pruned = 0
+    total_ensembles_pruned = 0
     prune_thresholds = []
     target_buffer = []
 
     while step < cfg.train.total_steps:
+
+        ### Data Processing ###
 
         # Generate batch of data
         inputs, targets = next(task_iterator)
@@ -464,31 +538,59 @@ def run_experiment(
         
         features, targets = inputs.to(cfg.device), targets.to(cfg.device)
 
-        # Reset weights and optimizer states for recycled features
-        if cbp_tracker is not None:
-            if log_pruning_stats:
-                pre_prune_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
 
-            pruned_idxs = cbp_tracker.prune_features()
-            n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
-            total_pruned += n_pruned
+        ### Pruning ###
 
-            if prune_layer in pruned_idxs and len(pruned_idxs[prune_layer]) > 0:
-                new_feature_idxs = pruned_idxs[prune_layer].tolist()
-
-                # Turn some features into distractors
-                distractor_tracker.process_new_features(new_feature_idxs)
-
-                # Log pruning statistics
-                pruned_accum += len(new_feature_idxs)
-                n_new_pruned_features = len(set(new_feature_idxs).intersection(prev_pruned_idxs))
-                pruned_newest_feature_accum += n_new_pruned_features
-                prev_pruned_idxs = set(new_feature_idxs)
-                
-                if log_pruning_stats:
-                    prune_thresholds.append(pre_prune_utilities[new_feature_idxs].max())
+        if log_pruning_stats:
+            pre_prune_feature_utilities = model.feature_utilities.ravel().cpu().clone().numpy()
+            pre_prune_ensemble_utilities = model.ensemble_utilities.cpu().clone().numpy()
         
-        # Forward pass
+        # Prune the model if necessary
+        prune_results = prune_model(
+            model, optimizer, distractor_tracker, pruning_state, cfg)
+        
+        # Update pruning metrics
+        total_features_pruned += prune_results['n_features_pruned']
+        total_ensembles_pruned += prune_results['n_ensembles_pruned']
+        
+        if prune_results['n_features_pruned'] > 0:
+            feature_idxs_pruned = prune_results['feature_idxs_pruned'].tolist()
+            
+            # Log pruning statistics
+            pruned_accum += len(feature_idxs_pruned)
+            n_new_pruned_features = len(set(feature_idxs_pruned).intersection(prev_pruned_idxs))
+            pruned_newest_feature_accum += n_new_pruned_features
+            prev_pruned_idxs = set(feature_idxs_pruned)
+            
+            if log_pruning_stats:
+                prune_thresholds.append(pre_prune_feature_utilities[feature_idxs_pruned].max())
+        
+        # if cbp_tracker is not None:
+        #     if log_pruning_stats:
+        #         pre_prune_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
+
+        #     pruned_idxs = cbp_tracker.prune_features()
+        #     n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
+        #     total_features_pruned += n_pruned
+
+        #     if prune_layer in pruned_idxs and len(pruned_idxs[prune_layer]) > 0:
+        #         new_feature_idxs = pruned_idxs[prune_layer].tolist()
+
+        #         # Turn some features into distractors
+        #         distractor_tracker.process_new_features(new_feature_idxs)
+
+        #         # Log pruning statistics
+        #         pruned_accum += len(new_feature_idxs)
+        #         n_new_pruned_features = len(set(new_feature_idxs).intersection(prev_pruned_idxs))
+        #         pruned_newest_feature_accum += n_new_pruned_features
+        #         prev_pruned_idxs = set(new_feature_idxs)
+                
+        #         if log_pruning_stats:
+        #             prune_thresholds.append(pre_prune_utilities[new_feature_idxs].max())
+        
+        
+        ### Forward Pass ###
+        
         outputs, param_inputs, aux = model(
             features, targets, update_state=True,
             distractor_callback=distractor_tracker.replace_features,
@@ -501,6 +603,9 @@ def run_experiment(
             else:
                 baseline_pred = cumulant_stats.running_mean.cpu().view(1, 1)
             mean_pred_loss = criterion(baseline_pred, targets)
+
+
+        ### Backward Pass ###
 
         # Backward pass
         optimizer.zero_grad()
@@ -519,6 +624,9 @@ def run_experiment(
             
         if repr_optimizer is not None:
             repr_optimizer.step()
+            
+        
+        ### Metrics ###
         
         # Accumulate metrics
         loss_accum += loss.item()
@@ -526,7 +634,9 @@ def run_experiment(
         mean_pred_loss_accum += mean_pred_loss.item()
         n_steps_since_log += 1
         
-        # Log metrics
+        
+        ### Logging ###
+        
         if step % cfg.train.log_freq == 0:
             n_distractors = distractor_tracker.distractor_mask.sum().item()
             n_real_features = distractor_tracker.distractor_mask.numel() - n_distractors

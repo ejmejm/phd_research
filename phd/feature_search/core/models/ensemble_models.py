@@ -1,10 +1,15 @@
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+import warnings
 
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
-from .base import ACTIVATION_MAP, initialize_layer_weights, ParallelLinear
+from .base import ACTIVATION_MAP, initialize_layer_weights
+from phd.research_utils.weight_init import n_kaiming_uniform
+from ..idbd import IDBD
 
 
 class MultipleLinear(nn.Module):
@@ -246,3 +251,120 @@ class EnsembleMLP(nn.Module):
                 self.update_step += 1
         
         return prediction, param_inputs, aux
+
+
+def _reinit_input_weights(model: EnsembleMLP, idxs: List[int], init_type: str):
+    """Reinitialize the weights of the input layer after pruning.
+    
+    Args:
+        model: The model to prune
+        prune_idxs: List of hidden units to prune
+        init_type: The type of initialization to use {kaiming_uniform, binary}
+    """
+    if init_type == 'kaiming_uniform':
+        weight_data = model.input_layer.weight.data
+        model.input_layer.weight.data[idxs] = n_kaiming_uniform(
+            weight_data, weight_data[idxs].shape, a=math.sqrt(5), generator=model.generator)
+    elif init_type == 'binary':
+        weight_data = model.input_layer.weight.data
+        model.input_layer.weight.data[idxs] = torch.randint(
+            0, 2,
+            weight_data[idxs].shape,
+            device = model.input_layer.weight.device,
+            generator = model.generator
+        ).float() * 2 - 1
+    else:
+        raise ValueError(f'Invalid weight initialization: {init_type}!')
+
+
+def _reinit_output_weights(model: EnsembleMLP, idxs: List[int], init_type: str):
+    """Reinitialize the weights of the output layer after pruning.
+    
+    Args:
+        model: The model to prune
+        prune_idxs: List of hidden units to prune
+        init_type: The type of initialization to use {zeros, kaiming_uniform}
+    """
+    # This is how linear layers are initialized in PyTorch
+    weight_data = model.prediction_layer.weight.data
+    
+    ensemble_idxs, feature_idxs = np.unravel_index(idxs, (model.n_ensemble_members, model.ensemble_dim))
+    
+    if init_type == 'zeros':
+        model.prediction_layer.weight.data[ensemble_idxs, :, feature_idxs] = torch.zeros_like(
+            weight_data[ensemble_idxs, :, feature_idxs])
+    elif init_type == 'kaiming_uniform':
+        model.prediction_layer.weight.data[ensemble_idxs, :, feature_idxs] = n_kaiming_uniform(
+            weight_data,
+            weight_data[ensemble_idxs, :, feature_idxs].shape,
+            a = math.sqrt(5),
+            generator = model.generator,
+        )
+    else:
+        raise ValueError(f'Invalid weight initialization: {init_type}!')
+
+
+def _reset_input_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idxs: List[int]):
+    """Reset the optimizer state of the input layer after pruning."""
+    optim_state = optimizer.state[model.input_layer.weight]
+        
+    for key, value in optim_state.items():
+        if value.shape == model.input_layer.weight.shape:
+            if value is not None:
+                optim_state[key][idxs, :] = 0
+        else:
+            warnings.warn(
+                f"Cannot reset optimizer state for {key} of layer '{model.input_layer}' because shapes do not match, "
+                f"parameter: {model.input_layer.weight.shape}, state value: {value.shape}"
+            )
+            
+    if isinstance(optimizer, IDBD) and 'beta' in optim_state:
+        optim_state['beta'][idxs, :] = math.log(optimizer.init_lr)
+
+
+def _reset_output_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idxs: np.ndarray):
+    """Reset the optimizer state of the output layer after pruning."""
+    optim_state = optimizer.state[model.prediction_layer.weight]
+    
+    ensemble_idxs, feature_idxs = np.unravel_index(idxs, (model.n_ensemble_members, model.ensemble_dim))
+    
+    for key, value in optim_state.items():
+        if value.shape == model.prediction_layer.weight.shape:
+            if value is not None:
+                optim_state[key][ensemble_idxs, :, feature_idxs] = 0
+        else:
+            warnings.warn(
+                f"Cannot reset optimizer state for {key} of layer '{model.prediction_layer}' because shapes do not match, "
+                f"parameter: {model.prediction_layer.weight.shape}, state value: {value.shape}"
+            )
+    
+    if isinstance(optimizer, IDBD) and 'beta' in optim_state:
+        optim_state['beta'][ensemble_idxs, :, feature_idxs] = math.log(optimizer.init_lr)
+
+
+def prune_features(
+    model: EnsembleMLP,
+    optimizer: optim.Optimizer,
+    prune_idxs: List[int],
+    input_init_type: str = 'binary',
+    output_init_type: str = 'zeros',
+):
+    """Prune features from the model.
+    
+    Args:
+        model: The model to prune
+        optimizer: The optimizer that holds the optimization state for the given model
+        prune_idxs: List of hidden units to prune
+        input_init_type: The type of initialization to use for the input weights {binary, kaiming_uniform}
+        output_init_type: The type of initialization to use for the output weights {zeros, kaiming_uniform}
+    """
+    if prune_idxs is None or len(prune_idxs) == 0:
+        return
+    
+    _reinit_input_weights(model, prune_idxs, input_init_type)
+    _reinit_output_weights(model, prune_idxs, output_init_type)
+    
+    _reset_input_optim_state(model, optimizer, prune_idxs)
+    _reset_output_optim_state(model, optimizer, prune_idxs)
+    
+    

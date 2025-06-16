@@ -16,6 +16,7 @@ import torch.optim as optim
 from .adam import Adam
 from .idbd import IDBD
 from .models import MLP, MultipleLinear
+from phd.research_utils.weight_init import n_kaiming_uniform
 
 
 EPSILON = 1e-8
@@ -415,23 +416,6 @@ def reset_input_weights(idxs: Union[int, Sequence[int]], model: MLP, optimizer: 
             state['v'][:, idxs] = 0
     else:
         raise ValueError(f'Invalid optimizer type: {type(optimizer)}')
-
-
-def n_kaiming_uniform(tensor, shape, a=0, mode='fan_in', nonlinearity='relu', generator=None):
-    """
-    Adapted from https://pytorch.org/docs/stable/_modules/torch/nn/init.html#kaiming_uniform_
-    But has a customizable number of outputs.
-    """
-    if 0 in tensor.shape:
-        warnings.warn("Initializing zero-element tensors is a no-op")
-        return tensor
-    fan = nn.init._calculate_correct_fan(tensor, mode)
-    gain = nn.init.calculate_gain(nonlinearity, a)
-    std = gain / math.sqrt(fan)
-    bound = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
-    result = torch.rand(shape, generator=generator) * 2 * bound - bound
-    result = result.to(tensor.device)
-    return result
 
 
 VALID_CBP_MODULES = (nn.Linear, MultipleLinear)
