@@ -33,6 +33,7 @@ from phd.feature_search.core.experiment_helpers import (
 from phd.feature_search.core.idbd import IDBD
 from phd.feature_search.core.models import LTU, EnsembleMLP, MultipleLinear
 from phd.feature_search.core.models.ensemble_models import prune_features as prune_ensemble_features
+from phd.feature_search.core.models.ensemble_models import prune_ensembles
 from phd.feature_search.core.feature_recycling import InputRecycler, n_kaiming_uniform
 from phd.feature_search.core.feature_recycling import CBPTracker as OriginalCBPTracker
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
@@ -495,14 +496,17 @@ def prune_model(
     feature_idxs_to_prune = np.argsort(feature_utilities, stable=True)[:n_features_to_prune]
     
     ensemble_utilities = model.ensemble_utilities.cpu().numpy()
-    # TODO: Implement ensemble pruning
-    # ensemble_idxs_to_prune = np.argsort(ensemble_utilities)[:n_ensembles_to_prune]
-    ensemble_idxs_to_prune = []
+    ensemble_idxs_to_prune = np.argsort(ensemble_utilities, stable=True)[:n_ensembles_to_prune]
     
-    # Prune the features
+    # Prune the features and ensembles
     prune_ensemble_features(
         model, optimizer, feature_idxs_to_prune,
         input_init_type = cfg.model.weight_init_method,
+        output_init_type = 'zeros',
+    )
+    
+    prune_ensembles(
+        model, optimizer, ensemble_idxs_to_prune,
         output_init_type = 'zeros',
     )
      

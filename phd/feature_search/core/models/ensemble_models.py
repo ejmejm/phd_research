@@ -482,3 +482,44 @@ def prune_features(
     
     median_utility = model.feature_utilities.median()
     model.feature_utilities[prune_idxs] = median_utility
+
+
+def prune_ensembles(
+    model: EnsembleMLP,
+    optimizer: optim.Optimizer,
+    prune_idxs: List[int],
+    output_init_type: str = 'zeros',
+):
+    """Prune ensembles from the model.
+    
+    Args:
+        model: The model to prune
+        optimizer: The optimizer that holds the optimization state for the given model
+        prune_idxs: List of ensembles to prune
+        output_init_type: The type of initialization to use for the output weights {zeros, kaiming_uniform}
+    """
+    if prune_idxs is None or len(prune_idxs) == 0:
+        return
+
+    # Get the indices of the output weights that need to be reset
+    device = model.ensemble_input_ids.device
+    ensemble_prune_idxs = torch.tensor(prune_idxs, dtype=torch.long, device=device)
+    ensemble_prune_idxs = ensemble_prune_idxs.repeat_interleave(model.ensemble_dim)
+    
+    feature_prune_idxs = torch.arange(model.ensemble_dim, dtype=torch.long, device=device)
+    feature_prune_idxs = feature_prune_idxs.repeat(len(prune_idxs))
+    
+    full_reset_ids = (ensemble_prune_idxs, feature_prune_idxs)
+    
+    # Reset the output weights and optimizer states for the ensembles being pruned
+    _reinit_output_weights(model, full_reset_ids, output_init_type)
+    _reset_output_optim_state(model, optimizer, full_reset_ids)
+    
+    # Randomize input ids for the ensembles that are being pruned
+    for ensemble_idx in prune_idxs:
+        model.ensemble_input_ids[ensemble_idx] = torch.randperm(
+            model.hidden_dim, generator=model.generator)[:model.ensemble_dim]
+    
+    # Reset utilities for the ensembles that are being pruned
+    median_utility = model.ensemble_utilities.median()
+    model.ensemble_utilities[prune_idxs] = median_utility
