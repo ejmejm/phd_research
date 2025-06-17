@@ -2,13 +2,13 @@ defaults:
 - ensemble_feature_search
 - _self_
 
-wandb: false
+wandb: true
 comet_ml: false
 
 model:
-  hidden_dim: 1024
-  ensemble_dim: 64
-  n_ensemble_members: 16
+  hidden_dim: 20_480
+  ensemble_dim: 512
+  n_ensemble_members: 40
 
 task:
   distractor_chance: 0.0
@@ -16,14 +16,17 @@ task:
 
 feature_recycling:
   recycle_rate: 0.005
+  ensemble_recycle_rate: 0.005
 
 train:
   total_steps: 200_000
   standardize_cumulants: true
 
 optimizer:
-  name: rmsprop
-  learning_rate: 0.0001
+  name: idbd
+  learning_rate: ${eval:0.03 / ${model.ensemble_dim} ** 0.75} # 0.0001
+  version: squared_grads
+  autostep: true
 
 
 seed: 200

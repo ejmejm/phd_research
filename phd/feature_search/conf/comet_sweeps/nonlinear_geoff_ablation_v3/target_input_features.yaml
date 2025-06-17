@@ -1,6 +1,6 @@
 name: target_input_features
-project: feature_recycling-nlg_ablation_v2
-command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v2/base_config.yaml
+project: feature_recycling-nlg_ablation_v3
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v3/base_config.yaml
 algorithm: grid
 
 spec:
