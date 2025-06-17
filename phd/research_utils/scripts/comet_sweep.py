@@ -109,6 +109,8 @@ def create_sweep(config_path):
     if 'project' in config:
         config['parameters']['sweep_project'] = config['project']
         del config['project']
+    if 'command' not in config:
+        raise ValueError(f"'command' field not found in config file: {config_path}")
     config['parameters']['sweep_command'] = config['command']
     del config['command']
     if 'name' in config:
@@ -146,11 +148,14 @@ def create_sweep(config_path):
     if 'COMET_OPTIMIZER_ID' in os.environ:
         del os.environ['COMET_OPTIMIZER_ID']
     opts = []
+    combinations = []
     for config in final_configs:
         opt = Optimizer(config)
+        n_combinations = str(opt.status().get('configSpaceSize', '?'))
         opts.append(opt.id)
-        print('Created sweep with id:\n', opt.id)
-    return opts
+        combinations.append(n_combinations)
+        print('Created sweep with id:\n', opt.id, f'({n_combinations} combinations)')
+    return opts, combinations
 
 
 def main():
@@ -165,14 +170,18 @@ def main():
 
     if args.config:
         config_ids = []
+        combination_counts = []
         config_names = []
         for config in args.config:
             # Get file name from path
             config_names.append(config.split('/')[-1])
-            new_ids = create_sweep(config)
+            new_ids, new_combination_counts = create_sweep(config)
             config_ids.extend(new_ids)
-        print('Created sweeps with ids:\n', ', '.join(config_ids))
-        print('From configs:\n', ', '.join(config_names))
+            combination_counts.extend(new_combination_counts)
+        
+        print('\n===== Created sweeps with ids =====')
+        for name, count, sweep_id in zip(config_names, combination_counts, config_ids):
+            print(f'{name} ({count}): {sweep_id}')
 
     if args.sweep_id is not None:
         if args.sweep_id == 'new':
