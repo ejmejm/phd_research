@@ -8,7 +8,7 @@ comet_ml: false
 model:
   hidden_dim: 20_480
   ensemble_dim: 512
-  n_ensemble_members: 40
+  n_ensemble_members: 200
 
 task:
   distractor_chance: 0.0

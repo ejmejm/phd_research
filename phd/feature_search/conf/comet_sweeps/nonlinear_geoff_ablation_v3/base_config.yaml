@@ -21,6 +21,12 @@ train:
   total_steps: 1_000_000
   standardize_cumulants: true
 
+  # Logging parameters
+  log_freq: 2000
+  log_utility_stats: false
+  log_pruning_stats: true
+  log_model_stats: false
+
 optimizer:
   name: idbd
   version: squared_grads
