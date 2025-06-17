@@ -295,13 +295,19 @@ def model_distractor_forward_pass(
                     (self.n_ensemble_members, self.hidden_dim),
                     dtype=torch.float32, device=feature_contribs.device,
                 )
+                mask = torch.zeros_like(feature_utilities, dtype=torch.bool)
                 for i in range(self.n_ensemble_members):
                     feature_utilities[i, self.ensemble_input_ids[i]] = ensemble_input_utilities[i]
+                    mask[i, self.ensemble_input_ids[i]] = True
                 
                 # TODO: Also try max here or median???
-                feature_utilities = feature_utilities.mean(0)
                 
+                # Option 1:
+                feature_utilities = feature_utilities.sum(dim=0) / mask.sum(dim=0)
+                feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
                 
+                # Option 2:
+                # feature_utilities = feature_utilities.max(dim=0).values
                 
                 
                 
@@ -486,7 +492,7 @@ def prune_model(
     
     # Determine the indices to prune
     feature_utilities = model.feature_utilities.cpu().numpy()
-    feature_idxs_to_prune = np.argsort(feature_utilities.ravel())[:n_features_to_prune]
+    feature_idxs_to_prune = np.argsort(feature_utilities, stable=True)[:n_features_to_prune]
     
     ensemble_utilities = model.ensemble_utilities.cpu().numpy()
     # TODO: Implement ensemble pruning
@@ -582,6 +588,8 @@ def run_experiment(
         # Prune the model if necessary
         prune_results = prune_model(
             model, optimizer, distractor_tracker, pruning_state, cfg)
+        
+        print(model.feature_utilities[-6:])
         
         # Update pruning metrics
         total_features_pruned += prune_results['n_features_pruned']

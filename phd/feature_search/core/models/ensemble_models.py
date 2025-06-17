@@ -156,10 +156,34 @@ class EnsembleMLP(nn.Module):
         self.feature_utilities = torch.zeros(hidden_dim, dtype=torch.float32)
         
         # Maps the input features to each ensemble member, shape: (n_ensemble_members, ensemble_dim)
-        self.ensemble_input_ids = torch.stack([
-            torch.randperm(hidden_dim, generator=self.generator)[:ensemble_dim]
-            for _ in range(n_ensemble_members)
-        ])
+        
+        # self.ensemble_input_ids = torch.stack([
+        #     torch.randperm(hidden_dim, generator=self.generator)[:ensemble_dim]
+        #     for _ in range(n_ensemble_members)
+        # ])
+        
+        # TODO: Because this did so well, try all of them exactly once but in random other
+        #       Then try all of them exactly twice in two different random orders
+        # TODO: I think there is a bug here because this doesn't work but the arange does
+        #       Find and fix it
+        # self.ensemble_input_ids = torch.randperm(
+        #     hidden_dim, dtype=torch.long, generator=self.generator,
+        # ).reshape(n_ensemble_members, ensemble_dim)
+        
+        reverse = True
+        
+        if reverse:
+            # Definitely a bug because this doesn't do the same as the above
+            self.ensemble_input_ids = torch.arange(
+                n_ensemble_members * ensemble_dim - 1, -1, -1,
+                dtype=torch.long,
+            ).reshape(n_ensemble_members, ensemble_dim)
+        else:
+            self.ensemble_input_ids = torch.arange(
+                0, n_ensemble_members * ensemble_dim,
+                dtype=torch.long,
+            ).reshape(n_ensemble_members, ensemble_dim)
+        
 
         self.update_step = 0
 
@@ -172,10 +196,32 @@ class EnsembleMLP(nn.Module):
         
         Args:
             hidden_features: The hidden features from the input layer,
+                Shape: (batch_size, hidden_dim)
+                
+        Returns:
+            The input features for each ensemble member,
                 Shape: (batch_size, n_ensemble_members * ensemble_dim)
         """
         return hidden_features[:, self.ensemble_input_ids.ravel()]
     
+    def _convert_hidden_idxs_to_ensemble_idxs(self, hidden_idxs: List[int]) -> Tuple[List[int], List[int]]:
+        """Convert hidden dim indices to the indices of features used in the ensemble inputs.
+        
+        Args:
+            hidden_idxs: List of hidden dim indices
+        
+        Returns:
+            The indices of the ensemble inputs that use the hidden features,
+                Shape: (n_ensemble_members, ensemble_dim)
+        """
+        # Convert these hidden dim indices to their indices in the ensemble inputs to know which weights to reinitialize
+        hidden_features_mask = torch.zeros(self.hidden_dim, dtype=torch.bool, device=self.ensemble_input_ids.device)
+        hidden_features_mask[hidden_idxs] = True
+        prune_ensemble_inputs_mask = hidden_features_mask[self.ensemble_input_ids.ravel()]
+        prune_ensemble_inputs_idxs = prune_ensemble_inputs_mask.nonzero(as_tuple=False).squeeze(1)
+        ensemble_idxs, feature_idxs = np.unravel_index(
+            prune_ensemble_inputs_idxs, (self.n_ensemble_members, self.ensemble_dim))
+        return ensemble_idxs, feature_idxs
     
     def forward(
         self,
@@ -194,6 +240,7 @@ class EnsembleMLP(nn.Module):
             - Dictionary of input values for each layer
             - Dictionary of auxiliary information
         """
+        
         assert x.dim() == 2, "Input must be a 2D tensor"
         assert target is None or target.dim() == 2, "Target must be a 2D tensor"
         
@@ -274,13 +321,19 @@ class EnsembleMLP(nn.Module):
                         (self.n_ensemble_members, self.hidden_dim),
                         dtype=torch.float32, device=feature_contribs.device,
                     )
+                    mask = torch.zeros_like(feature_utilities, dtype=torch.bool)
                     for i in range(self.n_ensemble_members):
                         feature_utilities[i, self.ensemble_input_ids[i]] = ensemble_input_utilities[i]
+                        mask[i, self.ensemble_input_ids[i]] = True
                     
-                    # TODO: Also try max here
-                    feature_utilities = feature_utilities.mean(0)
+                    # TODO: Also try max here or median???
                     
+                    # Option 1:
+                    feature_utilities = feature_utilities.sum(dim=0) / mask.sum(dim=0)
+                    feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
                     
+                    # Option 2:
+                    # feature_utilities = feature_utilities.max(dim=0).values
                     
                     
                     
@@ -329,18 +382,17 @@ def _reinit_input_weights(model: EnsembleMLP, idxs: List[int], init_type: str):
         raise ValueError(f'Invalid weight initialization: {init_type}!')
 
 
-def _reinit_output_weights(model: EnsembleMLP, idxs: List[int], init_type: str):
+def _reinit_output_weights(model: EnsembleMLP, idxs: Tuple[List[int], List[int]], init_type: str):
     """Reinitialize the weights of the output layer after pruning.
     
     Args:
         model: The model to prune
-        prune_idxs: List of hidden units to prune
+        idxs: Tuple of (List of ensemble indices, List of feature indices)
         init_type: The type of initialization to use {zeros, kaiming_uniform}
     """
     # This is how linear layers are initialized in PyTorch
     weight_data = model.prediction_layer.weight.data
-    
-    ensemble_idxs, feature_idxs = np.unravel_index(idxs, (model.n_ensemble_members, model.ensemble_dim))
+    ensemble_idxs, feature_idxs = idxs
     
     if init_type == 'zeros':
         model.prediction_layer.weight.data[ensemble_idxs, :, feature_idxs] = torch.zeros_like(
@@ -374,11 +426,17 @@ def _reset_input_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idx
         optim_state['beta'][idxs, :] = math.log(optimizer.init_lr)
 
 
-def _reset_output_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idxs: np.ndarray):
-    """Reset the optimizer state of the output layer after pruning."""
+def _reset_output_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idxs: Tuple[List[int], List[int]]):
+    """Reset the optimizer state of the output layer after pruning.
+    
+    Args:
+        model: The model to prune
+        optimizer: The optimizer that holds the optimization state for the given model
+        idxs: Tuple of (List of ensemble indices, List of feature indices)
+    """
     optim_state = optimizer.state[model.prediction_layer.weight]
     
-    ensemble_idxs, feature_idxs = np.unravel_index(idxs, (model.n_ensemble_members, model.ensemble_dim))
+    ensemble_idxs, feature_idxs = idxs
     
     for key, value in optim_state.items():
         if value.shape == model.prediction_layer.weight.shape:
@@ -413,11 +471,13 @@ def prune_features(
     if prune_idxs is None or len(prune_idxs) == 0:
         return
     
+    ensemble_prune_idxs = model._convert_hidden_idxs_to_ensemble_idxs(prune_idxs)
+    
     _reinit_input_weights(model, prune_idxs, input_init_type)
-    _reinit_output_weights(model, prune_idxs, output_init_type)
+    _reinit_output_weights(model, ensemble_prune_idxs, output_init_type)
     
     _reset_input_optim_state(model, optimizer, prune_idxs)
-    _reset_output_optim_state(model, optimizer, prune_idxs)
+    _reset_output_optim_state(model, optimizer, ensemble_prune_idxs)
     
     median_utility = model.feature_utilities.median()
-    model.feature_utilities.ravel()[prune_idxs] = median_utility
+    model.feature_utilities[prune_idxs] = median_utility
