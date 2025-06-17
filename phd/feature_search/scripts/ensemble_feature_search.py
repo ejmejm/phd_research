@@ -589,8 +589,6 @@ def run_experiment(
         prune_results = prune_model(
             model, optimizer, distractor_tracker, pruning_state, cfg)
         
-        print(model.feature_utilities[-6:])
-        
         # Update pruning metrics
         total_features_pruned += prune_results['n_features_pruned']
         total_ensembles_pruned += prune_results['n_ensembles_pruned']

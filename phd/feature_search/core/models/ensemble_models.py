@@ -157,32 +157,33 @@ class EnsembleMLP(nn.Module):
         
         # Maps the input features to each ensemble member, shape: (n_ensemble_members, ensemble_dim)
         
-        # self.ensemble_input_ids = torch.stack([
-        #     torch.randperm(hidden_dim, generator=self.generator)[:ensemble_dim]
-        #     for _ in range(n_ensemble_members)
-        # ])
+        self.ensemble_input_ids = torch.stack([
+            torch.randperm(hidden_dim, generator=self.generator)[:ensemble_dim]
+            for _ in range(n_ensemble_members)
+        ])
         
         # TODO: Because this did so well, try all of them exactly once but in random other
         #       Then try all of them exactly twice in two different random orders
         # TODO: I think there is a bug here because this doesn't work but the arange does
         #       Find and fix it
-        # self.ensemble_input_ids = torch.randperm(
-        #     hidden_dim, dtype=torch.long, generator=self.generator,
-        # ).reshape(n_ensemble_members, ensemble_dim)
         
-        reverse = True
+        # reverse = True
         
-        if reverse:
-            # Definitely a bug because this doesn't do the same as the above
-            self.ensemble_input_ids = torch.arange(
-                n_ensemble_members * ensemble_dim - 1, -1, -1,
-                dtype=torch.long,
-            ).reshape(n_ensemble_members, ensemble_dim)
-        else:
-            self.ensemble_input_ids = torch.arange(
-                0, n_ensemble_members * ensemble_dim,
-                dtype=torch.long,
-            ).reshape(n_ensemble_members, ensemble_dim)
+        # if reverse:
+        #     # Definitely a bug because this doesn't do the same as the above
+        #     self.ensemble_input_ids = torch.arange(
+        #         n_ensemble_members * ensemble_dim - 1, -1, -1,
+        #         dtype=torch.long,
+        #     ).reshape(n_ensemble_members, ensemble_dim)
+        # else:
+        #     self.ensemble_input_ids = torch.arange(
+        #         0, n_ensemble_members * ensemble_dim,
+        #         dtype=torch.long,
+        #     ).reshape(n_ensemble_members, ensemble_dim)
+    
+        # self.ensemble_input_ids = torch.cat([torch.randperm(
+        #     40 * ensemble_dim, dtype=torch.long, generator=self.generator,
+        # ).reshape(40, ensemble_dim) for _ in range(5)], dim=0)
         
 
         self.update_step = 0
