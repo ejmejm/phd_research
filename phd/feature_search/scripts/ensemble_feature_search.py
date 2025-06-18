@@ -253,11 +253,8 @@ def model_distractor_forward_pass(
         # Update utility
         if update_state:
             with torch.no_grad():
-                # Measure how much each ensemble is reducing the loss
-                # TODO: Given the signed utility didn't work well for features here,
-                #       maybe just try the negative of the loss per ensemble for ensemble utilities?
-                ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(ensemble_errors)
-                ensemble_utilities = ensemble_utilities.sum(dim=2).mean(0) # Shape: (n_ensemble_members,)
+                # Measure utility as a proxy for how much this ensemble is reducing the loss
+                ensemble_utilities = self._calculate_ensemble_utilities(ensemble_errors, target)
                 
                 # Need to update this if there is more than one prediction
                 assert self.prediction_layer.weight.shape[1] == 1, \
@@ -310,6 +307,7 @@ def prepare_components(cfg: DictConfig):
         utility_decay = cfg.feature_recycling.utility_decay,
         prediction_mode = cfg.model.prediction_mode,
         feature_utility_mode = cfg.model.feature_utility_mode,
+        ensemble_utility_mode = cfg.model.ensemble_utility_mode,
         ensemble_feature_selection_method = cfg.model.ensemble_feature_selection_method,
         seed = seed_from_string(base_seed, 'model'),
     )

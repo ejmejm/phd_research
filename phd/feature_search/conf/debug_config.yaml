@@ -2,13 +2,17 @@ defaults:
 - ensemble_feature_search
 - _self_
 
-wandb: true
+wandb: false
 comet_ml: false
 
 model:
-  hidden_dim: 20_480
-  ensemble_dim: 512
-  n_ensemble_members: 200
+  hidden_dim: 10 # 20_480
+  ensemble_dim: 3 # 512
+  n_ensemble_members: 2 # 40
+  prediction_mode: best_ensemble # {mean, mean_top_half, median, median_top_half, best_ensemble}
+  feature_utility_mode: best # {mean, median, best}
+  ensemble_utility_mode: objective_improvement # {objective_improvement, negative_loss}
+  ensemble_feature_selection_method: random # {random, inverse_frequency}
 
 task:
   distractor_chance: 0.0
@@ -16,7 +20,7 @@ task:
 
 feature_recycling:
   recycle_rate: 0.005
-  ensemble_recycle_rate: 0.005
+  ensemble_recycle_rate: 0.0 # 0.005
 
 train:
   total_steps: 200_000

@@ -105,6 +105,7 @@ class EnsembleMLP(nn.Module):
         utility_decay: float = 0.99,
         prediction_mode: str = 'mean',
         feature_utility_mode: str = 'mean',
+        ensemble_utility_mode: str = 'objective_improvement',
         ensemble_feature_selection_method: str = 'random',
         seed: Optional[int] = None,
     ):
@@ -122,6 +123,7 @@ class EnsembleMLP(nn.Module):
             utility_decay: Decay rate for the utility tracking
             prediction_mode: Mode for making predictions {mean, mean_top_half, median, median_top_half, max}
             feature_utility_mode: Mode for calculating feature utilities {mean, median, best}
+            ensemble_utility_mode: Mode for calculating ensemble utilities {objective_improvement, negative_loss}
             ensemble_feature_selection_method: Method for selecting features for the ensembles {random, inverse_frequency}
             seed: Optional random seed for reproducibility
         """
@@ -132,6 +134,8 @@ class EnsembleMLP(nn.Module):
             f"Invalid prediction mode: {prediction_mode}!"
         assert feature_utility_mode in ['mean', 'median', 'best'], \
             f"Invalid feature utility mode: {feature_utility_mode}!"
+        assert ensemble_utility_mode in ['objective_improvement', 'negative_loss'], \
+            f"Invalid ensemble utility mode: {ensemble_utility_mode}!"
         
         super().__init__()
         self.input_dim = input_dim
@@ -143,6 +147,7 @@ class EnsembleMLP(nn.Module):
         self.utility_decay = utility_decay
         self.prediction_mode = prediction_mode
         self.feature_utility_mode = feature_utility_mode
+        self.ensemble_utility_mode = ensemble_utility_mode
         self.ensemble_feature_selection_method = ensemble_feature_selection_method
         
         # Create a generator if seed is provided
@@ -296,7 +301,35 @@ class EnsembleMLP(nn.Module):
     
         else:
             raise ValueError(f"Invalid prediction mode: {self.prediction_mode}!")
+    
+    def _calculate_ensemble_utilities(self, ensemble_errors: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Calculate the utilities for each ensemble.
         
+        Args:
+            ensemble_errors: The errors for each ensemble,
+                Shape: (batch_size, n_ensemble_members, output_dim)
+            target: The target tensor,
+                Shape: (batch_size, output_dim)
+        
+        Returns:
+            The utilities for each ensemble,
+                Shape: (n_ensemble_members,)
+        """
+        if self.ensemble_utility_mode == 'objective_improvement':
+        # TODO: Given the signed utility didn't work well for features here,
+        #       maybe just try the negative of the loss per ensemble for ensemble utilities?
+            ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(ensemble_errors)
+            ensemble_utilities = ensemble_utilities.sum(dim=2).mean(0) # Shape: (n_ensemble_members,)
+            
+        elif self.ensemble_utility_mode == 'negative_loss':
+            ensemble_utilities = -torch.abs(ensemble_errors)
+            ensemble_utilities = ensemble_utilities.sum(dim=2).mean(0) # Shape: (n_ensemble_members,)
+            
+        else:
+            raise ValueError(f"Invalid ensemble utility mode: {self.ensemble_utility_mode}!")
+        
+        return ensemble_utilities
+
     def _calculate_feature_utilities(self, feature_contribs: torch.Tensor) -> torch.Tensor:
         """Calculate the utilities for each feature.
         
@@ -401,17 +434,14 @@ class EnsembleMLP(nn.Module):
             # Update utility
             if update_state:
                 with torch.no_grad():
-                    # Measure how much each ensemble is reducing the loss
-                    # TODO: Given the signed utility didn't work well for features here,
-                    #       maybe just try the negative of the loss per ensemble for ensemble utilities?
-                    ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(ensemble_errors)
-                    ensemble_utilities = ensemble_utilities.sum(dim=2).mean(0) # Shape: (n_ensemble_members,)
+                    # Measure utility as a proxy for how much this ensemble is reducing the loss
+                    ensemble_utilities = self._calculate_ensemble_utilities(ensemble_errors, target)
                     
                     # Need to update this if there is more than one prediction
                     assert self.prediction_layer.weight.shape[1] == 1, \
                         "Only one prediction is supported for now!"
                     
-                    # Estimate how much each feature is reducing the loss within its ensemble as a proxy for utility
+                    # Measure utility as a proxy estimate for how much each feature is reducing the loss within its ensemble
                     # Features shape: (batch, n_ensemble_members, ensemble_dim)
                     # Weights shape: (n_ensemble_members, out_dim, ensemble_dim) -> (1, n_ensemble_members, ensemble_dim)
                     feature_contribs = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
