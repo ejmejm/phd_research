@@ -430,10 +430,10 @@ def prune_model(
     # feature_idxs_to_prune = torch.argsort(model.feature_utilities)[:n_features_to_prune]
     
     # ensemble_idxs_to_prune = torch.argsort(model.ensemble_utilities)[:n_ensembles_to_prune]
-    feature_utilities = model.feature_utilities.cpu().numpy()
+    feature_utilities = model.feature_utilities #.cpu().numpy()
     feature_idxs_to_prune = torch.argsort(feature_utilities)[:n_features_to_prune]
     
-    ensemble_utilities = model.ensemble_utilities.cpu().numpy()
+    ensemble_utilities = model.ensemble_utilities #.cpu().numpy()
     ensemble_idxs_to_prune = torch.argsort(ensemble_utilities)[:n_ensembles_to_prune]
     
     # Prune the features and ensembles

@@ -181,9 +181,10 @@ class EnsembleMLP(nn.Module):
             'feature_utilities', torch.zeros(hidden_dim, dtype=torch.float32))
         
         # Maps the input features to each ensemble member, shape: (n_ensemble_members, ensemble_dim)
-        
-        self.ensemble_input_ids = torch.full(
-            (n_ensemble_members, ensemble_dim), fill_value=-1, dtype=torch.long)
+        self.register_buffer(
+            'ensemble_input_ids', 
+            torch.full((n_ensemble_members, ensemble_dim), fill_value=-1, dtype=torch.long)
+        )
 
         for i in range(n_ensemble_members):
             self._reinit_ensemble_input_ids(i)
@@ -198,9 +199,37 @@ class EnsembleMLP(nn.Module):
 
         # Trace the target to allow for normalizing the utilities if necessary
         self.register_buffer('target_trace', torch.zeros(1, dtype=torch.float32))
+    
+    def to(self, *args, **kwargs):
+        """Override .to() to handle generator device transfers."""
+        # Get the target device from args/kwargs
+        device = None
+        if len(args) > 0:
+            device = args[0]
+        elif 'device' in kwargs:
+            device = kwargs['device']
         
-    def get_device(self):
-        return self.ensemble_utilities.device
+        # Call parent .to() first
+        model = super().to(*args, **kwargs)
+        
+        # Only handle device changes if generator exists and device is specified
+        if model.generator is not None and device is not None:
+            current_device = next(model.parameters()).device
+            
+            # Only recreate generator if moving between CPU/GPU
+            if (current_device.type == 'cuda' and device.type == 'cpu') or \
+               (current_device.type == 'cpu' and device.type == 'cuda'):
+                
+                # Save state of old generator
+                state = model.generator.get_state()
+                
+                # Create new generator on target device
+                model.generator = torch.Generator(device=device)
+                
+                # Restore state to new generator
+                model.generator.set_state(state)
+                
+        return model
     
     def _reinit_ensemble_input_ids(self, ensemble_idx: int):
         """Reinitialize the input ids for a given ensemble.
@@ -210,18 +239,20 @@ class EnsembleMLP(nn.Module):
         """
         if self.ensemble_feature_selection_method == 'random':
             self.ensemble_input_ids[ensemble_idx] = torch.randperm(
-                self.hidden_dim, generator=self.generator)[:self.ensemble_dim].to(self.get_device())
+                self.hidden_dim, generator=self.generator)[:self.ensemble_dim].to(self.ensemble_input_ids.device)
             
         elif self.ensemble_feature_selection_method == 'inverse_frequency':
-            feature_frequencies = torch.zeros(self.hidden_dim)
+            feature_frequencies = torch.zeros(self.hidden_dim, device=self.ensemble_input_ids.device)
             flat_ensemble_input_ids = self.ensemble_input_ids.ravel()
-            for hidden_idx in flat_ensemble_input_ids:
-                if hidden_idx >= 0:
-                    feature_frequencies[hidden_idx] += 1
+            
+            # Only consider valid indices (>= 0) for vectorized counting
+            valid_indices = flat_ensemble_input_ids[flat_ensemble_input_ids >= 0]
+            if len(valid_indices) > 0:
+                feature_frequencies.scatter_add_(0, valid_indices, torch.ones_like(valid_indices, dtype=torch.float32))
                     
             feature_probs = softmax(-feature_frequencies, dim=0)
             self.ensemble_input_ids[ensemble_idx] = torch.multinomial(
-                feature_probs, self.ensemble_dim, generator=self.generator).to(self.get_device())
+                feature_probs, self.ensemble_dim, generator=self.generator).to(self.ensemble_input_ids.device)
         
         else:
             raise ValueError(f"Invalid ensemble feature selection method: {self.ensemble_feature_selection_method}!")
@@ -254,8 +285,9 @@ class EnsembleMLP(nn.Module):
         hidden_features_mask[hidden_idxs] = True
         prune_ensemble_inputs_mask = hidden_features_mask[self.ensemble_input_ids.ravel()]
         prune_ensemble_inputs_idxs = prune_ensemble_inputs_mask.nonzero(as_tuple=False).squeeze(1)
-        ensemble_idxs, feature_idxs = np.unravel_index(
-            prune_ensemble_inputs_idxs, (self.n_ensemble_members, self.ensemble_dim))
+        # Use torch.div for better GPU compatibility instead of np.unravel_index
+        ensemble_idxs = torch.div(prune_ensemble_inputs_idxs, self.ensemble_dim, rounding_mode='floor')
+        feature_idxs = prune_ensemble_inputs_idxs % self.ensemble_dim
         return ensemble_idxs, feature_idxs
     
     def _merge_predictions(self, ensemble_predictions: torch.Tensor) -> torch.Tensor:
@@ -457,7 +489,7 @@ class EnsembleMLP(nn.Module):
         return prediction, param_inputs, aux
 
 
-def _reinit_input_weights(model: EnsembleMLP, idxs: List[int], init_type: str):
+def _reinit_input_weights(model: EnsembleMLP, idxs: torch.Tensor, init_type: str):
     """Reinitialize the weights of the input layer after pruning.
     
     Args:
@@ -469,19 +501,19 @@ def _reinit_input_weights(model: EnsembleMLP, idxs: List[int], init_type: str):
         weight_data = model.input_layer.weight.data
         model.input_layer.weight.data[idxs] = n_kaiming_uniform(
             weight_data, weight_data[idxs].shape, a=math.sqrt(5), generator=model.generator,
-        ).to(model.get_device())
+        ).to(weight_data.device)
     elif init_type == 'binary':
         weight_data = model.input_layer.weight.data
         model.input_layer.weight.data[idxs] = torch.randint(
             0, 2,
             weight_data[idxs].shape,
             generator = model.generator
-        ).to(model.get_device()).float() * 2 - 1
+        ).to(weight_data.device).float() * 2 - 1
     else:
         raise ValueError(f'Invalid weight initialization: {init_type}!')
 
 
-def _reinit_output_weights(model: EnsembleMLP, idxs: Tuple[List[int], List[int]], init_type: str):
+def _reinit_output_weights(model: EnsembleMLP, idxs: Tuple[torch.Tensor, torch.Tensor], init_type: str):
     """Reinitialize the weights of the output layer after pruning.
     
     Args:
@@ -502,12 +534,12 @@ def _reinit_output_weights(model: EnsembleMLP, idxs: Tuple[List[int], List[int]]
             weight_data[ensemble_idxs, :, feature_idxs].shape,
             a = math.sqrt(5),
             generator = model.generator,
-        ).to(model.get_device())
+        ).to(weight_data.device)
     else:
         raise ValueError(f'Invalid weight initialization: {init_type}!')
 
 
-def _reset_input_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idxs: List[int]):
+def _reset_input_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idxs: torch.Tensor):
     """Reset the optimizer state of the input layer after pruning."""
     optim_state = optimizer.state[model.input_layer.weight]
         
@@ -525,7 +557,7 @@ def _reset_input_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idx
         optim_state['beta'][idxs, :] = math.log(optimizer.init_lr)
 
 
-def _reset_output_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idxs: Tuple[List[int], List[int]]):
+def _reset_output_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, idxs: Tuple[torch.Tensor, torch.Tensor]):
     """Reset the optimizer state of the output layer after pruning.
     
     Args:
@@ -615,8 +647,7 @@ def prune_ensembles(
     
     # Randomize input ids for the ensembles that are being pruned
     for ensemble_idx in prune_idxs:
-        model.ensemble_input_ids[ensemble_idx] = torch.randperm(
-            model.hidden_dim, generator=model.generator)[:model.ensemble_dim].to(model.get_device())
+        model._reinit_ensemble_input_ids(ensemble_idx)
     
     # Reset utilities for the ensembles that are being pruned
     median_utility = model.ensemble_utilities.median()
