@@ -128,12 +128,11 @@ class DistractorTracker():
         self.distractor_values = None  # Will be initialized on first use
     
     @torch.no_grad()
-    def process_new_features(self, new_feature_idxs: List[int]):
+    def process_new_features(self, new_feature_idxs: torch.Tensor):
         if len(new_feature_idxs) == 0:
             return
 
-        if not all(0 <= idx < self.n_features for idx in new_feature_idxs):
-            raise ValueError(f"Feature indices must be between 0 and {self.n_features-1}")
+        assert torch.all(new_feature_idxs >= 0) and torch.all(new_feature_idxs < self.n_features)
 
         # Use torch_rng for random sampling
         new_distractor_mask = torch.rand(
@@ -426,12 +425,16 @@ def prune_model(
     pruning_state.feature_prune_accumulator -= n_features_to_prune
     pruning_state.ensemble_prune_accumulator -= n_ensembles_to_prune
     
-    # Determine the indices to prune
+    
+    # # Determine the indices to prune
+    # feature_idxs_to_prune = torch.argsort(model.feature_utilities)[:n_features_to_prune]
+    
+    # ensemble_idxs_to_prune = torch.argsort(model.ensemble_utilities)[:n_ensembles_to_prune]
     feature_utilities = model.feature_utilities.cpu().numpy()
-    feature_idxs_to_prune = np.argsort(feature_utilities, stable=True)[:n_features_to_prune]
+    feature_idxs_to_prune = torch.argsort(feature_utilities)[:n_features_to_prune]
     
     ensemble_utilities = model.ensemble_utilities.cpu().numpy()
-    ensemble_idxs_to_prune = np.argsort(ensemble_utilities, stable=True)[:n_ensembles_to_prune]
+    ensemble_idxs_to_prune = torch.argsort(ensemble_utilities)[:n_ensembles_to_prune]
     
     # Prune the features and ensembles
     prune_ensemble_features(
@@ -469,7 +472,7 @@ def run_experiment(
     ):
     # Distractor setup
     n_hidden_units = model.input_layer.out_features
-    distractor_tracker.process_new_features(list(range(n_hidden_units)))
+    distractor_tracker.process_new_features(torch.arange(n_hidden_units))
 
     # Training loop
     step = 0

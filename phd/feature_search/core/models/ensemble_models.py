@@ -239,7 +239,7 @@ class EnsembleMLP(nn.Module):
         """
         return hidden_features[:, self.ensemble_input_ids.ravel()]
     
-    def _convert_hidden_idxs_to_ensemble_idxs(self, hidden_idxs: List[int]) -> Tuple[List[int], List[int]]:
+    def _convert_hidden_idxs_to_ensemble_idxs(self, hidden_idxs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Convert hidden dim indices to the indices of features used in the ensemble inputs.
         
         Args:
@@ -554,7 +554,7 @@ def _reset_output_optim_state(model: EnsembleMLP, optimizer: optim.Optimizer, id
 def prune_features(
     model: EnsembleMLP,
     optimizer: optim.Optimizer,
-    prune_idxs: List[int],
+    prune_idxs: torch.Tensor,
     input_init_type: str = 'binary',
     output_init_type: str = 'zeros',
 ):
