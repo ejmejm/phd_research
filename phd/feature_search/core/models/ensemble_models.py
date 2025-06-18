@@ -136,6 +136,8 @@ class EnsembleMLP(nn.Module):
             f"Invalid feature utility mode: {feature_utility_mode}!"
         assert ensemble_utility_mode in ['objective_improvement', 'negative_loss'], \
             f"Invalid ensemble utility mode: {ensemble_utility_mode}!"
+        assert ensemble_dim <= hidden_dim, \
+            f"Ensemble dimension must be less than or equal to hidden dimension!"
         
         super().__init__()
         self.input_dim = input_dim
@@ -173,8 +175,10 @@ class EnsembleMLP(nn.Module):
         if n_frozen_layers > 2:
             raise ValueError("EnsembleMLP only supports up to 2 frozen layers!")
         
-        self.ensemble_utilities = torch.zeros(n_ensemble_members, dtype=torch.float32)
-        self.feature_utilities = torch.zeros(hidden_dim, dtype=torch.float32)
+        self.register_buffer(
+            'ensemble_utilities', torch.zeros(n_ensemble_members, dtype=torch.float32))
+        self.register_buffer(
+            'feature_utilities', torch.zeros(hidden_dim, dtype=torch.float32))
         
         # Maps the input features to each ensemble member, shape: (n_ensemble_members, ensemble_dim)
         
@@ -194,6 +198,9 @@ class EnsembleMLP(nn.Module):
 
         # Trace the target to allow for normalizing the utilities if necessary
         self.register_buffer('target_trace', torch.zeros(1, dtype=torch.float32))
+        
+    def get_device(self):
+        return self.ensemble_utilities.device
     
     def _reinit_ensemble_input_ids(self, ensemble_idx: int):
         """Reinitialize the input ids for a given ensemble.
@@ -203,7 +210,7 @@ class EnsembleMLP(nn.Module):
         """
         if self.ensemble_feature_selection_method == 'random':
             self.ensemble_input_ids[ensemble_idx] = torch.randperm(
-                self.hidden_dim, generator=self.generator)[:self.ensemble_dim]
+                self.hidden_dim, generator=self.generator)[:self.ensemble_dim].to(self.get_device())
             
         elif self.ensemble_feature_selection_method == 'inverse_frequency':
             feature_frequencies = torch.zeros(self.hidden_dim)
@@ -214,7 +221,7 @@ class EnsembleMLP(nn.Module):
                     
             feature_probs = softmax(-feature_frequencies, dim=0)
             self.ensemble_input_ids[ensemble_idx] = torch.multinomial(
-                feature_probs, self.ensemble_dim, generator=self.generator)
+                feature_probs, self.ensemble_dim, generator=self.generator).to(self.get_device())
         
         else:
             raise ValueError(f"Invalid ensemble feature selection method: {self.ensemble_feature_selection_method}!")
@@ -336,13 +343,16 @@ class EnsembleMLP(nn.Module):
         
         # Note that this could result in a very sparse tensor and use a lot of resources as we scale
         # I may need a more efficient way to do this in the future
+        
+        # More efficient replacement for the loop
+        ensemble_indices = torch.arange(self.n_ensemble_members, device=feature_contribs.device)
+        ensemble_indices = ensemble_indices.unsqueeze(1).expand(-1, self.ensemble_dim)
         feature_utilities = torch.full(
             (self.n_ensemble_members, self.hidden_dim),
             fill_value=torch.nan,
             dtype=torch.float32, device=feature_contribs.device,
         )
-        for i in range(self.n_ensemble_members):
-            feature_utilities[i, self.ensemble_input_ids[i]] = ensemble_input_utilities[i]
+        feature_utilities[ensemble_indices, self.ensemble_input_ids] = ensemble_input_utilities
         
         if self.feature_utility_mode == 'mean':
             feature_utilities = feature_utilities.nanmean(dim=0)
@@ -458,15 +468,15 @@ def _reinit_input_weights(model: EnsembleMLP, idxs: List[int], init_type: str):
     if init_type == 'kaiming_uniform':
         weight_data = model.input_layer.weight.data
         model.input_layer.weight.data[idxs] = n_kaiming_uniform(
-            weight_data, weight_data[idxs].shape, a=math.sqrt(5), generator=model.generator)
+            weight_data, weight_data[idxs].shape, a=math.sqrt(5), generator=model.generator,
+        ).to(model.get_device())
     elif init_type == 'binary':
         weight_data = model.input_layer.weight.data
         model.input_layer.weight.data[idxs] = torch.randint(
             0, 2,
             weight_data[idxs].shape,
-            device = model.input_layer.weight.device,
             generator = model.generator
-        ).float() * 2 - 1
+        ).to(model.get_device()).float() * 2 - 1
     else:
         raise ValueError(f'Invalid weight initialization: {init_type}!')
 
@@ -492,7 +502,7 @@ def _reinit_output_weights(model: EnsembleMLP, idxs: Tuple[List[int], List[int]]
             weight_data[ensemble_idxs, :, feature_idxs].shape,
             a = math.sqrt(5),
             generator = model.generator,
-        )
+        ).to(model.get_device())
     else:
         raise ValueError(f'Invalid weight initialization: {init_type}!')
 
@@ -606,7 +616,7 @@ def prune_ensembles(
     # Randomize input ids for the ensembles that are being pruned
     for ensemble_idx in prune_idxs:
         model.ensemble_input_ids[ensemble_idx] = torch.randperm(
-            model.hidden_dim, generator=model.generator)[:model.ensemble_dim]
+            model.hidden_dim, generator=model.generator)[:model.ensemble_dim].to(model.get_device())
     
     # Reset utilities for the ensembles that are being pruned
     median_utility = model.ensemble_utilities.median()
