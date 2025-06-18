@@ -243,9 +243,9 @@ def model_distractor_forward_pass(
     
     prediction = self._merge_predictions(ensemble_predictions) # (batch_size, output_dim)
     
-    # Straight-through estimator for each ensemble member
-    prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
-    prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
+    # # Straight-through estimator for each ensemble member
+    # prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
+    # prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
     
     # Calculate losses if applicable
     if target is not None:
@@ -267,53 +267,12 @@ def model_distractor_forward_pass(
                 # Need to update this if there is more than one prediction
                 assert self.prediction_layer.weight.shape[1] == 1, \
                     "Only one prediction is supported for now!"
-                
-                # Measure how much each feature is reducing the loss within its ensemble
+                    
+                # Estimate how much each feature is reducing the loss within its ensemble as a proxy for utility
                 # Features shape: (batch, n_ensemble_members, ensemble_dim)
                 # Weights shape: (n_ensemble_members, out_dim, ensemble_dim) -> (1, n_ensemble_members, ensemble_dim)
                 feature_contribs = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
-                
-                # Calculate how much much each feature individually contributed to decreasing the loss
-                # (e.g. if the feature was 0, how much worse would the error be?)
-                # Shape: (batch_size, n_ensemble_members, ensemble_dim)
-                
-                # Signed utility version, did not work well in testing:
-                # feature_utilities = (
-                #     torch.abs(prediction_errors + feature_contribs) - \
-                #     torch.abs(prediction_errors)
-                # )
-                
-                # CBP utility version:
-                # TODO: Back compute utilities to their original features
-                # feature_utilities = torch.abs(feature_contribs).mean(dim=0).ravel()
-                
-                
-                
-                
-                # Shape: (batch_size, n_ensemble_members, ensemble_dim) -> (n_ensemble_members, ensemble_dim)
-                ensemble_input_utilities = torch.abs(feature_contribs).mean(dim=0)
-                feature_utilities = torch.zeros(
-                    (self.n_ensemble_members, self.hidden_dim),
-                    dtype=torch.float32, device=feature_contribs.device,
-                )
-                mask = torch.zeros_like(feature_utilities, dtype=torch.bool)
-                for i in range(self.n_ensemble_members):
-                    feature_utilities[i, self.ensemble_input_ids[i]] = ensemble_input_utilities[i]
-                    mask[i, self.ensemble_input_ids[i]] = True
-                
-                # TODO: Also try max here or median???
-                
-                # Option 1:
-                feature_utilities = feature_utilities.sum(dim=0) / mask.sum(dim=0)
-                feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
-                
-                # Option 2:
-                # feature_utilities = feature_utilities.max(dim=0).values
-                
-                
-                
-                # feature_utilities[self.ensemble_input_ids.ravel()] = ensemble_input_utilities
-                
+                feature_utilities = self._calculate_feature_utilities(feature_contribs) # Output shape: (hidden_dim,)
                 
                 self.ensemble_utilities = (
                     self.utility_decay * self.ensemble_utilities +
@@ -355,6 +314,7 @@ def prepare_components(cfg: DictConfig):
         n_frozen_layers = cfg.model.n_frozen_layers,
         utility_decay = cfg.feature_recycling.utility_decay,
         prediction_mode = cfg.model.prediction_mode,
+        feature_utility_mode = cfg.model.feature_utility_mode,
         ensemble_feature_selection_method = cfg.model.ensemble_feature_selection_method,
         seed = seed_from_string(base_seed, 'model'),
     )

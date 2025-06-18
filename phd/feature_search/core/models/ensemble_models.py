@@ -104,6 +104,7 @@ class EnsembleMLP(nn.Module):
         n_frozen_layers: int = 0,
         utility_decay: float = 0.99,
         prediction_mode: str = 'mean',
+        feature_utility_mode: str = 'mean',
         ensemble_feature_selection_method: str = 'random',
         seed: Optional[int] = None,
     ):
@@ -120,6 +121,7 @@ class EnsembleMLP(nn.Module):
             n_frozen_layers: Number of frozen layers
             utility_decay: Decay rate for the utility tracking
             prediction_mode: Mode for making predictions {mean, mean_top_half, median, median_top_half, max}
+            feature_utility_mode: Mode for calculating feature utilities {mean, median, best}
             ensemble_feature_selection_method: Method for selecting features for the ensembles {random, inverse_frequency}
             seed: Optional random seed for reproducibility
         """
@@ -128,6 +130,8 @@ class EnsembleMLP(nn.Module):
             f"Invalid ensemble feature selection method: {ensemble_feature_selection_method}!"
         assert prediction_mode in ['mean', 'mean_top_half', 'median', 'median_top_half', 'best_ensemble'], \
             f"Invalid prediction mode: {prediction_mode}!"
+        assert feature_utility_mode in ['mean', 'median', 'best'], \
+            f"Invalid feature utility mode: {feature_utility_mode}!"
         
         super().__init__()
         self.input_dim = input_dim
@@ -138,6 +142,7 @@ class EnsembleMLP(nn.Module):
         self.n_frozen_layers = n_frozen_layers
         self.utility_decay = utility_decay
         self.prediction_mode = prediction_mode
+        self.feature_utility_mode = feature_utility_mode
         self.ensemble_feature_selection_method = ensemble_feature_selection_method
         
         # Create a generator if seed is provided
@@ -291,6 +296,53 @@ class EnsembleMLP(nn.Module):
     
         else:
             raise ValueError(f"Invalid prediction mode: {self.prediction_mode}!")
+        
+    def _calculate_feature_utilities(self, feature_contribs: torch.Tensor) -> torch.Tensor:
+        """Calculate the utilities for each feature.
+        
+        Args:
+            feature_contribs: The contributions of each feature to the predictions,
+                Shape: (batch_size, n_ensemble_members, ensemble_dim)
+        
+        Returns:
+            The utilities for each feature,
+                Shape: (hidden_dim,)
+        """
+        # Signed utility version, did not work well in testing:
+        # feature_utilities = (
+        #     torch.abs(prediction_errors + feature_contribs) - \
+        #     torch.abs(prediction_errors)
+        # )
+        
+        # Shape: (batch_size, n_ensemble_members, ensemble_dim) -> (n_ensemble_members, ensemble_dim)
+        ensemble_input_utilities = torch.abs(feature_contribs).mean(dim=0)
+        
+        # Note that this could result in a very sparse tensor and use a lot of resources as we scale
+        # I may need a more efficient way to do this in the future
+        feature_utilities = torch.full(
+            (self.n_ensemble_members, self.hidden_dim),
+            fill_value=torch.nan,
+            dtype=torch.float32, device=feature_contribs.device,
+        )
+        for i in range(self.n_ensemble_members):
+            feature_utilities[i, self.ensemble_input_ids[i]] = ensemble_input_utilities[i]
+        
+        if self.feature_utility_mode == 'mean':
+            feature_utilities = feature_utilities.nanmean(dim=0)
+            feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
+            
+        elif self.feature_utility_mode == 'median':
+            feature_utilities = feature_utilities.nanmedian(dim=0).values
+            feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
+            
+        elif self.feature_utility_mode == 'best':
+            feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
+            feature_utilities = feature_utilities.max(dim=0).values
+            
+        else:
+            raise ValueError(f"Invalid feature utility mode: {self.feature_utility_mode}!")
+        
+        return feature_utilities
     
     def forward(
         self,
@@ -362,52 +414,11 @@ class EnsembleMLP(nn.Module):
                     assert self.prediction_layer.weight.shape[1] == 1, \
                         "Only one prediction is supported for now!"
                     
-                    # Measure how much each feature is reducing the loss within its ensemble
+                    # Estimate how much each feature is reducing the loss within its ensemble as a proxy for utility
                     # Features shape: (batch, n_ensemble_members, ensemble_dim)
                     # Weights shape: (n_ensemble_members, out_dim, ensemble_dim) -> (1, n_ensemble_members, ensemble_dim)
                     feature_contribs = ensemble_input_features * self.prediction_layer.weight.squeeze(1).unsqueeze(0)
-                    
-                    # Calculate how much much each feature individually contributed to decreasing the loss
-                    # (e.g. if the feature was 0, how much worse would the error be?)
-                    # Shape: (batch_size, n_ensemble_members, ensemble_dim)
-                    
-                    # Signed utility version, did not work well in testing:
-                    # feature_utilities = (
-                    #     torch.abs(prediction_errors + feature_contribs) - \
-                    #     torch.abs(prediction_errors)
-                    # )
-                    
-                    # CBP utility version:
-                    # TODO: Back compute utilities to their original features
-                    # feature_utilities = torch.abs(feature_contribs).mean(dim=0).ravel()
-                    
-                    
-                    
-                    
-                    # Shape: (batch_size, n_ensemble_members, ensemble_dim) -> (n_ensemble_members, ensemble_dim)
-                    ensemble_input_utilities = torch.abs(feature_contribs).mean(dim=0)
-                    feature_utilities = torch.zeros(
-                        (self.n_ensemble_members, self.hidden_dim),
-                        dtype=torch.float32, device=feature_contribs.device,
-                    )
-                    mask = torch.zeros_like(feature_utilities, dtype=torch.bool)
-                    for i in range(self.n_ensemble_members):
-                        feature_utilities[i, self.ensemble_input_ids[i]] = ensemble_input_utilities[i]
-                        mask[i, self.ensemble_input_ids[i]] = True
-                    
-                    # TODO: Also try max here or median???
-                    
-                    # Option 1:
-                    feature_utilities = feature_utilities.sum(dim=0) / mask.sum(dim=0)
-                    feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
-                    
-                    # Option 2:
-                    # feature_utilities = feature_utilities.max(dim=0).values
-                    
-                    
-                    
-                    # feature_utilities[self.ensemble_input_ids.ravel()] = ensemble_input_utilities
-                    
+                    feature_utilities = self._calculate_feature_utilities(feature_contribs) # Output shape: (hidden_dim,)
                     
                     self.ensemble_utilities = (
                         self.utility_decay * self.ensemble_utilities +
