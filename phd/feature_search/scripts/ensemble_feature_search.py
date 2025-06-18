@@ -243,31 +243,26 @@ def model_distractor_forward_pass(
     
     prediction = self._merge_predictions(ensemble_predictions) # (batch_size, output_dim)
     
-    # # Straight-through estimator for each ensemble member
-    # prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
-    # prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
-    
     # Calculate losses if applicable
     if target is not None:
         loss = torch.mean((target - prediction) ** 2)
+        ensemble_errors = target.unsqueeze(1) - ensemble_predictions # Shape: (batch_size, n_ensemble_members, output_dim)
         aux['loss'] = loss
+        aux['ensemble_losses'] = (ensemble_errors ** 2).mean(dim=2).mean(dim=0) # Shape: (n_ensemble_members,)
         
         # Update utility
         if update_state:
             with torch.no_grad():
                 # Measure how much each ensemble is reducing the loss
-                # Shape: (batch_size, n_ensemble_members, output_dim)
-                prediction_errors = target.unsqueeze(1) - ensemble_predictions
-                
                 # TODO: Given the signed utility didn't work well for features here,
                 #       maybe just try the negative of the loss per ensemble for ensemble utilities?
-                ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(prediction_errors)
+                ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(ensemble_errors)
                 ensemble_utilities = ensemble_utilities.sum(dim=2).mean(0) # Shape: (n_ensemble_members,)
                 
                 # Need to update this if there is more than one prediction
                 assert self.prediction_layer.weight.shape[1] == 1, \
                     "Only one prediction is supported for now!"
-                    
+                
                 # Estimate how much each feature is reducing the loss within its ensemble as a proxy for utility
                 # Features shape: (batch, n_ensemble_members, ensemble_dim)
                 # Weights shape: (n_ensemble_members, out_dim, ensemble_dim) -> (1, n_ensemble_members, ensemble_dim)
@@ -515,6 +510,7 @@ def run_experiment(
     pruning_state = PruningState()
     cumulative_loss = np.float128(0.0)
     loss_accum = 0.0
+    ensemble_loss_accum = 0.0
     mean_pred_loss_accum = 0.0
     pruned_accum = 0
     pruned_newest_feature_accum = 0
@@ -602,6 +598,7 @@ def run_experiment(
             distractor_callback=distractor_tracker.replace_features,
         )
         loss = aux['loss']
+        ensemble_loss_sum = aux['ensemble_losses'].sum()
         
         with torch.no_grad():
             if cfg.train.standardize_cumulants:
@@ -622,10 +619,10 @@ def run_experiment(
             # Mean over batch dimension
             param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
             retain_graph = optimizer.version == 'squared_grads'
-            loss.backward(retain_graph=retain_graph)
+            ensemble_loss_sum.backward(retain_graph=retain_graph)
             optimizer.step(outputs, param_inputs)
         else:
-            loss.backward()
+            ensemble_loss_sum.backward()
             optimizer.step()
             
         if repr_optimizer is not None:
@@ -636,6 +633,7 @@ def run_experiment(
         
         # Accumulate metrics
         loss_accum += loss.item()
+        ensemble_loss_accum += ensemble_loss_sum.item()
         cumulative_loss += loss.item()
         mean_pred_loss_accum += mean_pred_loss.item()
         n_steps_since_log += 1
@@ -650,6 +648,7 @@ def run_experiment(
                 'step': step,
                 'samples': step * cfg.train.batch_size,
                 'loss': loss_accum / n_steps_since_log,
+                'ensemble_loss': ensemble_loss_accum / n_steps_since_log,
                 'cumulative_loss': float(cumulative_loss),
                 'mean_prediction_loss': mean_pred_loss_accum / n_steps_since_log,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),

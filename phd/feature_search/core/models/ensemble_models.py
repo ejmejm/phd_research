@@ -308,6 +308,8 @@ class EnsembleMLP(nn.Module):
             The utilities for each feature,
                 Shape: (hidden_dim,)
         """
+        # TODO: This didn't work well before, but I have since found a major bug that could
+        #       have been the cause. Retry this.
         # Signed utility version, did not work well in testing:
         # feature_utilities = (
         #     torch.abs(prediction_errors + feature_contribs) - \
@@ -332,7 +334,7 @@ class EnsembleMLP(nn.Module):
             feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
             
         elif self.feature_utility_mode == 'median':
-            feature_utilities = feature_utilities.nanmedian(dim=0).values
+            feature_utilities = feature_utilities.nanquantile(0.5, dim=0)
             feature_utilities = torch.nan_to_num(feature_utilities, nan=0.0)
             
         elif self.feature_utility_mode == 'best':
@@ -389,25 +391,20 @@ class EnsembleMLP(nn.Module):
         
         prediction = self._merge_predictions(ensemble_predictions) # (batch_size, output_dim)
         
-        # Straight-through estimator for each ensemble member
-        prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
-        prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
-        
         # Calculate losses if applicable
         if target is not None:
             loss = torch.mean((target - prediction) ** 2)
+            ensemble_errors = target.unsqueeze(1) - ensemble_predictions # Shape: (batch_size, n_ensemble_members, output_dim)
             aux['loss'] = loss
+            aux['ensemble_losses'] = (ensemble_errors ** 2).mean(dim=2).mean(dim=0) # Shape: (n_ensemble_members,)
             
             # Update utility
             if update_state:
                 with torch.no_grad():
                     # Measure how much each ensemble is reducing the loss
-                    # Shape: (batch_size, n_ensemble_members, output_dim)
-                    prediction_errors = target.unsqueeze(1) - ensemble_predictions
-                    
                     # TODO: Given the signed utility didn't work well for features here,
                     #       maybe just try the negative of the loss per ensemble for ensemble utilities?
-                    ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(prediction_errors)
+                    ensemble_utilities = torch.abs(target.unsqueeze(1)) - torch.abs(ensemble_errors)
                     ensemble_utilities = ensemble_utilities.sum(dim=2).mean(0) # Shape: (n_ensemble_members,)
                     
                     # Need to update this if there is more than one prediction
