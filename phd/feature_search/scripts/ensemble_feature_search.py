@@ -194,7 +194,7 @@ class DistractorTracker():
 # This is used to overwrite the model's forward pass so that distractor features
 # can be replaced with random values each step during the forward pass
 def model_distractor_forward_pass(
-        self,
+        self: EnsembleMLP,
         x: torch.Tensor,
         target: Optional[torch.Tensor] = None,
         update_state: bool = False,
@@ -241,7 +241,7 @@ def model_distractor_forward_pass(
     ensemble_predictions = self.prediction_layer(ensemble_input_features)
     aux['ensemble_predictions'] = ensemble_predictions
     
-    prediction = ensemble_predictions.mean(dim=1) # (batch_size, output_dim)
+    prediction = self._merge_predictions(ensemble_predictions) # (batch_size, output_dim)
     
     # Straight-through estimator for each ensemble member
     prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
@@ -354,6 +354,7 @@ def prepare_components(cfg: DictConfig):
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
         utility_decay = cfg.feature_recycling.utility_decay,
+        prediction_mode = cfg.model.prediction_mode,
         ensemble_feature_selection_method = cfg.model.ensemble_feature_selection_method,
         seed = seed_from_string(base_seed, 'model'),
     )

@@ -103,6 +103,7 @@ class EnsembleMLP(nn.Module):
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
         utility_decay: float = 0.99,
+        prediction_mode: str = 'mean',
         ensemble_feature_selection_method: str = 'random',
         seed: Optional[int] = None,
     ):
@@ -118,12 +119,15 @@ class EnsembleMLP(nn.Module):
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             n_frozen_layers: Number of frozen layers
             utility_decay: Decay rate for the utility tracking
+            prediction_mode: Mode for making predictions {mean, mean_top_half, median, median_top_half, max}
             ensemble_feature_selection_method: Method for selecting features for the ensembles {random, inverse_frequency}
             seed: Optional random seed for reproducibility
         """
         assert n_layers == 2, "Ensemble MLPs only support a two layers!"
         assert ensemble_feature_selection_method in ['random', 'inverse_frequency'], \
             f"Invalid ensemble feature selection method: {ensemble_feature_selection_method}!"
+        assert prediction_mode in ['mean', 'mean_top_half', 'median', 'median_top_half', 'best_ensemble'], \
+            f"Invalid prediction mode: {prediction_mode}!"
         
         super().__init__()
         self.input_dim = input_dim
@@ -133,6 +137,7 @@ class EnsembleMLP(nn.Module):
         self.n_ensemble_members = n_ensemble_members
         self.n_frozen_layers = n_frozen_layers
         self.utility_decay = utility_decay
+        self.prediction_mode = prediction_mode
         self.ensemble_feature_selection_method = ensemble_feature_selection_method
         
         # Create a generator if seed is provided
@@ -254,6 +259,39 @@ class EnsembleMLP(nn.Module):
             prune_ensemble_inputs_idxs, (self.n_ensemble_members, self.ensemble_dim))
         return ensemble_idxs, feature_idxs
     
+    def _merge_predictions(self, ensemble_predictions: torch.Tensor) -> torch.Tensor:
+        """Make a prediction based on the individual ensemble predictions.
+        
+        Args:
+            ensemble_predictions: The predictions from the ensemble,
+                Shape: (batch_size, n_ensemble_members, output_dim)
+        """
+        if self.prediction_mode == 'mean':
+            return ensemble_predictions.mean(dim=1)
+        
+        # Sort predictions based off of the ensemble utilities before taking the mean
+        elif self.prediction_mode == 'mean_top_half':
+            best_ensemble_idxs = torch.argsort(
+                self.ensemble_utilities, descending=True)[:self.n_ensemble_members // 2]
+            return ensemble_predictions[:, best_ensemble_idxs, :].mean(dim=1)
+        
+        elif self.prediction_mode == 'median':
+            return ensemble_predictions.median(dim=1)
+        
+        # Sort predictions based off of the ensemble utilities before taking the median
+        elif self.prediction_mode == 'median_top_half':
+            best_ensemble_idxs = torch.argsort(
+                self.ensemble_utilities, descending=True)[:self.n_ensemble_members // 2]
+            return ensemble_predictions[:, best_ensemble_idxs, :].median(dim=1)
+        
+        # Take the prediction of the ensemble with the highest utility
+        elif self.prediction_mode == 'best_ensemble':
+            best_ensemble_idx = torch.argsort(self.ensemble_utilities, descending=True)[0]
+            return ensemble_predictions[:, best_ensemble_idx, :]
+    
+        else:
+            raise ValueError(f"Invalid prediction mode: {self.prediction_mode}!")
+    
     def forward(
         self,
         x: torch.Tensor,
@@ -297,7 +335,7 @@ class EnsembleMLP(nn.Module):
         ensemble_predictions = self.prediction_layer(ensemble_input_features)
         aux['ensemble_predictions'] = ensemble_predictions
         
-        prediction = ensemble_predictions.mean(dim=1) # (batch_size, output_dim)
+        prediction = self._merge_predictions(ensemble_predictions) # (batch_size, output_dim)
         
         # Straight-through estimator for each ensemble member
         prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)

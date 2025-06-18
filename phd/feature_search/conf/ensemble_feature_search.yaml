@@ -7,3 +7,4 @@ model:
   n_ensemble_members: 16
 
   ensemble_feature_selection_method: random # {random, inverse_frequency}
+  prediction_mode: mean # {mean, mean_top_half, median, median_top_half, best_ensemble}
