@@ -5,3 +5,5 @@ defaults:
 model:
   ensemble_dim: 64
   n_ensemble_members: 16
+
+  ensemble_feature_selection_method: random # {random, inverse_frequency}

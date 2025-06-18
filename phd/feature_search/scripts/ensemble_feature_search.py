@@ -354,6 +354,7 @@ def prepare_components(cfg: DictConfig):
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
         utility_decay = cfg.feature_recycling.utility_decay,
+        ensemble_feature_selection_method = cfg.model.ensemble_feature_selection_method,
         seed = seed_from_string(base_seed, 'model'),
     )
     model.to(cfg.device)

@@ -5,6 +5,7 @@ import warnings
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.nn.functional import softmax
 import torch.optim as optim
 
 from .base import ACTIVATION_MAP, initialize_layer_weights
@@ -102,6 +103,7 @@ class EnsembleMLP(nn.Module):
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
         utility_decay: float = 0.99,
+        ensemble_feature_selection_method: str = 'random',
         seed: Optional[int] = None,
     ):
         """
@@ -116,9 +118,12 @@ class EnsembleMLP(nn.Module):
             activation: Activation function ('relu', 'tanh', or 'sigmoid')
             n_frozen_layers: Number of frozen layers
             utility_decay: Decay rate for the utility tracking
+            ensemble_feature_selection_method: Method for selecting features for the ensembles {random, inverse_frequency}
             seed: Optional random seed for reproducibility
         """
         assert n_layers == 2, "Ensemble MLPs only support a two layers!"
+        assert ensemble_feature_selection_method in ['random', 'inverse_frequency'], \
+            f"Invalid ensemble feature selection method: {ensemble_feature_selection_method}!"
         
         super().__init__()
         self.input_dim = input_dim
@@ -128,6 +133,7 @@ class EnsembleMLP(nn.Module):
         self.n_ensemble_members = n_ensemble_members
         self.n_frozen_layers = n_frozen_layers
         self.utility_decay = utility_decay
+        self.ensemble_feature_selection_method = ensemble_feature_selection_method
         
         # Create a generator if seed is provided
         self.generator = torch.Generator().manual_seed(seed) if seed is not None else None
@@ -157,10 +163,11 @@ class EnsembleMLP(nn.Module):
         
         # Maps the input features to each ensemble member, shape: (n_ensemble_members, ensemble_dim)
         
-        self.ensemble_input_ids = torch.stack([
-            torch.randperm(hidden_dim, generator=self.generator)[:ensemble_dim]
-            for _ in range(n_ensemble_members)
-        ])
+        self.ensemble_input_ids = torch.full(
+            (n_ensemble_members, ensemble_dim), fill_value=-1, dtype=torch.long)
+
+        for i in range(n_ensemble_members):
+            self._reinit_ensemble_input_ids(i)
         
         # TODO: Because this did so well, try all of them exactly once but in random other
         #       Then try all of them exactly twice in two different random orders
@@ -191,6 +198,29 @@ class EnsembleMLP(nn.Module):
         # Trace the target to allow for normalizing the utilities if necessary
         self.register_buffer('target_trace', torch.zeros(1, dtype=torch.float32))
     
+    def _reinit_ensemble_input_ids(self, ensemble_idx: int):
+        """Reinitialize the input ids for a given ensemble.
+        
+        Args:
+            ensemble_idx: The index of the ensemble to reinitialize
+        """
+        if self.ensemble_feature_selection_method == 'random':
+            self.ensemble_input_ids[ensemble_idx] = torch.randperm(
+                self.hidden_dim, generator=self.generator)[:self.ensemble_dim]
+            
+        elif self.ensemble_feature_selection_method == 'inverse_frequency':
+            feature_frequencies = torch.zeros(self.hidden_dim)
+            flat_ensemble_input_ids = self.ensemble_input_ids.ravel()
+            for hidden_idx in flat_ensemble_input_ids:
+                if hidden_idx >= 0:
+                    feature_frequencies[hidden_idx] += 1
+                    
+            feature_probs = softmax(-feature_frequencies, dim=0)
+            self.ensemble_input_ids[ensemble_idx] = torch.multinomial(
+                feature_probs, self.ensemble_dim, generator=self.generator)
+        
+        else:
+            raise ValueError(f"Invalid ensemble feature selection method: {self.ensemble_feature_selection_method}!")
     
     def _get_ensemble_input_features(self, hidden_features: torch.Tensor) -> torch.Tensor:
         """Get the input features for each ensemble member.
