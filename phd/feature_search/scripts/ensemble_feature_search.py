@@ -154,9 +154,7 @@ class DistractorTracker():
         self.distractor_stds[new_feature_idxs] = new_stds
         
         # Zero out weights and biases for distractor features
-        distractor_idxs = [idx for idx in new_feature_idxs if self.distractor_mask[idx]]
-        if len(distractor_idxs) > 0:
-            self.model.input_layer.weight[distractor_idxs] = 0.0
+        self.model.input_layer.weight[self.distractor_mask] = 0.0
     
     def replace_features(self, x: torch.Tensor) -> torch.Tensor:
         """Replace distractor feature values with random values.
