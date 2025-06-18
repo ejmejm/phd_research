@@ -202,32 +202,15 @@ class EnsembleMLP(nn.Module):
     
     def to(self, *args, **kwargs):
         """Override .to() to handle generator device transfers."""
-        # Get the target device from args/kwargs
-        device = None
-        if len(args) > 0:
-            device = args[0]
-        elif 'device' in kwargs:
-            device = kwargs['device']
-        
-        # Call parent .to() first
         model = super().to(*args, **kwargs)
         
-        # Only handle device changes if generator exists and device is specified
-        if model.generator is not None and device is not None:
-            current_device = next(model.parameters()).device
-            
-            # Only recreate generator if moving between CPU/GPU
-            if (current_device.type == 'cuda' and device.type == 'cpu') or \
-               (current_device.type == 'cpu' and device.type == 'cuda'):
-                
-                # Save state of old generator
-                state = model.generator.get_state()
-                
-                # Create new generator on target device
-                model.generator = torch.Generator(device=device)
-                
-                # Restore state to new generator
-                model.generator.set_state(state)
+        if model.generator is not None:
+            device = next(model.parameters()).device
+            if model.generator.device != device:
+                # Seed the new generator based on the old generator
+                new_generator_seed = torch.randint(
+                    0, 1000000, (1,), generator=model.generator).item()
+                model.generator = torch.Generator(device=device).manual_seed(new_generator_seed)
                 
         return model
     
@@ -239,7 +222,7 @@ class EnsembleMLP(nn.Module):
         """
         if self.ensemble_feature_selection_method == 'random':
             self.ensemble_input_ids[ensemble_idx] = torch.randperm(
-                self.hidden_dim, generator=self.generator)[:self.ensemble_dim].to(self.ensemble_input_ids.device)
+                self.hidden_dim, generator=self.generator, device=self.ensemble_input_ids.device)[:self.ensemble_dim]
             
         elif self.ensemble_feature_selection_method == 'inverse_frequency':
             feature_frequencies = torch.zeros(self.hidden_dim, device=self.ensemble_input_ids.device)
@@ -252,7 +235,7 @@ class EnsembleMLP(nn.Module):
                     
             feature_probs = softmax(-feature_frequencies, dim=0)
             self.ensemble_input_ids[ensemble_idx] = torch.multinomial(
-                feature_probs, self.ensemble_dim, generator=self.generator).to(self.ensemble_input_ids.device)
+                feature_probs, self.ensemble_dim, generator=self.generator)
         
         else:
             raise ValueError(f"Invalid ensemble feature selection method: {self.ensemble_feature_selection_method}!")
@@ -500,15 +483,17 @@ def _reinit_input_weights(model: EnsembleMLP, idxs: torch.Tensor, init_type: str
     if init_type == 'kaiming_uniform':
         weight_data = model.input_layer.weight.data
         model.input_layer.weight.data[idxs] = n_kaiming_uniform(
-            weight_data, weight_data[idxs].shape, a=math.sqrt(5), generator=model.generator,
-        ).to(weight_data.device)
+            weight_data, weight_data[idxs].shape, a=math.sqrt(5),
+            generator=model.generator, device=weight_data.device
+        )
     elif init_type == 'binary':
         weight_data = model.input_layer.weight.data
         model.input_layer.weight.data[idxs] = torch.randint(
             0, 2,
             weight_data[idxs].shape,
-            generator = model.generator
-        ).to(weight_data.device).float() * 2 - 1
+            generator = model.generator,
+            device = weight_data.device
+        ).float() * 2 - 1
     else:
         raise ValueError(f'Invalid weight initialization: {init_type}!')
 
@@ -532,9 +517,10 @@ def _reinit_output_weights(model: EnsembleMLP, idxs: Tuple[torch.Tensor, torch.T
         model.prediction_layer.weight.data[ensemble_idxs, :, feature_idxs] = n_kaiming_uniform(
             weight_data,
             weight_data[ensemble_idxs, :, feature_idxs].shape,
-            a = math.sqrt(5),
-            generator = model.generator,
-        ).to(weight_data.device)
+            a=math.sqrt(5),
+            generator=model.generator,
+            device=weight_data.device,
+        )
     else:
         raise ValueError(f'Invalid weight initialization: {init_type}!')
 

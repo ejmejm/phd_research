@@ -13,6 +13,7 @@ def n_kaiming_uniform(
     mode: str = 'fan_in',
     nonlinearity: str = 'relu',
     generator: Optional[torch.Generator] = None,
+    device: Optional[torch.device] = None,
 ):
     """
     Adapted from https://pytorch.org/docs/stable/_modules/torch/nn/init.html#kaiming_uniform_
@@ -32,6 +33,6 @@ def n_kaiming_uniform(
     gain = nn.init.calculate_gain(nonlinearity, a)
     std = gain / math.sqrt(fan)
     bound = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
-    result = torch.rand(shape, generator=generator) * 2 * bound - bound
-    result = result.to(tensor.device)
+    target_device = device if device is not None else tensor.device
+    result = torch.rand(shape, generator=generator, device=target_device) * 2 * bound - bound
     return result
