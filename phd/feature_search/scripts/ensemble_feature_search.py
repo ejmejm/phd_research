@@ -292,7 +292,6 @@ def prepare_components(cfg: DictConfig):
     task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
-    global model, cbp_tracker
     # Initialize model and optimizer
     model = EnsembleMLP(
         input_dim = cfg.task.n_features,
@@ -345,29 +344,15 @@ def prepare_components(cfg: DictConfig):
         device = 'cpu',
         seed = seed_from_string(base_seed, 'recycler'),
     )
-    
-    # Initialize CBP tracker
-    # if cfg.feature_recycling.use_cbp_utility:
-    #     cbp_tracker = CBPTracker(
-    #         optimizer = optimizer,
-    #         replace_rate = cfg.feature_recycling.recycle_rate,
-    #         decay_rate = cfg.feature_recycling.utility_decay,
-    #         maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-    #         seed = seed_from_string(base_seed, 'cbp_tracker'),
-    #     )
-    #     cbp_tracker.track(model.input_layer, model.activation, model.prediction_layer)
-    # else:
-    #     cbp_tracker = None
-    cbp_tracker = None
         
-    return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker
+    return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler
 
 
 def prepare_ltu_geoff_experiment(cfg: DictConfig):
     set_seed(cfg.seed)
     base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
     
-    task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker = \
+    task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler = \
         prepare_components(cfg)
 
     assert isinstance(task, NonlinearGEOFFTask)
@@ -380,9 +365,6 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
     assert cfg.task.activation == 'ltu', \
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
-
-    if cbp_tracker is not None:
-        cbp_tracker.incoming_weight_init = 'binary'
     
     # Init target output weights to kaiming uniform and predictor output weights to zero
     task_init_generator = torch.Generator(device=task.weights[-1].device)
@@ -403,7 +385,7 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
 
     torch.manual_seed(seed_from_string(base_seed, 'experiment_setup'))
 
-    return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker
+    return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler
 
 
 @dataclass
@@ -485,7 +467,6 @@ def run_experiment(
         criterion: nn.Module,
         optimizer: Optimizer,
         repr_optimizer: Optional[Optimizer],
-        cbp_tracker: CBPTracker,
         distractor_tracker: DistractorTracker,
     ):
     # Distractor setup
@@ -565,29 +546,6 @@ def run_experiment(
             if log_pruning_stats:
                 prune_thresholds.append(pre_prune_feature_utilities[feature_idxs_pruned].max())
         
-        # if cbp_tracker is not None:
-        #     if log_pruning_stats:
-        #         pre_prune_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
-
-        #     pruned_idxs = cbp_tracker.prune_features()
-        #     n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
-        #     total_features_pruned += n_pruned
-
-        #     if prune_layer in pruned_idxs and len(pruned_idxs[prune_layer]) > 0:
-        #         new_feature_idxs = pruned_idxs[prune_layer].tolist()
-
-        #         # Turn some features into distractors
-        #         distractor_tracker.process_new_features(new_feature_idxs)
-
-        #         # Log pruning statistics
-        #         pruned_accum += len(new_feature_idxs)
-        #         n_new_pruned_features = len(set(new_feature_idxs).intersection(prev_pruned_idxs))
-        #         pruned_newest_feature_accum += n_new_pruned_features
-        #         prev_pruned_idxs = set(new_feature_idxs)
-                
-        #         if log_pruning_stats:
-        #             prune_thresholds.append(pre_prune_utilities[new_feature_idxs].max())
-        
         
         ### Forward Pass ###
         
@@ -654,34 +612,34 @@ def run_experiment(
                 'n_real_features': n_real_features,
             }
 
-            if log_pruning_stats:
-                if pruned_accum > 0:
-                    metrics['fraction_pruned_were_new'] = pruned_newest_feature_accum / pruned_accum
-                    pruned_newest_feature_accum = 0
-                    pruned_accum = 0
-                metrics['units_pruned'] = total_pruned
-                if len(prune_thresholds) > 0:
-                    metrics['prune_threshold'] = np.mean(prune_thresholds)
-                prune_thresholds.clear()
+            # if log_pruning_stats:
+            #     if pruned_accum > 0:
+            #         metrics['fraction_pruned_were_new'] = pruned_newest_feature_accum / pruned_accum
+            #         pruned_newest_feature_accum = 0
+            #         pruned_accum = 0
+            #     metrics['units_pruned'] = total_pruned
+            #     if len(prune_thresholds) > 0:
+            #         metrics['prune_threshold'] = np.mean(prune_thresholds)
+            #     prune_thresholds.clear()
             
-            if log_utility_stats:
-                all_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
-                distractor_mask = distractor_tracker.distractor_mask
-                real_utilities = all_utilities[~distractor_mask]
-                distractor_utilities = all_utilities[distractor_mask]
+            # if log_utility_stats:
+            #     all_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
+            #     distractor_mask = distractor_tracker.distractor_mask
+            #     real_utilities = all_utilities[~distractor_mask]
+            #     distractor_utilities = all_utilities[distractor_mask]
                 
-                cumulative_utility = all_utilities.sum().item()
-                metrics['cumulative_utility'] = cumulative_utility
+            #     cumulative_utility = all_utilities.sum().item()
+            #     metrics['cumulative_utility'] = cumulative_utility
                 
-                if len(real_utilities) > 0:
-                    metrics['real_utility_median'] = real_utilities.median().item()
-                    metrics['real_utility_25th'] = real_utilities.quantile(0.25).item()
-                    metrics['real_utility_75th'] = real_utilities.quantile(0.75).item()
+            #     if len(real_utilities) > 0:
+            #         metrics['real_utility_median'] = real_utilities.median().item()
+            #         metrics['real_utility_25th'] = real_utilities.quantile(0.25).item()
+            #         metrics['real_utility_75th'] = real_utilities.quantile(0.75).item()
                 
-                if len(distractor_utilities) > 0:
-                    metrics['distractor_utility_median'] = distractor_utilities.median().item()
-                    metrics['distractor_utility_25th'] = distractor_utilities.quantile(0.25).item() 
-                    metrics['distractor_utility_75th'] = distractor_utilities.quantile(0.75).item()
+            #     if len(distractor_utilities) > 0:
+            #         metrics['distractor_utility_median'] = distractor_utilities.median().item()
+            #         metrics['distractor_utility_25th'] = distractor_utilities.quantile(0.25).item() 
+            #         metrics['distractor_utility_75th'] = distractor_utilities.quantile(0.75).item()
 
             # Add model statistics separately for real and distractor features
             if log_model_stats:
@@ -722,7 +680,7 @@ def main(cfg: DictConfig) -> None:
 
     cfg = init_experiment(cfg.project, cfg)
 
-    task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker = \
+    task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler = \
         prepare_ltu_geoff_experiment(cfg)
     model.forward = model_distractor_forward_pass.__get__(model)
     
@@ -736,7 +694,7 @@ def main(cfg: DictConfig) -> None:
     
     run_experiment(
         cfg, task, task_iterator, model, criterion, optimizer,
-        repr_optimizer, cbp_tracker, distractor_tracker,
+        repr_optimizer, distractor_tracker,
     )
     
     finish_experiment(cfg)
