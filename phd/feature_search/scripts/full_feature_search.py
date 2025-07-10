@@ -362,7 +362,7 @@ def run_experiment(
                 prev_pruned_idxs = set(new_feature_idxs)
                 
                 if log_pruning_stats:
-                    prune_thresholds.append(pre_prune_utilities[new_feature_idxs].max())
+                    prune_thresholds.append(pre_prune_utilities[new_feature_idxs].max().item())
         
         # Forward pass
         outputs, param_inputs = model(
