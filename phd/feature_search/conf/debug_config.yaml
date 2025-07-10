@@ -5,14 +5,14 @@ defaults:
 wandb: false
 comet_ml: false
 
-device: cuda
+device: cpu
 
 model:
-  hidden_dim: 20_480 # 20_480
+  hidden_dim: 20_480 # # 20_480
   ensemble_dim: 512 # 512
   n_ensemble_members: 40 # 40
-  prediction_mode: best_ensemble # {mean, mean_top_half, median, median_top_half, best_ensemble}
-  feature_utility_mode: best # {mean, median, best}
+  prediction_mode: mean_top_half # {mean, mean_top_half, median, median_top_half, best_ensemble}
+  feature_utility_mode: mean # {mean, median, best} / best
   ensemble_utility_mode: objective_improvement # {objective_improvement, negative_loss}
   ensemble_feature_selection_method: random # {random, inverse_frequency}
 
@@ -22,10 +22,10 @@ task:
 
 feature_recycling:
   recycle_rate: 0.005
-  ensemble_recycle_rate: 0.0 # 0.005
+  ensemble_recycle_rate: 0.0
 
 train:
-  total_steps: 800 # 200_000
+  total_steps: 200_000
   standardize_cumulants: true
 
 optimizer:
@@ -35,4 +35,4 @@ optimizer:
   autostep: true
 
 
-seed: 200
+seed: 205

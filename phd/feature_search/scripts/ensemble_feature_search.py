@@ -240,6 +240,10 @@ def model_distractor_forward_pass(
     
     prediction = self._merge_predictions(ensemble_predictions) # (batch_size, output_dim)
     
+    # TODO: WHY DOES THIS WORK BETTER?
+    prediction_sum = ensemble_predictions.sum(dim=1) # (batch_size, output_dim)
+    prediction = prediction.detach() + (prediction_sum - prediction_sum.detach())
+    
     # Calculate losses if applicable
     if target is not None:
         loss = torch.mean((target - prediction) ** 2)
@@ -576,8 +580,11 @@ def run_experiment(
             # Mean over batch dimension
             param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
             retain_graph = optimizer.version == 'squared_grads'
+            # TODO: Why does the incorrect way of doing this work better???
+            # loss.backward(retain_graph=retain_graph)
+            # optimizer.step(outputs, param_inputs)
             ensemble_loss_sum.backward(retain_graph=retain_graph)
-            optimizer.step(outputs, param_inputs)
+            optimizer.step(aux['ensemble_predictions'], param_inputs)
         else:
             ensemble_loss_sum.backward()
             optimizer.step()
@@ -605,7 +612,7 @@ def run_experiment(
                 'step': step,
                 'samples': step * cfg.train.batch_size,
                 'loss': loss_accum / n_steps_since_log,
-                'ensemble_loss': ensemble_loss_accum / n_steps_since_log,
+                'avg_ensemble_loss': ensemble_loss_accum / model.n_ensemble_members / n_steps_since_log,
                 'cumulative_loss': float(cumulative_loss),
                 'mean_prediction_loss': mean_pred_loss_accum / n_steps_since_log,
                 'squared_targets': torch.tensor(target_buffer).square().mean().item(),
@@ -666,6 +673,7 @@ def run_experiment(
             # Reset accumulators
             loss_accum = 0.0
             mean_pred_loss_accum = 0.0
+            ensemble_loss_accum = 0.0
             n_steps_since_log = 0
             target_buffer = []
 

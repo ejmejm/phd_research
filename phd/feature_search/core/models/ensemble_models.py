@@ -186,14 +186,16 @@ class EnsembleMLP(nn.Module):
             torch.full((n_ensemble_members, ensemble_dim), fill_value=-1, dtype=torch.long)
         )
 
-        for i in range(n_ensemble_members):
-            self._reinit_ensemble_input_ids(i)
+        # TODO: Revert when testing is done
+        # for i in range(n_ensemble_members):
+        #     self._reinit_ensemble_input_ids(i)
         
         # Gives a 1:1 hidden dim to ensemble input mapping
-        # self.ensemble_input_ids = torch.arange(
-        #     0, n_ensemble_members * ensemble_dim,
-        #     dtype=torch.long,
-        # ).reshape(n_ensemble_members, ensemble_dim)
+        self.ensemble_input_ids = torch.arange(
+            0, n_ensemble_members * ensemble_dim,
+            dtype = torch.long,
+            device = self.ensemble_input_ids.device,
+        ).reshape(n_ensemble_members, ensemble_dim)
         
         self.update_step = 0
 
@@ -268,9 +270,10 @@ class EnsembleMLP(nn.Module):
         hidden_features_mask[hidden_idxs] = True
         prune_ensemble_inputs_mask = hidden_features_mask[self.ensemble_input_ids.ravel()]
         prune_ensemble_inputs_idxs = prune_ensemble_inputs_mask.nonzero(as_tuple=False).squeeze(1)
-        # Use torch.div for better GPU compatibility instead of np.unravel_index
+        
         ensemble_idxs = torch.div(prune_ensemble_inputs_idxs, self.ensemble_dim, rounding_mode='floor')
         feature_idxs = prune_ensemble_inputs_idxs % self.ensemble_dim
+        
         return ensemble_idxs, feature_idxs
     
     def _merge_predictions(self, ensemble_predictions: torch.Tensor) -> torch.Tensor:
@@ -359,7 +362,8 @@ class EnsembleMLP(nn.Module):
         # Note that this could result in a very sparse tensor and use a lot of resources as we scale
         # I may need a more efficient way to do this in the future
         
-        # More efficient replacement for the loop
+        # TODO: Make this more efficient by finding a way to avoid instantiating
+        #       the (self.n_ensemble_members, self.hidden_dim) tensor.
         ensemble_indices = torch.arange(self.n_ensemble_members, device=feature_contribs.device)
         ensemble_indices = ensemble_indices.unsqueeze(1).expand(-1, self.ensemble_dim)
         feature_utilities = torch.full(
