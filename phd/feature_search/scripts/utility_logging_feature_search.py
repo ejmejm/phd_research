@@ -3,7 +3,7 @@ Same as `full_feature_search.py`, but with very detailed logging for the utiliti
 The goal is to use this logged data to investigate my blocking hypothesis.
 """
 
-import json
+import array
 from dataclasses import dataclass
 import logging
 from typing import Iterator, Tuple, List, Literal, Optional
@@ -36,10 +36,6 @@ from phd.feature_search.scripts.full_feature_search import (
     model_distractor_forward_pass,
     prepare_ltu_geoff_experiment,
 )
-
-# Add pickle import
-import pickle
-import array
 
 
 logger = logging.getLogger(__name__)
@@ -339,6 +335,13 @@ def run_experiment(
             step += 1
 
         pbar.close()
+        
+        # Saving all remaining feature utility stats
+        utility_feature_id = save_and_reinit_feature_utility_stats(
+            utility_feature_id, feature_utility_stats, list(range(n_hidden_units)), step,
+            distractor_tracker, db_conn,
+        )
+        db_conn.commit()
     
     finally:
         # Ensure database connection is closed
