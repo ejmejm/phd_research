@@ -69,7 +69,7 @@ def save_feature_utility_stats(stats: FeatureUtilityStats, conn: sqlite3.Connect
     ''')
     
     # Convert utilities list to raw bytes (fastest method)
-    utilities_bytes = array.array('d', stats.utilities).tobytes()
+    utilities_bytes = array.array('f', stats.utilities).tobytes()
     
     # Insert or replace the stats
     conn.execute('''
@@ -81,7 +81,7 @@ def save_feature_utility_stats(stats: FeatureUtilityStats, conn: sqlite3.Connect
         stats.creation_step,
         stats.pruned_step,
         stats.feature_type,
-        utilities_bytes  # Raw bytes instead of pickle
+        utilities_bytes
     ))
     
     if commit:
@@ -248,11 +248,12 @@ def run_experiment(
                 repr_optimizer.step()
 
             # Update feature utility stats
-            hidden_unit_utilities = cbp_tracker.get_statistics(prune_layer)['utility'].tolist()
-            for idx in range(n_hidden_units):
-                if feature_utility_stats[idx] is None:
-                    raise ValueError(f"Feature utility stats for feature {idx} was not initialized and is None!")
-                feature_utility_stats[idx].utilities.append(hidden_unit_utilities[idx])
+            if step % 10 == 0:
+                hidden_unit_utilities = cbp_tracker.get_statistics(prune_layer)['utility'].tolist()
+                for idx in range(n_hidden_units):
+                    if feature_utility_stats[idx] is None:
+                        raise ValueError(f"Feature utility stats for feature {idx} was not initialized and is None!")
+                    feature_utility_stats[idx].utilities.append(hidden_unit_utilities[idx])
             
             # Commit to DB every 100 steps
             if step % 100 == 0:
