@@ -166,7 +166,6 @@ def model_distractor_forward_pass(
             x = distractor_callback(x)
         
         x = self.layers[i + 1](x) # Activation
-    
 
     param_inputs[self.layers[-1].weight] = x
     return self.layers[-1](x), param_inputs

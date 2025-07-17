@@ -95,7 +95,7 @@ def save_and_reinit_feature_utility_stats(
     for idx in idxs:
         if feature_utility_stats[idx] is not None:
             feature_utility_stats[idx].pruned_step = step
-            save_feature_utility_stats(feature_utility_stats[idx], conn, commit=False)  # No commit here
+            save_feature_utility_stats(feature_utility_stats[idx], conn, commit=False)
         
         is_distractor = distractor_tracker.distractor_mask[idx]
         feature_utility_stats[idx] = FeatureUtilityStats(
