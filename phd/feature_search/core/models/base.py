@@ -90,6 +90,9 @@ class ParallelLinear(nn.Module):
         # Handle single sample case
         if x.dim() == 1:
             x = x.unsqueeze(0)
+            expanded = True
+        else:
+            expanded = False
         
         # Apply parallel matrix multiplication
         output = torch.matmul(x, self.weight.t())
@@ -101,7 +104,7 @@ class ParallelLinear(nn.Module):
         output = output.view(batch_size, self.n_parallel, self.out_features)
         
         # Remove batch dimension if input was single sample
-        if x.size(0) == 1:
+        if expanded:
             output = output.squeeze(0)
             
         return output
