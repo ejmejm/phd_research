@@ -204,10 +204,12 @@ def prepare_components(cfg: DictConfig):
         # Use separate optimizers for the intermediate and output layers
         repr_optimizer = prepare_optimizer(repr_module, repr_optimizer_name, cfg.representation_optimizer)
         optimizer = prepare_optimizer(model.layers[-1], cfg.optimizer.name, cfg.optimizer)
+        logger.info(f"Using separate optimizers for the intermediate and output layers: {repr_optimizer_name} and {cfg.optimizer.name}")
     else:
         # Only use one optimizer
         repr_optimizer = None
         optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
+        logger.info(f"Using single optimizer: {cfg.optimizer.name}")
     
     # Initialize feature recycler
     recycler = InputRecycler(
