@@ -1,0 +1,14 @@
+name: representation_lr_sweep_test
+project: feature_recycling-backprop_ablation-test
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_backprop_ablation/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.hidden_dim: [1280]
+  seed: [1, 2, 3]
+  representation_optimizer.learning_rate: [0.01]

@@ -1,0 +1,18 @@
+# 80 min per run * 84 runs = 112 hours
+# 112 * 1.3 / 6 hours per run ~= 24 jobs
+# Job command: sbatch --array=1-24 --mem=4G --time=06:00:00 launch_comet_agent.sbatch -s <comet_sweep_id>
+
+name: representation_lr_sweep
+project: feature_recycling-backprop_ablation-hyper_search
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_backprop_ablation/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.hidden_dim: [320, 1280, 5120, 20480]
+  seed: [1, 2, 3]
+  representation_optimizer.learning_rate: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
