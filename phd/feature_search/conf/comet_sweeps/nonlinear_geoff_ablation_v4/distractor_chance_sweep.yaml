@@ -1,0 +1,14 @@
+name: distractor_chance
+project: feature_recycling-nlg_ablation_v4
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v4/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.hidden_dim: [320, 1280, 5120, 20480]
+  task.distractor_chance: [0.0, 0.5, 0.9, 0.99]
+  seed: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
