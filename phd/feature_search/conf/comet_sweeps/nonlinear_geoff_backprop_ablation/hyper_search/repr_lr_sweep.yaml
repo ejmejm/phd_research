@@ -13,7 +13,7 @@ spec:
   retryAssignLimit: 4
 
 parameters:
-  model.hidden_dim: [320, 1280, 5120, 20480]
+  model.hidden_dim: [500, 2000, 5000, 20000]
   seed: [1, 2, 3]
   representation_optimizer.learning_rate: [0.01, 0.1, 0.5, 1.0]
 

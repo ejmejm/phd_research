@@ -10,6 +10,7 @@ device: cpu
 task:
   distractor_chance: 0.0
   noise_std: 0.0
+  hidden_dim: 500
 
 feature_recycling:
   use_cbp_utility: true
