@@ -143,7 +143,8 @@ class DistractorTracker():
 def model_distractor_forward_pass(
         self,
         x: torch.Tensor,
-        distractor_callback: Callable[[torch.Tensor], torch.Tensor] = None
+        distractor_callback: Callable[[torch.Tensor], torch.Tensor] = None,
+        use_bias: bool = True,
     ) -> tuple[torch.Tensor, Dict[nn.Module, torch.Tensor]]:
     """Forward pass with a callback that can replace hidden unit outputs with distractor values.
     
@@ -151,6 +152,7 @@ def model_distractor_forward_pass(
         x: Input tensor
         distractor_callback: Callable that takes a tensor and returns a tensor of the same shape
             which should be a mix of the same values and distractor values.
+        use_bias: Whether to use a bias in the hidden layer.
 
     Returns:
         tuple[torch.Tensor, Dict[nn.Module, torch.Tensor]]:
@@ -166,6 +168,9 @@ def model_distractor_forward_pass(
             x = distractor_callback(x)
         
         x = self.layers[i + 1](x) # Activation
+        
+        if use_bias:
+            x[..., 0] = 1.0
 
     param_inputs[self.layers[-1].weight] = x
     return self.layers[-1](x), param_inputs
@@ -178,12 +183,14 @@ def prepare_components(cfg: DictConfig):
     task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
     task_iterator = task.get_iterator(cfg.train.batch_size)
     
+    use_bias = cfg.model.get('use_bias', True)
+    
     # Initialize model and optimizer
     model = MLP(
         input_dim = cfg.task.n_features,
         output_dim = cfg.model.output_dim,
         n_layers = cfg.model.n_layers,
-        hidden_dim = cfg.model.hidden_dim,
+        hidden_dim = cfg.model.hidden_dim + int(use_bias),
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
@@ -296,9 +303,12 @@ def run_experiment(
         cbp_tracker: CBPTracker,
         distractor_tracker: DistractorTracker,
     ):
+    use_bias = cfg.model.get('use_bias', True)
+    
     # Distractor setup
     n_hidden_units = model.layers[-1].in_features
-    distractor_tracker.process_new_features(list(range(n_hidden_units)))
+    first_feature_idx = 1 if use_bias else 0 # First feature is bias if enabled
+    distractor_tracker.process_new_features(list(range(first_feature_idx, n_hidden_units)))
 
     # Training loop
     step = 0
@@ -352,9 +362,14 @@ def run_experiment(
 
             if prune_layer in pruned_idxs and len(pruned_idxs[prune_layer]) > 0:
                 new_feature_idxs = pruned_idxs[prune_layer].tolist()
+                distractor_process_idxs = new_feature_idxs
+    
+                # Don't turn bias into a distractor
+                if use_bias:
+                    distractor_process_idxs = [idx for idx in distractor_process_idxs if idx != 0]
 
                 # Turn some features into distractors
-                distractor_tracker.process_new_features(new_feature_idxs)
+                distractor_tracker.process_new_features(distractor_process_idxs)
 
                 # Log pruning statistics
                 pruned_accum += len(new_feature_idxs)
@@ -367,7 +382,7 @@ def run_experiment(
         
         # Forward pass
         outputs, param_inputs = model(
-            features, distractor_tracker.replace_features)
+            features, distractor_tracker.replace_features, use_bias)
         loss = criterion(outputs, targets)
         
         with torch.no_grad():
