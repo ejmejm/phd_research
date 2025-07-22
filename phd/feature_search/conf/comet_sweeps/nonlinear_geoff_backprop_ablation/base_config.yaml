@@ -20,7 +20,7 @@ feature_recycling:
 
 train:
   total_steps: 1_000_000
-  standardize_cumulants: false
+  standardize_cumulants: true
 
   # Logging parameters
   log_freq: 2000
