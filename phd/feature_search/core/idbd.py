@@ -79,8 +79,8 @@ class IDBD(Optimizer):
     @torch.no_grad()
     def step(
         self,
-        predictions: torch.Tensor,
-        param_inputs: Dict[torch.nn.parameter.Parameter, torch.Tensor],
+        predictions: Optional[torch.Tensor] = None,
+        param_inputs: Optional[Dict[torch.nn.parameter.Parameter, torch.Tensor]] = None,
         retain_graph: bool = False,
         features_independent: bool = False,
     ) -> Optional[float]:
