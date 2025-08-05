@@ -165,6 +165,7 @@ class MLP(nn.Module):
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
         seed: Optional[int] = None,
+        bias: bool = False,
     ):
         """
         Args:
@@ -190,14 +191,14 @@ class MLP(nn.Module):
         # Build layers
         self.layers = nn.ModuleList()
         if n_layers == 1:
-            self.layers.append(nn.Linear(input_dim, output_dim, bias=False))
+            self.layers.append(nn.Linear(input_dim, output_dim, bias=bias))
         else:
-            self.layers.append(nn.Linear(input_dim, hidden_dim, bias=False))
+            self.layers.append(nn.Linear(input_dim, hidden_dim, bias=bias))
             self.layers.append(activation_cls())
             for _ in range(n_layers - 2):
-                self.layers.append(nn.Linear(hidden_dim, hidden_dim, bias=False))
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim, bias=bias))
                 self.layers.append(activation_cls())
-            self.layers.append(nn.Linear(hidden_dim, output_dim, bias=False))
+            self.layers.append(nn.Linear(hidden_dim, output_dim, bias=bias))
         
         # Freeze layers
         for i in range(n_frozen_layers):

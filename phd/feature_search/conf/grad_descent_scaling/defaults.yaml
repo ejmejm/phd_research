@@ -1,0 +1,15 @@
+seed: 20250804
+
+model:
+  n_inputs: 20
+  hidden_dim: 50
+  n_layers: 2
+
+train:
+  n_samples: 10000
+  batch_size: 8
+  log_freq: 100
+
+optimizer:
+  name: rmsprop
+  learning_rate: 0.01
