@@ -15,7 +15,7 @@ LEARNER_HIDDEN_DIM = 10
 LEARNER_N_LAYERS = 2
 LEARNER_ACTIVATION = 'ltu'
 
-TRAIN_SAMPLES = 50_000
+TRAIN_SAMPLES = 100_000
 BATCH_SIZE = 1
 PRINT_FREQ = 200
 LOG_FREQ = 100
@@ -58,11 +58,11 @@ def create_model(n_inputs, hidden_dim, n_layers, activation, seed):
         output_dim = 1,
         n_layers = n_layers,
         hidden_dim = hidden_dim,
-        weight_init_method = 'kaiming_uniform',
+        weight_init_method = 'binary',
         activation = activation,
         n_frozen_layers = 0,
         seed = seed_from_string(seed, 'model'),
-        bias = True,
+        bias = False,
     )
     with torch.no_grad():
         model.layers[-1].weight.zero_()
