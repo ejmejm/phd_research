@@ -22,6 +22,9 @@ from .tasks import DummyTask, GEOFFTask, NonlinearGEOFFTask
 # Only register resolver if it hasn't been registered yet
 if not omegaconf.OmegaConf.has_resolver('eval'):
     omegaconf.OmegaConf.register_new_resolver('eval', lambda x: eval(str(x)))
+    
+if not omegaconf.OmegaConf.has_resolver('as_tuple'):
+    omegaconf.OmegaConf.register_new_resolver('as_tuple', lambda *args: tuple(args))
 
 
 def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
