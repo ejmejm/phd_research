@@ -24,3 +24,5 @@ discovery.egg-info/
 
 *.csv
 *.db
+*.pth
+*.pkl
