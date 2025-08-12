@@ -187,15 +187,15 @@ class EnsembleMLP(nn.Module):
         )
 
         # TODO: Revert when testing is done
-        # for i in range(n_ensemble_members):
-        #     self._reinit_ensemble_input_ids(i)
+        for i in range(n_ensemble_members):
+            self._reinit_ensemble_input_ids(i)
         
-        # Gives a 1:1 hidden dim to ensemble input mapping
-        self.ensemble_input_ids = torch.arange(
-            0, n_ensemble_members * ensemble_dim,
-            dtype = torch.long,
-            device = self.ensemble_input_ids.device,
-        ).reshape(n_ensemble_members, ensemble_dim)
+        # # Gives a 1:1 hidden dim to ensemble input mapping
+        # self.ensemble_input_ids = torch.arange(
+        #     0, n_ensemble_members * ensemble_dim,
+        #     dtype = torch.long,
+        #     device = self.ensemble_input_ids.device,
+        # ).reshape(n_ensemble_members, ensemble_dim)
         
         self.update_step = 0
 
