@@ -10,3 +10,6 @@ model:
   feature_utility_mode: mean # {mean, median, best}, could also try ensemble utility * feature utility in the future
   ensemble_utility_mode: objective_improvement # {objective_improvement, negative_loss}
   prediction_mode: mean # {mean, mean_top_half, median, median_top_half, best_ensemble}
+
+feature_recycling:
+  ensemble_recycle_rate: 0.0
