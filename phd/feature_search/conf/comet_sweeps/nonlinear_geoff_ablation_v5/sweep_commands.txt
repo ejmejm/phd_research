@@ -1,0 +1,26 @@
+===== Created sweeps with ids =====
+distractor_chance_sweep.yaml (480): 7127422c365142fda5c3d3e4ff14ab2f
+target_flip_rate_sweep.yaml (480): 9aa6e3589944442fa8de178b89d19d47
+target_hidden_dim_sweep.yaml (300): 6185085e61ee48f29b2b98a5e1c17dbc
+target_input_features_sweep.yaml (300): cb35f67a3a8047b3be82cdfeeaf874c8
+target_noise_sweep.yaml (300): c3220220c04f423aa30fa27b4bc8b2e2
+
+
+# Distractor chance (480 * 1.17 * 1.4 / 24 ~= 33)
+sbatch --time=24:00:00 --cpus-per-task=1 --mem=6G --array=1-33 launch_comet_agent.sbatch -s 7127422c365142fda5c3d3e4ff14ab2f
+
+
+# Flip rate (480 * 1.17 * 1.4 / 24 ~= 33)
+sbatch --time=24:00:00 --cpus-per-task=1 --mem=6G --array=1-33 launch_comet_agent.sbatch -s 9aa6e3589944442fa8de178b89d19d47
+
+
+# Target hidden dim (300 * 1.17 * 1.4 / 24 ~= 21)
+sbatch --time=24:00:00 --cpus-per-task=1 --mem=6G --array=1-21 launch_comet_agent.sbatch -s 6185085e61ee48f29b2b98a5e1c17dbc
+
+
+# Target input features (300 * 1.17 * 1.4 / 24 ~= 21)
+sbatch --time=24:00:00 --cpus-per-task=1 --mem=6G --array=1-21 launch_comet_agent.sbatch -s cb35f67a3a8047b3be82cdfeeaf874c8
+
+
+# Target noise (300 * 2 * 1.17 * 1.4 / 24 ~= 42)
+sbatch --time=24:00:00 --cpus-per-task=1 --mem=6G --array=1-42 launch_comet_agent.sbatch -s c3220220c04f423aa30fa27b4bc8b2e2
