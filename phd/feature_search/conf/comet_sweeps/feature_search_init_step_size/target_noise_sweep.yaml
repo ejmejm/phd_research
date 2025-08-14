@@ -1,0 +1,22 @@
+name: target_noise
+project: feature_recycling-large_init_step_size
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/feature_search_init_step_size/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.total_steps: 1_000_000
+
+  optimizer.learning_rate: [0.000175, 0.0001, 0.00001, 0.000001]
+  feature_recycling.recycle_rate: [0.005, 0.001, 0.0005, 0.0001]
+
+  model.hidden_dim: 20480
+  task.noise_std: [0.0, 3.0]
+  seed: [101, 102, 103]
+
+
+# 25 runs of 6 hours each
