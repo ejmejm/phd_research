@@ -1,0 +1,18 @@
+name: distractor_chance
+project: feature_recycling-nlg_ablation_v5_step_size
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v5_step_size/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  optimizer.learning_rate: 
+    - ${eval:0.003 / ${model.hidden_dim} ** 0.75}
+    - ${eval:0.0003 / ${model.hidden_dim} ** 0.75}
+  task.distractor_mean_range: ["${as_tuple:-0.5, 0.5}", "${as_tuple:0.0, 0.0}"]
+  model.hidden_dim: [320, 1280, 5120, 20480]
+  task.distractor_chance: [0.0, 0.5, 0.9, 0.99]
+  seed: [501, 502, 503, 504, 505]

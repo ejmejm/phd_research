@@ -1,0 +1,18 @@
+name: target_input_features
+project: feature_recycling-nlg_ablation_v5_step_size
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v5_step_size/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  optimizer.learning_rate: 
+    - ${eval:0.003 / ${model.hidden_dim} ** 0.75}
+    - ${eval:0.0003 / ${model.hidden_dim} ** 0.75}
+  task.n_real_features: ${task.n_features}
+  model.hidden_dim: [320, 1280, 5120, 20480]
+  task.n_features: [10, 20, 40, 80, 160]
+  seed: [501, 502, 503, 504, 505]

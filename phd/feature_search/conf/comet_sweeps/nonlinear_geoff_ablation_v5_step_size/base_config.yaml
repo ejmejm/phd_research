@@ -1,0 +1,38 @@
+# @package _global_
+
+defaults:
+  - /full_feature_search
+  - _self_
+
+comet_ml: true
+device: cpu
+
+model:
+  use_bias: true
+
+task:
+  distractor_chance: 0.0
+  noise_std: 0.0
+
+feature_recycling:
+  use_cbp_utility: true
+  utility_decay: 0.99
+  recycle_rate: 0.005
+  feature_protection_steps: 0
+
+train:
+  total_steps: 1_000_000
+  standardize_cumulants: true
+
+  # Logging parameters
+  log_freq: 2500
+  log_utility_stats: false
+  log_pruning_stats: true
+  log_model_stats: false
+
+optimizer:
+  name: idbd
+  version: squared_grads
+  autostep: true
+  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
+  meta_learning_rate: 0.005
