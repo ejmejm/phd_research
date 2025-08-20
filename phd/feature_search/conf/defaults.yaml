@@ -31,6 +31,7 @@ input_recycling:
 # This is used to replace hidden features during training
 feature_recycling:
   use_cbp_utility: True # Features will be replaced based on utility when true, otherwise replaced at random
+  use_signed_utility: False # Use a signed version of utility, different from the original CBP utility
   recycle_rate: 0.0 # Fraction of features that are replaced each step
   utility_decay: 0.99 # Parameter used in utility computation
   feature_protection_steps: 100 # Number of steps a new feature is immune to pruning

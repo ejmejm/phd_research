@@ -30,7 +30,7 @@ from phd.feature_search.core.experiment_helpers import (
 )
 from phd.feature_search.core.idbd import IDBD
 from phd.feature_search.core.models import LTU, MLP
-from phd.feature_search.core.feature_recycling import InputRecycler, CBPTracker
+from phd.feature_search.core.feature_recycling import CBPTracker, InputRecycler, SignedCBPTracker
 from phd.feature_search.core.tasks import NonlinearGEOFFTask
 from phd.research_utils.logging import *
 
@@ -234,7 +234,8 @@ def prepare_components(cfg: DictConfig):
     
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:
-        cbp_tracker = CBPTracker(
+        cbp_cls = SignedCBPTracker if cfg.feature_recycling.use_signed_utility else CBPTracker
+        cbp_tracker = cbp_cls(
             optimizer = optimizer,
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
@@ -356,7 +357,10 @@ def run_experiment(
             if log_pruning_stats:
                 pre_prune_utilities = cbp_tracker.get_statistics(prune_layer)['utility']
 
-            pruned_idxs = cbp_tracker.prune_features()
+            if isinstance(cbp_tracker, SignedCBPTracker):
+                pruned_idxs = cbp_tracker.prune_features(targets)
+            else:
+                pruned_idxs = cbp_tracker.prune_features()
             n_pruned = sum([len(idxs) for idxs in pruned_idxs.values()])
             total_pruned += n_pruned
 

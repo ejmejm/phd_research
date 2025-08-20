@@ -712,36 +712,45 @@ class SignedCBPTracker(CBPTracker):
             input = input[0]
             
             with torch.no_grad():
-                output_magnitude = torch.abs(output)
+                # Get rid of batch dimension, as this implentation does not support batching
+                if len(output.shape) == 2:
+                    assert output.shape[0] == 1, "This implentation does not support batching!"
+                    output = output.squeeze(0)
                 
-                # Mean over batch dimension if present
-                if len(output_magnitude.shape) == 2:
-                    output_magnitude = output_magnitude.mean(dim=0)
-
+                # Note: this will need to change if more than one target is being predicted
                 output_layer = self._tracked_layers[layer][1]
-                contributions = output_magnitude * self._get_output_weight_sums(output_layer)
-                
-                # TODO: Put this data into storage for use when prune_features is called
-                
+                assert output_layer.weight.shape[0] == 1, "This implentation only supports one target!"
+                contributions = output * output_layer.weight.squeeze(0)
                 self._feature_stats[module]['contributions'] = contributions
 
         return track_cbp_stats
     
     def _update_stats(self, target: torch.Tensor, module: nn.Module):
+        """Update the feature stats based on the target error and active feature contributions.
+        
+        Args:
+            target: The target tensor, shape (batch_size, 1) or (1,).
+            module: The module to update the stats for.
+        """
+        contributions = self._feature_stats[module]['contributions']
+        
+        # Update age
         self._feature_stats[module]['age'] = \
-            torch.ones_like(self._feature_stats[module]['contributions']) + self._feature_stats[module]['age']
+            torch.ones_like(contributions) + self._feature_stats[module]['age']
         
+        if len(target.shape) == 2:
+            assert target.shape[0] == 1, "This implentation does not support batching!"
+            target = target.squeeze()
+        assert target.numel() == 1, "This implentation only supports one target!"
         
+        with torch.no_grad():
+            pred = contributions.sum()
+            target_error = target - pred
+            utilities = torch.abs(target_error + contributions) - torch.abs(target_error)
         
-        
-            active_utilities = torch.abs(target_error + active_feature_contribs) - torch.abs(target_error)
-        
-                # self._feature_stats[module]['utility'] = (1 - self.decay_rate) * utility \
-                #     + self.decay_rate * self._feature_stats[module]['utility']
-        
-        
+            self._feature_stats[module]['utility'] = (1 - self.decay_rate) * utilities \
+                + self.decay_rate * self._feature_stats[module]['utility']
     
-    # TODO: feature stats actually updated only after the loss is given
     def prune_features(self, target: torch.Tensor) -> Dict[nn.Module, List[int]]:
         """Prune features based on the CBP score."""
         reset_idxs = {}
