@@ -697,3 +697,60 @@ class CBPTracker():
     def get_statistics(self, module: nn.Module) -> Dict[str, torch.Tensor]:
         """Get the statistics for the given module."""
         return self._feature_stats.get(module, {})
+
+
+class SignedCBPTracker(CBPTracker):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def _get_hook(self, layer: nn.Module):
+        """Return a hook function for a given layer."""
+        def track_cbp_stats(module: nn.Module, input: torch.Tensor, output: torch.Tensor):
+            if not module.training:
+                return
+
+            input = input[0]
+            
+            with torch.no_grad():
+                output_magnitude = torch.abs(output)
+                
+                # Mean over batch dimension if present
+                if len(output_magnitude.shape) == 2:
+                    output_magnitude = output_magnitude.mean(dim=0)
+
+                output_layer = self._tracked_layers[layer][1]
+                contributions = output_magnitude * self._get_output_weight_sums(output_layer)
+                
+                # TODO: Put this data into storage for use when prune_features is called
+                
+                self._feature_stats[module]['contributions'] = contributions
+
+        return track_cbp_stats
+    
+    def _update_stats(self, target: torch.Tensor, module: nn.Module):
+        self._feature_stats[module]['age'] = \
+            torch.ones_like(self._feature_stats[module]['contributions']) + self._feature_stats[module]['age']
+        
+        
+        
+        
+            active_utilities = torch.abs(target_error + active_feature_contribs) - torch.abs(target_error)
+        
+                # self._feature_stats[module]['utility'] = (1 - self.decay_rate) * utility \
+                #     + self.decay_rate * self._feature_stats[module]['utility']
+        
+        
+    
+    # TODO: feature stats actually updated only after the loss is given
+    def prune_features(self, target: torch.Tensor) -> Dict[nn.Module, List[int]]:
+        """Prune features based on the CBP score."""
+        reset_idxs = {}
+        for layer in self._tracked_layers.keys():
+            # TODO: Update feature stats based on loss here
+            self._update_stats(target, layer)
+            self._step_replacement_accumulator(layer)
+            layer_reset_idxs = self._get_layer_prune_idxs(layer)
+            self._prune_layer(layer, layer_reset_idxs)
+            if layer_reset_idxs is not None and len(layer_reset_idxs) > 0:
+                reset_idxs[layer] = layer_reset_idxs
+        return reset_idxs
