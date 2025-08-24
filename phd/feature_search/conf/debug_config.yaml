@@ -17,7 +17,7 @@ task:
 
 feature_recycling:
   recycle_rate: 0.005
-  use_signed_utility: True
+  use_signed_utility: False
 
 train:
   total_steps: 200_000
@@ -27,6 +27,7 @@ optimizer:
   name: idbd
   learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
   version: squared_grads
+  weight_decay: 0.001
   autostep: true
 
 

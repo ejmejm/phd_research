@@ -1,0 +1,6 @@
+===== Created sweeps with ids =====
+non_stationarity_weight_decay_sweep.yaml (315): 1cd3007f544c46cb80c59814981168ae
+
+
+# Flip rate (315 * 2.2 * 1.4 / 12 ~= 55)
+sbatch --time=12:00:00 --cpus-per-task=1 --mem=4G --array=1-55 launch_comet_agent.sbatch -s 1cd3007f544c46cb80c59814981168ae
