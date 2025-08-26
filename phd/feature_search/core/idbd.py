@@ -36,6 +36,7 @@ class IDBD(Optimizer):
         meta_lr: float = 0.01,
         init_lr: float = 0.01,
         weight_decay: float = 0.0,
+        step_size_decay: float = 0.0,
         version: str = 'squared_grads', # {squared_inputs, squared_grads}
         autostep: bool = False,
         tau: float = 1e4,
@@ -44,6 +45,7 @@ class IDBD(Optimizer):
         defaults = dict(meta_lr=meta_lr, tau=tau)
         super().__init__(param_list, defaults)
         self.weight_decay = weight_decay
+        self.step_size_decay_factor = math.log(1.0 - step_size_decay) if step_size_decay > 0.0 else 0.0
         self.init_lr = init_lr
         self.version = version
         self.autostep = autostep
@@ -51,6 +53,8 @@ class IDBD(Optimizer):
         
         assert self.version in ['squared_inputs', 'squared_grads'], \
             f"Invalid version: {self.version}. Must be one of: squared_inputs, squared_grads."
+            
+        assert autostep or step_size_decay == 0.0, "Step size decay is only supported with autostep!"
         
         if autostep:
             # Check that parameters match a linear layer structure
@@ -182,6 +186,14 @@ class IDBD(Optimizer):
                     
                     alpha = alpha / effective_step_size
                     state['beta'] = torch.log(alpha)
+                    
+                    # TODO: When step size decay is enabled, the effective step-size should probably
+                    #       not permenantly reduce the step-size.
+                    if self.step_size_decay_factor != 0.0 and effective_step_size.gt(1.0).any():
+                        decay_values = h_decay_term * self.step_size_decay_factor
+                        decay_mask = effective_step_size.gt(1.0)
+                        state['beta'] += decay_values * decay_mask
+                    
                 else:
                     beta.add_(meta_lr * grad * h)
                     state['beta'] = beta
