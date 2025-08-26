@@ -1,5 +1,6 @@
 import math
 import logging
+from typing import Any
 
 import torch
 from torch.optim.optimizer import Optimizer
@@ -83,7 +84,7 @@ class IDBD(Optimizer):
         param_inputs: Optional[Dict[torch.nn.parameter.Parameter, torch.Tensor]] = None,
         retain_graph: bool = False,
         features_independent: bool = False,
-    ) -> Optional[float]:
+    ) -> Dict[str, Any]:
         """Performs a single optimization step.
         
         Args:
@@ -93,6 +94,9 @@ class IDBD(Optimizer):
                 Only needed for `squared_inputs` version of IDBD.
             retain_graph: Whether to retain the graph of the computation
             features_independent: Whether to treat each unit as an independent predictor
+            
+        Returns:
+            Dictionary of statistics for each parameter group.
         """
         if self.version == 'squared_inputs':
             assert param_inputs is not None, "Parameter inputs are required for squared_inputs version of IDBD"
@@ -109,6 +113,7 @@ class IDBD(Optimizer):
             prediction_grads = {p: g for p, g in zip(all_params, prediction_grads)}
 
         param_updates = []
+        stats = {}
         for group in self.param_groups:
             meta_lr = group['meta_lr']
             tau = group['tau']
@@ -117,6 +122,9 @@ class IDBD(Optimizer):
                 if p.grad is None:
                     continue
                 
+                group_stats = {}
+                stats[p] = group_stats
+            
                 grad = p.grad
                 
                 if self.version == 'squared_inputs':
@@ -163,10 +171,15 @@ class IDBD(Optimizer):
                     
                     # Normalize the step-size
                     if features_independent:
-                        effective_step_size = torch.clamp(alpha * h_decay_term, min=1.0)
+                        raw_effective_step_size = alpha * h_decay_term
+                        effective_step_size = torch.clamp(raw_effective_step_size, min=1.0)
                     else:
-                        effective_step_size = torch.clamp(torch.sum(alpha * h_decay_term, dim=-1), min=1.0)
+                        raw_effective_step_size = torch.sum(alpha * h_decay_term, dim=-1)
+                        effective_step_size = torch.clamp(raw_effective_step_size, min=1.0)
                         effective_step_size = effective_step_size.unsqueeze(-1)
+                    
+                    group_stats['effective_step_size'] = raw_effective_step_size.squeeze()
+                    
                     alpha = alpha / effective_step_size
                     state['beta'] = torch.log(alpha)
                 else:
@@ -184,6 +197,8 @@ class IDBD(Optimizer):
                 
         for p, param_update in param_updates:
             p.add_(param_update)
+            
+        return stats
 
 
 if __name__ == '__main__':

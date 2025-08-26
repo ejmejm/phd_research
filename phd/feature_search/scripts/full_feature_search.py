@@ -328,6 +328,7 @@ def run_experiment(
     cumulative_loss = np.float128(0.0)
     loss_accum = 0.0
     mean_pred_loss_accum = 0.0
+    effective_lr_accum = 0.0
     pruned_accum = 0
     pruned_newest_feature_accum = 0
     n_steps_since_log = 0
@@ -407,7 +408,8 @@ def run_experiment(
             param_inputs = {k: v.mean(dim=0) for k, v in param_inputs.items()}
             retain_graph = optimizer.version == 'squared_grads'
             loss.backward(retain_graph=retain_graph)
-            optimizer.step(outputs, param_inputs)
+            stats = optimizer.step(outputs, param_inputs)
+            effective_lr_accum += list(stats.values())[0]['effective_step_size'].mean().item()
         else:
             loss.backward()
             optimizer.step()
@@ -472,6 +474,8 @@ def run_experiment(
                 step_sizes = torch.exp(state['beta'])
                 metrics['mean_step_size'] = step_sizes.mean().item()
                 metrics['median_step_size'] = step_sizes.median().item()
+                metrics['effective_lr'] = effective_lr_accum / n_steps_since_log
+            effective_lr_accum = 0.0
 
             # Add model statistics separately for real and distractor features
             if log_model_stats:
