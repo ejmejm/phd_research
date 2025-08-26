@@ -531,22 +531,23 @@ class CBPTracker():
         Reset the optimizer state for the weights that output features at the given indices.
         Currently works for SGD and Adam (without step reset) optimizers.
         """
-        optim_state = self.optimizer.state[layer.weight]
-        
-        for key, value in optim_state.items():
-            if value.shape == layer.weight.shape:
-                if value is not None:
-                    optim_state[key][idxs, :] = 0
-            else:
-                warnings.warn(
-                    f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
-                    f"parameter: {layer.weight.shape}, state value: {value.shape}"
-                )
+        if layer.weight in self.optimizer.state:
+            optim_state = self.optimizer.state[layer.weight]
+            
+            for key, value in optim_state.items():
+                if value.shape == layer.weight.shape:
+                    if value is not None:
+                        optim_state[key][idxs, :] = 0
+                else:
+                    warnings.warn(
+                        f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
+                        f"parameter: {layer.weight.shape}, state value: {value.shape}"
+                    )
+                    
+            if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
+                optim_state['beta'][idxs, :] = math.log(self.optimizer.init_lr)
                 
-        if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
-            optim_state['beta'][idxs, :] = math.log(self.optimizer.init_lr)
-                
-        if layer.bias is not None:
+        if layer.bias is not None and layer.bias in self.optimizer.state:
             optim_state = self.optimizer.state[layer.bias]
             
             for key, value in optim_state.items():
@@ -580,6 +581,9 @@ class CBPTracker():
         Reset the optimizer state for the weights that take in features at the given indices.
         Currently works for SGD and Adam optimizers.
         """
+        if layer.weight not in self.optimizer.state:
+            return
+        
         optim_state = self.optimizer.state[layer.weight]
         
         for key, value in optim_state.items():
