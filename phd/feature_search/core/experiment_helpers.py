@@ -342,6 +342,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+            initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
             seed = seed_from_string(base_seed, 'cbp_tracker'),
         )
         cbp_tracker.track_sequential(model.layers)

@@ -435,6 +435,7 @@ class CBPTracker():
         incoming_weight_init = 'kaiming_uniform', # {'kaiming_uniform', 'binary'}
         outgoing_weight_init = 'zeros', # {'zeros', 'kaiming_uniform'}
         utility_reset_mode = 'median', # {'median', 'zero'}
+        initial_step_size_method = 'constant', # {'constant', 'mean', 'median'}
         seed = None,
     ):
         assert optimizer is None or isinstance(optimizer, (Adam, IDBD, torch.optim.SGD))
