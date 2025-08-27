@@ -120,7 +120,7 @@ def prepare_optimizer(
         
     elif optimizer_name == 'idbd':
         kwargs = _extract_kwargs(
-            ['learning_rate', 'meta_learning_rate', 'version', 'weight_decay', 'autostep'], 
+            ['learning_rate', 'meta_learning_rate', 'version', 'weight_decay', 'autostep', 'step_size_decay'], 
             {'version': 'squared_grads', 'weight_decay': 0, 'autostep': True}
         )
         # Map learning_rate to init_lr for IDBD API

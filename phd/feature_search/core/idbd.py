@@ -184,16 +184,24 @@ class IDBD(Optimizer):
                     
                     group_stats['effective_step_size'] = raw_effective_step_size.squeeze()
                     
-                    alpha = alpha / effective_step_size
-                    state['beta'] = torch.log(alpha)
-                    
-                    # TODO: When step size decay is enabled, the effective step-size should probably
-                    #       not permenantly reduce the step-size.
+                    # Apply bound to current step-size and decay it if it is greater than 1.0
+                    # When `self.step_size_decay_factor` is 0.0, then the bounding by the effective step-size
+                    # is permenant and can cause a significant immediate reduction to beta values.
+                    # When `self.step_size_decay_factor` is non-zero, then the bounding by the effective step-size
+                    # is only temporary as the betas are slowly decayed by a value proportional to the gradient
+                    # of each feature.
                     if self.step_size_decay_factor != 0.0 and effective_step_size.gt(1.0).any():
+                        # When using step-size decay, the effective step-size normalization is not permenant
+                        state['beta'] = torch.log(alpha)
+                        alpha = alpha / effective_step_size
+                        
                         decay_values = h_decay_term * self.step_size_decay_factor
                         decay_mask = effective_step_size.gt(1.0)
                         state['beta'] += decay_values * decay_mask
-                    
+                    else:
+                        alpha = alpha / effective_step_size
+                        state['beta'] = torch.log(alpha)
+
                 else:
                     beta.add_(meta_lr * grad * h)
                     state['beta'] = beta

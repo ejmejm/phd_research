@@ -18,7 +18,7 @@ task:
 feature_recycling:
   recycle_rate: 0.005
   use_signed_utility: False
-  initial_step_size_method: constant
+  initial_step_size_method: mean
 
 train:
   total_steps: 200_000
@@ -30,6 +30,7 @@ optimizer:
   version: squared_grads
   weight_decay: 0.0
   autostep: true
+  step_size_decay: 0.0
 
 
 seed: 20250827

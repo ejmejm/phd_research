@@ -56,6 +56,7 @@ optimizer:
   meta_learning_rate: 0.005
   version: squared_grads # {squared_inputs, squared_grads, hvp, hessian_diagonal}, recommend not changing this
   autostep: true
+  step_size_decay: 0.0 # Only applicable when autostep is true, uses Swift-TD inspired step-size decay
 
 # Model parameters
 model:
