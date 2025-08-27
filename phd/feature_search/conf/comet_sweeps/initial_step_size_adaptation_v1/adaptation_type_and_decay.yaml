@@ -1,0 +1,22 @@
+name: adaptation_type_and_decay
+project: feature_recycling-initial_step_size_adaptation_v1
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/initial_step_size_adaptation_v1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.total_steps: 500_000
+  train.log_freq: 500
+
+  model.hidden_dim: 1280
+  task.noise_std: 1.0
+
+  optimizer.learning_rate: [1.0, 0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001, 0.0000001]
+  feature_recycling.initial_step_size_method: [mean, median, constant]
+  optimizer.step_size_decay: [0.0, 0.01]
+
+  seed: [601, 602, 603]
