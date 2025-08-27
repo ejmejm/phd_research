@@ -8,16 +8,17 @@ comet_ml: false
 device: cpu
 
 model:
-  hidden_dim: 1024
+  hidden_dim: 5120
 
 task:
   distractor_chance: 0.0
-  noise_std: 0.0
+  noise_std: 0.4
   distractor_mean_range: [ 0.0, 0.0 ]
 
 feature_recycling:
   recycle_rate: 0.005
   use_signed_utility: False
+  initial_step_size_method: constant
 
 train:
   total_steps: 200_000
@@ -25,10 +26,10 @@ train:
 
 optimizer:
   name: idbd
-  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
+  learning_rate: 1.0 # ${eval:0.03 / ${model.hidden_dim} ** 0.75}
   version: squared_grads
-  weight_decay: 0.001
+  weight_decay: 0.0
   autostep: true
 
 
-seed: 20250819
+seed: 20250827

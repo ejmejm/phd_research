@@ -453,6 +453,7 @@ class CBPTracker():
         self.incoming_weight_init = incoming_weight_init
         self.outgoing_weight_init = outgoing_weight_init
         self._utility_reset_mode = utility_reset_mode
+        self.initial_step_size_method = initial_step_size_method
         self.seed = seed
         self.rng = None
 
@@ -535,6 +536,11 @@ class CBPTracker():
         if layer.weight in self.optimizer.state:
             optim_state = self.optimizer.state[layer.weight]
             
+            # Get mean and median beta over inputs for the entire layer
+            if isinstance(self.optimizer, IDBD) and 'beta' in optim_state and self.initial_step_size_method != 'constant':
+                mean_beta = optim_state['beta'].mean()
+                median_beta = optim_state['beta'].median()
+            
             for key, value in optim_state.items():
                 if value.shape == layer.weight.shape:
                     if value is not None:
@@ -544,9 +550,22 @@ class CBPTracker():
                         f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
                         f"parameter: {layer.weight.shape}, state value: {value.shape}"
                     )
-                    
+            
+            # Because a whole output unit is reset, it is unclear how the new step-size should be set.
+            # Because it is created with the same inputs though, using the step-sizes that have been
+            # used across the whole of the layer seems like a reasonable choice.
+            # It could also make sense to simply decide this with a constant formula based on the number of input units.
+            # This latter choice would make more sense if the layers were not uniform in structure.
+            # TODO: Make sure to test this choice once moving onto networks with more than one layer of feature recycling.
             if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
-                optim_state['beta'][idxs, :] = math.log(self.optimizer.init_lr)
+                if self.initial_step_size_method == 'constant':
+                    optim_state['beta'][idxs, :] = math.log(self.optimizer.init_lr)
+                elif self.initial_step_size_method == 'mean':
+                    optim_state['beta'][idxs, :] = mean_beta
+                elif self.initial_step_size_method == 'median':
+                    optim_state['beta'][idxs, :] = median_beta
+                else:
+                    raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
                 
         if layer.bias is not None and layer.bias in self.optimizer.state:
             optim_state = self.optimizer.state[layer.bias]
@@ -587,6 +606,11 @@ class CBPTracker():
         
         optim_state = self.optimizer.state[layer.weight]
         
+        # Get mean and median beta per output unit
+        if isinstance(self.optimizer, IDBD) and 'beta' in optim_state and self.initial_step_size_method != 'constant':
+            mean_betas = optim_state['beta'].mean(dim=1)
+            median_betas = optim_state['beta'].median(dim=1).values
+        
         for key, value in optim_state.items():
             if value.shape == layer.weight.shape:
                 if value is not None:
@@ -597,9 +621,15 @@ class CBPTracker():
                     f"parameter: {layer.weight.shape}, state value: {value.shape}"
                 )
         
-        # TODO: Consider making different variables for initial step-size of reset outgoing and incoming weights
         if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
-            optim_state['beta'][:, idxs] = math.log(self.optimizer.init_lr)
+            if self.initial_step_size_method == 'constant':
+                optim_state['beta'][:, idxs] = math.log(self.optimizer.init_lr)
+            elif self.initial_step_size_method == 'mean':
+                optim_state['beta'][:, idxs] = mean_betas.unsqueeze(1)
+            elif self.initial_step_size_method == 'median':
+                optim_state['beta'][:, idxs] = median_betas.unsqueeze(1)
+            else:
+                raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
 
     def _get_hook(self, layer: nn.Module):
         """Return a hook function for a given layer."""
