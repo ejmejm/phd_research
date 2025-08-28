@@ -1,0 +1,24 @@
+# Sweep over the meta-step-size in the non-stationary setting to see if it can help adapt faster.
+
+name: ns_meta_step_size
+project: feature_recycling-initial_step_size_adaptation_v1
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/initial_step_size_adaptation_v1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.log_freq: 1500
+  task.n_stationary_layers: 0
+  model.hidden_dim: 20480
+  task.flip_rate: "${eval:2**-16}"
+
+  optimizer.learning_rate:
+    - ${eval:0.03 / ${model.hidden_dim} ** 0.75}
+    - ${eval:0.003 / ${model.hidden_dim} ** 0.75}
+    - ${eval:0.0003 / ${model.hidden_dim} ** 0.75}
+  optimizer.meta_learning_rate: [0.05, 0.01, 0.005, 0.001, 0.0005]
+  seed: [501, 502, 503]

@@ -1,0 +1,23 @@
+# The goal is to see if initial step-size adaptation can help to perform better when faced with non-stationarity.
+# I also just want to generally better understand how step-sizes change over time when the problem is non-stationary.
+
+name: ns_a0_adaptation
+project: feature_recycling-initial_step_size_adaptation_v1
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/initial_step_size_adaptation_v1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.log_freq: 1500
+
+  task.n_stationary_layers: 0
+  feature_recycling.initial_step_size_method: [mean, median]
+
+  optimizer.learning_rate: [1.0, 0.1, 0.01, 0.001, 0.0001]
+  model.hidden_dim: [320, 1280, 5120, 20480]
+  task.flip_rate: ["${eval:0.0}", "${eval:2**-20}", "${eval:2**-16}", "${eval:2**-12}"]
+  seed: [501, 502, 503]

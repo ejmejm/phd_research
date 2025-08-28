@@ -1,3 +1,6 @@
+# The goal with this sweep is to generate stats on how the step-sizes change over time
+# to get a better understanding of what is going on.
+
 name: noise_varying_step_sizes
 project: feature_recycling-noise_varying_step_sizes
 command: python scripts/full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v5_step_size/base_config.yaml

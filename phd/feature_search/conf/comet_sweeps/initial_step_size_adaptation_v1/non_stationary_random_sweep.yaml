@@ -1,0 +1,27 @@
+# Sweep over meta-step-size, initial step-size, and weight decay all together with an adaptive initial step-size
+# to see if any combination of these things can improve performance in the non-stationary setting.
+
+
+name: ns_meta_step_size
+project: feature_recycling-initial_step_size_adaptation_v1
+command: python scripts/full_feature_search.py --config-name=comet_sweeps/initial_step_size_adaptation_v1/base_config.yaml
+algorithm: grid
+# trials: 1
+
+spec:
+  metric: cumulative_loss
+  objective: bayes
+  retryAssignLimit: 4
+
+parameters:
+  train.log_freq: 1500
+  task.n_stationary_layers: 0
+  model.hidden_dim: 20480
+  task.flip_rate: "${eval:2**-16}"
+
+  feature_recycling.initial_step_size_method: [mean, median]
+  feature_recycling.utility_decay: [0.5, 0.8, 0.9, 0.95, 0.99]
+  optimizer.learning_rate: [10.0, 1.0, 0.1, 0.01, 0.001, 0.0001]
+  optimizer.meta_learning_rate: [0.05, 0.01, 0.005, 0.001, 0.0005]
+  optimizer.weight_decay: [0.0, 0.1, 0.5, 1.0, 5.0]
+  seed: [599]
