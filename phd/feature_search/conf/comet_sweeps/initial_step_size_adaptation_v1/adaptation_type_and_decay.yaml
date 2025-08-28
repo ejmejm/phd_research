@@ -10,7 +10,7 @@ spec:
 
 parameters:
   train.total_steps: 500_000
-  train.log_freq: 500
+  train.log_freq: 250
 
   model.hidden_dim: 1280
   task.noise_std: 1.0
