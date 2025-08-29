@@ -11,9 +11,10 @@ spec:
   retryAssignLimit: 4
 
 parameters:
-  train.log_freq: 1500
+  train.total_steps: 600_000
+  train.log_freq: 2000
   task.n_stationary_layers: 0
-  model.hidden_dim: 20480
+  model.hidden_dim: 5120
   task.flip_rate: "${eval:2**-16}"
 
   optimizer.learning_rate:

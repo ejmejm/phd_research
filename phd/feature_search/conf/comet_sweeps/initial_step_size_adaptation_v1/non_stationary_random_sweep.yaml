@@ -14,14 +14,15 @@ spec:
   retryAssignLimit: 4
 
 parameters:
-  train.log_freq: 1500
+  train.total_steps: 600_000
+  train.log_freq: 2000
   task.n_stationary_layers: 0
-  model.hidden_dim: 20480
+  model.hidden_dim: 5120
   task.flip_rate: "${eval:2**-16}"
 
   feature_recycling.initial_step_size_method: [mean, median]
   feature_recycling.utility_decay: [0.5, 0.8, 0.9, 0.95, 0.99]
   optimizer.learning_rate: [10.0, 1.0, 0.1, 0.01, 0.001, 0.0001]
   optimizer.meta_learning_rate: [0.05, 0.01, 0.005, 0.001, 0.0005]
-  optimizer.weight_decay: [0.0, 0.1, 0.5, 1.0, 5.0]
+  # optimizer.weight_decay: [0.0, 0.1, 0.5, 1.0, 5.0]
   seed: [599]
