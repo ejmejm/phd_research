@@ -2,7 +2,7 @@
 # to see if any combination of these things can improve performance in the non-stationary setting.
 
 
-name: ns_meta_step_size
+name: ns_full_sweep # ns_meta_step_size
 project: feature_recycling-initial_step_size_adaptation_v1
 command: python scripts/full_feature_search.py --config-name=comet_sweeps/initial_step_size_adaptation_v1/base_config.yaml
 algorithm: grid
@@ -10,7 +10,7 @@ algorithm: grid
 
 spec:
   metric: cumulative_loss
-  objective: bayes
+  objective: grid
   retryAssignLimit: 4
 
 parameters:
