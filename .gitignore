@@ -26,3 +26,4 @@ discovery.egg-info/
 *.db
 *.pth
 *.pkl
+*.pbz2
