@@ -28,10 +28,13 @@ class EqxOptimizer(eqx.Module):
         
         self.state = self.optimizer.init(trainable_params)
 
-    def with_update(self, grads, params) -> Tuple[PyTree, 'EqxOptimizer']:
+    def with_update(self, grads, model) -> Tuple[PyTree, 'EqxOptimizer']:
         """Update the optimizer state and return a new optimizer."""
         if self.filter_spec is not None:
             grads = eqx.filter(grads, self.filter_spec)
-            
-        updates, new_state = self.optimizer.update(grads, self.state, params)
+        
+        # params = eqx.partition(model, eqx.is_inexact_array)[0]
+        print(self.filter_spec)
+        print(grads)
+        updates, new_state = self.optimizer.update(grads, self.state)
         return updates, tree_replace(self, state=new_state)

@@ -168,64 +168,64 @@ class TestOptimizers:
         ), "Third layer weights should have changed"
     
     
-    # def test_adam_optimizer(self):
-    #     """Test SGD optimizer reduces loss and respects frozen layers."""
-    #     key = jax.random.PRNGKey(42)
-    #     model_key, data_key = jax.random.split(key)
+    def test_adam_optimizer(self):
+        """Test SGD optimizer reduces loss and respects frozen layers."""
+        key = jax.random.PRNGKey(42)
+        model_key, data_key = jax.random.split(key)
         
-    #     # Create model and data
-    #     model = self._create_test_model(model_key)
-    #     x_data, y_data = self._create_simple_dataset(data_key)
+        # Create model and data
+        model = self._create_test_model(model_key)
+        x_data, y_data = self._create_simple_dataset(data_key)
         
-    #     # Store initial weights for comparison
-    #     initial_first_layer_weights = model.layers[0].weight.copy()
-    #     initial_second_layer_weights = model.layers[1].weight.copy()
-    #     initial_third_layer_weights = model.layers[2].weight.copy()
+        # Store initial weights for comparison
+        initial_first_layer_weights = model.layers[0].weight.copy()
+        initial_second_layer_weights = model.layers[1].weight.copy()
+        initial_third_layer_weights = model.layers[2].weight.copy()
         
-    #     # Create optimizer
-    #     optimizer_config = DictConfig({'learning_rate': 0.01})
-    #     optimizer = prepare_optimizer(model, 'adam', optimizer_config)
+        # Create optimizer
+        optimizer_config = DictConfig({'learning_rate': 0.01})
+        optimizer = prepare_optimizer(model, 'adam', optimizer_config)
         
-    #     # Initial loss
-    #     def loss_fn(model):
-    #         predictions, _ = jax.vmap(model)(x_data)
-    #         return jnp.mean((predictions - y_data) ** 2)
+        # Initial loss
+        def loss_fn(model):
+            predictions, _ = jax.vmap(model)(x_data)
+            return jnp.mean((predictions - y_data) ** 2)
         
-    #     initial_loss = loss_fn(model)
+        initial_loss = loss_fn(model)
         
-    #     # Train for several steps
-    #     current_model = model
-    #     current_optimizer = optimizer
-    #     for _ in range(100):
-    #         # print(current_optimizer.optimizer_state)
-    #         current_model, current_optimizer, loss = self._train_step(
-    #             current_model, current_optimizer, x_data, y_data
-    #         )
+        # Train for several steps
+        current_model = model
+        current_optimizer = optimizer
+        train_step = jax.jit(self._train_step)
+        for _ in range(100):
+            current_model, current_optimizer, loss = train_step(
+                current_model, current_optimizer, x_data, y_data
+            )
         
-    #     final_loss = loss_fn(current_model)
+        final_loss = loss_fn(current_model)
         
-    #     # Verify loss reduction
-    #     assert final_loss < initial_loss * 0.2, f"Loss should reduce significantly: {initial_loss} -> {final_loss}"
+        # Verify loss reduction
+        assert final_loss < initial_loss * 0.2, f"Loss should reduce significantly: {initial_loss} -> {final_loss}"
         
-    #     # Verify first layer is frozen (unchanged)
-    #     np.testing.assert_array_equal(
-    #         current_model.layers[0].weight,
-    #         initial_first_layer_weights,
-    #         "First layer weights should remain unchanged (frozen)"
-    #     )
+        # Verify first layer is frozen (unchanged)
+        np.testing.assert_array_equal(
+            current_model.layers[0].weight,
+            initial_first_layer_weights,
+            "First layer weights should remain unchanged (frozen)"
+        )
         
-    #     # Verify other layers have changed
-    #     assert not jnp.allclose(
-    #         current_model.layers[1].weight,
-    #         initial_second_layer_weights,
-    #         atol=1e-6
-    #     ), "Second layer weights should have changed"
+        # Verify other layers have changed
+        assert not jnp.allclose(
+            current_model.layers[1].weight,
+            initial_second_layer_weights,
+            atol=1e-6
+        ), "Second layer weights should have changed"
         
-    #     assert not jnp.allclose(
-    #         current_model.layers[2].weight,
-    #         initial_third_layer_weights,
-    #         atol=1e-6
-    #     ), "Third layer weights should have changed"
+        assert not jnp.allclose(
+            current_model.layers[2].weight,
+            initial_third_layer_weights,
+            atol=1e-6
+        ), "Third layer weights should have changed"
 
 
 
