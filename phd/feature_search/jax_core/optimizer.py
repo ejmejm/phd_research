@@ -33,8 +33,5 @@ class EqxOptimizer(eqx.Module):
         if self.filter_spec is not None:
             grads = eqx.filter(grads, self.filter_spec)
         
-        # params = eqx.partition(model, eqx.is_inexact_array)[0]
-        print(self.filter_spec)
-        print(grads)
-        updates, new_state = self.optimizer.update(grads, self.state)
+        updates, new_state = self.optimizer.update(grads, self.state, model)
         return updates, tree_replace(self, state=new_state)
