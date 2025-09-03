@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 import equinox.nn as nn
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Callable, List, Optional, Tuple, Any
 from jax import Array
 from jaxtyping import PRNGKeyArray
 
@@ -55,9 +55,9 @@ class MLP(eqx.Module):
     hidden_dim: int = eqx.field(static=True)
     weight_init_method: str = eqx.field(static=True)
     n_frozen_layers: int = eqx.field(static=True)
+    activation_fn: Callable = eqx.field(static=True)
     
     layers: List[Any]
-    activation_fn: Any
 
     def __init__(
         self,
