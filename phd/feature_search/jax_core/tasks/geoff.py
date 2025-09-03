@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import numpy as np
 from jax import random, lax
+from jaxtyping import Array, Float, Int
 
 from ..utils import tree_replace
 
@@ -37,10 +38,11 @@ class NonlinearGEOFFTask(eqx.Module):
     standard_input: bool = eqx.field(static=True)
     
     # Dynamic parameters (weights and state)
-    weights: List[jax.Array]
-    flip_accumulators: List[float]
-    input_mean: Optional[jax.Array] = None
-    input_std: Optional[jax.Array] = None
+    weights: List[Float[Array, 'in_features out_features']]
+    flip_accumulators: Float[Array, 'n_layers']
+    _n_flippable: Int[Array, 'n_layers']
+    input_mean: Optional[Float[Array, 'n_features']] = None
+    input_std: Optional[Float[Array, 'n_features']] = None
     rng: random.PRNGKey
 
     def __init__(
@@ -121,7 +123,7 @@ class NonlinearGEOFFTask(eqx.Module):
             weight_key, key = random.split(key)
             layer_weights = self._initialize_weights(weight_key, n_features, 1)
             self.weights = [layer_weights]
-            self.flip_accumulators = [flip_rate * n_features]
+            flip_accumulators = [flip_rate * n_features]
         else:
             # Multiple layers with hidden dimensions
             # We'll use JAX's functional approach to build the weights list
@@ -156,7 +158,21 @@ class NonlinearGEOFFTask(eqx.Module):
             all_accumulators.append(flip_rate * in_dims[-1] * out_dims[-1])
             
             self.weights = all_weights
-            self.flip_accumulators = all_accumulators
+            flip_accumulators = all_accumulators
+            
+        self.flip_accumulators = jnp.array(flip_accumulators, dtype=jnp.float32)
+        
+        n_flippable = []
+        for i in range(len(self.flip_accumulators)):
+            if self.n_layers == 1:
+                n_flippable = self.n_features
+            elif i == 0:
+                n_flippable = self.n_features * self.hidden_dim
+            elif i == len(self.weights) - 1:
+                n_flippable = self.hidden_dim
+            else:
+                n_flippable = self.hidden_dim * self.hidden_dim
+        self._n_flippable = jnp.array(n_flippable, dtype=jnp.int32)
 
         self.rng = key
     
@@ -278,19 +294,8 @@ class NonlinearGEOFFTask(eqx.Module):
             - New task state
             - Batch data (x, y)
         """
-        # Accumulate and handle weight flips
-        new_accumulators = []
-        for i in range(len(self.flip_accumulators)):
-            if self.n_layers == 1:
-                n_flippable = self.n_features
-            elif i == 0:
-                n_flippable = self.n_features * self.hidden_dim
-            elif i == len(self.weights) - 1:
-                n_flippable = self.hidden_dim
-            else:
-                n_flippable = self.hidden_dim * self.hidden_dim
-                
-            new_accumulators.append(self.flip_accumulators[i] + self.flip_rate * n_flippable)
+        print(self.flip_accumulators, self.flip_rate, self._n_flippable)
+        new_accumulators = self.flip_accumulators + self.flip_rate * self._n_flippable
         
         new_rng, flip_key, x_key = random.split(self.rng, 3)
 
