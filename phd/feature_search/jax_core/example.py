@@ -16,7 +16,7 @@ def main():
     seed = 42
     key = random.PRNGKey(seed)
     
-    # jax.config.update('jax_platform_name', 'cpu')
+    jax.config.update('jax_platform_name', 'cpu')
     print(f"JAX is using device: {xla_bridge.get_backend().platform}")
     
     print("Creating NonlinearGEOFFTask...")
@@ -54,7 +54,7 @@ def main():
         return task.generate_batch(batch_size)
     
     def gen_batch_scan(task, length):
-        return jax.lax.scan(lambda x, y: gen_batch(x), task, None, length=length)
+        return jax.lax.scan(lambda x, y: gen_batch(x), task, None, length=length, unroll=20)
     
     jitted_gen_batch = jax.jit(gen_batch)
     jitted_gen_batch_scan = jax.jit(gen_batch_scan, static_argnums=(1,))
@@ -71,6 +71,7 @@ def main():
     start_time = time.time()
     for i in range(n_runs):
         task, _ = jitted_gen_batch(task)
+    jax.block_until_ready(task)
     jitted_time = time.time() - start_time
     
     # Generate batch scan warmup
@@ -79,7 +80,6 @@ def main():
 
     # JIT + scan execution
     start_time = time.time()
-    # with jax.profiler.TraceAnnotation('geoff_batch_scan_session'):
     # with jax.profiler.trace("/tmp/jax-trace/gpu", create_perfetto_link=True):
     jax.block_until_ready(jitted_gen_batch_scan(task, n_runs))
     jax_scan_time = time.time() - start_time

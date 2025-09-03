@@ -31,7 +31,6 @@ class NonlinearGEOFFTask(eqx.Module):
     n_stationary_layers: int = eqx.field(static=True)
     hidden_dim: int = eqx.field(static=True)
     weight_scale: float = eqx.field(static=True)
-    flip_rate: float = eqx.field(static=True)
     activation: str = eqx.field(static=True)
     sparsity: float = eqx.field(static=True)
     weight_init: str = eqx.field(static=True)
@@ -41,6 +40,7 @@ class NonlinearGEOFFTask(eqx.Module):
     weights: List[Float[Array, 'in_features out_features']]
     flip_accumulators: Float[Array, 'n_layers']
     _n_flippable: Int[Array, 'n_layers']
+    flip_rate: Float[Array, 'n_layers']
     input_mean: Optional[Float[Array, 'n_features']] = None
     input_std: Optional[Float[Array, 'n_features']] = None
     rng: random.PRNGKey
@@ -85,7 +85,7 @@ class NonlinearGEOFFTask(eqx.Module):
         self.n_stationary_layers = n_stationary_layers
         self.hidden_dim = hidden_dim
         self.weight_scale = weight_scale
-        self.flip_rate = flip_rate
+        self.flip_rate = jnp.array(flip_rate, dtype=jnp.float32)
         self.activation = activation
         self.sparsity = sparsity
         self.weight_init = weight_init
@@ -233,56 +233,33 @@ class NonlinearGEOFFTask(eqx.Module):
         
         return x @ self.weights[-1]
     
-    def _flip_signs(self, key: random.PRNGKey) -> Tuple[list, list, random.PRNGKey]:
-        """Flip signs of weights based on accumulated probabilities."""
-        # Make a mutable copy of the weights and accumulators
-        new_weights = [w.copy() for w in self.weights]
-        new_accumulators = [a for a in self.flip_accumulators]
+    def _flip_signs(
+        self,
+        weights: Float[Array, 'in_features out_features'],
+        flip_accumulator: Float[Array, ''],
+        key: random.PRNGKey,
+    ) -> Tuple[Float[Array, 'in_features out_features'], Float[Array, '']]:
+        """Flips the signs of weights based on the flip accumulator.
         
-        for layer_idx in range(self.n_stationary_layers, len(self.weights)):
-            weights = new_weights[layer_idx]
-            accumulator = new_accumulators[layer_idx]
+        Args:
+            weights: Weight matrix to flip signs of
+            flip_accumulator: Flip accumulator for the layer
+            key: PRNG key
             
-            # Use a fixed-trace approach with a percentage mask instead of random.choice
-            def flip_weights(weights, accumulator, key):
-                # Get total number of elements in the weight matrix
-                total_elements = weights.size
-                n_flips = jnp.floor(accumulator).astype(jnp.int32)
-                
-                # Create a random mask with exactly n_flips ones
-                # Use uniform random values and get the top-n_flips values
-                key, subkey = random.split(key)
-                random_vals = random.uniform(subkey, shape=(total_elements,))
-                
-                # Create a boolean mask for the indices with top-n_flips values
-                threshold = jnp.sort(random_vals)[-n_flips]
-                mask = (random_vals >= threshold).astype(jnp.int32)
-                
-                # Ensure we have exactly n_flips ones (handling ties)
-                # This is needed because ties in random values might give more than n_flips ones
-                cumsum = jnp.cumsum(mask)
-                mask = jnp.where(cumsum <= n_flips, mask, 0)
-                
-                # Reshape weights to 1D for indexing
-                flat_weights = weights.reshape(-1)
-                
-                # Apply flip using the mask (-1 where mask is 1, 1 otherwise)
-                flip_factors = 1 - 2 * mask
-                flipped_weights = flat_weights * flip_factors
-                
-                # Return reshaped weights and updated accumulator
-                return flipped_weights.reshape(weights.shape), accumulator - n_flips, key
-                
-            # Use lax.cond for conditional execution
-            n_flips = jnp.floor(accumulator)
-            new_weights[layer_idx], new_accumulators[layer_idx], key = lax.cond(
-                n_flips > 0,
-                lambda k: flip_weights(weights, accumulator, k),
-                lambda k: (weights, accumulator, k),
-                key
-            )
-        return new_weights, new_accumulators, key
-    
+        Returns:
+            Tuple containing:
+            - Flipped weight matrix
+            - Updated flip accumulator
+        """
+        n_flips = jnp.floor(flip_accumulator).astype(jnp.int32)
+        flip_accumulator = flip_accumulator - n_flips
+        
+        # Randomly select weights to flip
+        flat_idx = random.permutation(key, weights.size)
+        weights = weights * jnp.where(flat_idx < n_flips, -1, 1).reshape(*weights.shape)
+        
+        return weights, flip_accumulator
+
     def generate_batch(self, batch_size: int = 1) -> Tuple[eqx.Module, Tuple]:
         """Generates a single batch of data.
         
@@ -294,13 +271,23 @@ class NonlinearGEOFFTask(eqx.Module):
             - New task state
             - Batch data (x, y)
         """
-        print(self.flip_accumulators, self.flip_rate, self._n_flippable)
-        new_accumulators = self.flip_accumulators + self.flip_rate * self._n_flippable
+        accumulators = self.flip_accumulators + self.flip_rate * self._n_flippable
         
         new_rng, flip_key, x_key = random.split(self.rng, 3)
 
         # Flip weights according to accumulators
-        new_weights, new_accumulators, key = self._flip_signs(key=flip_key)
+        new_weights = []
+        new_accumulators = []
+        flip_keys = random.split(flip_key, len(self.weights))
+        for layer_idx in range(self.n_stationary_layers, len(self.weights)):
+            new_weight, accumulator = self._flip_signs(
+                weights = self.weights[layer_idx],
+                flip_accumulator = accumulators[layer_idx],
+                key = flip_keys[layer_idx],
+            )
+            new_weights.append(new_weight)
+            new_accumulators.append(accumulator)
+        new_accumulators = jnp.array(new_accumulators, dtype=jnp.float32)
         
         # Generate random input features
         x = random.normal(x_key, (batch_size, self.n_features))
