@@ -6,7 +6,7 @@ import equinox as eqx
 from equinox import nn
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, PyTree, PRNGKeyArray
 import numpy as np
 import omegaconf
 from omegaconf import DictConfig
@@ -51,18 +51,20 @@ def prepare_optimizer(
         model: eqx.Module, 
         optimizer_name: str,
         optimizer_kwargs: DictConfig,
+        filter_spec: Optional[PyTree] = None,
     )-> EqxOptimizer:
     """Prepare the optimizer based on configuration.
     
     Uses default values for parameters not specified in config, while allowing
     irrelevant parameters to be specified without causing errors.
     """
-    filter_spec = jax.tree.map(lambda _: False, model)
-    filter_spec = eqx.tree_at(
-        lambda x: x.layers[model.n_frozen_layers:],
-        filter_spec,
-        jax.tree.map(lambda _: True, model.layers[model.n_frozen_layers:]),
-    )
+    if filter_spec is None:
+        filter_spec = jax.tree.map(lambda _: False, model)
+        filter_spec = eqx.tree_at(
+            lambda x: x.layers[model.n_frozen_layers:],
+            filter_spec,
+            jax.tree.map(lambda _: True, model.layers[model.n_frozen_layers:]),
+        )
 
     def _extract_kwargs(param_names, defaults = None):
         """Extract specified parameters from config, using defaults when not provided."""
@@ -131,11 +133,11 @@ def set_seed(seed: Optional[int]):
         np.random.seed(seed)
 
 
-def seed_from_string(seed: Optional[int], string: str) -> Optional[int]:
-    """Deterministic hash of a string."""
-    if seed is None:
-        return random.randint(0, 2**32)
-    return seed + int(hashlib.md5(string.encode()).hexdigest(), 16) % (2**32)
+def rng_from_string(rng: Optional[PRNGKeyArray], string: str) -> PRNGKeyArray:
+    """Rng key based on prior key + deterministic hash of a string."""
+    if rng is None:
+        return jax.random.PRNGKey(random.randint(0, 2**32))
+    return jax.random.fold_in(rng, int(hashlib.md5(string.encode()).hexdigest(), 16))
 
 
 # def get_model_statistics(
@@ -286,3 +288,48 @@ def standardize_targets(
         running_var = running_var,
         step = stats.step + 1,
     )
+
+
+def prepare_components(cfg: DictConfig, model: Optional[eqx.Module] = None):
+    """Prepare the components based on configuration."""
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
+    rng = jax.random.PRNGKey(base_seed)
+    
+    task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
+    
+    # Initialize model and optimizer
+    if model is None:
+        model = MLP(
+            input_dim = cfg.task.n_features,
+            output_dim = cfg.model.output_dim,
+            n_layers = cfg.model.n_layers,
+            hidden_dim = cfg.model.hidden_dim,
+            weight_init_method = cfg.model.weight_init_method,
+            activation = cfg.model.activation,
+            n_frozen_layers = cfg.model.n_frozen_layers,
+            seed = seed_from_string(base_seed, 'model'),
+        )
+    model.to(cfg.device)
+    
+    criterion = (optax.softmax_cross_entropy if cfg.task.type == 'classification'
+                else optax.l2_loss)
+    optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
+    
+    # # TODO: Implement CBP tracker in JAX
+    # # Initialize CBP tracker
+    # if cfg.feature_recycling.use_cbp_utility:
+    #     cbp_tracker = CBPTracker(
+    #         optimizer = optimizer,
+    #         replace_rate = cfg.feature_recycling.recycle_rate,
+    #         decay_rate = cfg.feature_recycling.utility_decay,
+    #         maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+    #         initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
+    #         seed = seed_from_string(base_seed, 'cbp_tracker'),
+    #     )
+    #     cbp_tracker.track_sequential(model.layers)
+    # else:
+    #     cbp_tracker = None
+    
+    cbp_tracker = None
+    
+    return task, model, criterion, optimizer, cbp_tracker

@@ -1,7 +1,7 @@
 """
 Rupam's problem setup, but with distractors and other additions.
 
-This script is a more complete version of the `rupam_experiment.py` script, which adds the following features:
+Adds the following features:
 - Distractors in the input
 - Target noise
 - Separate optimizers for the intermediate and output layers
