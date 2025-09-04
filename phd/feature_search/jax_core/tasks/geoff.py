@@ -92,7 +92,7 @@ class NonlinearGEOFFTask(eqx.Module):
         
         # Set up RNG
         if seed is None:
-            seed = np.random.randint(0, 1000000000)
+            seed = np.random.randint(0, 2**31)
         key = random.PRNGKey(seed)
         
         # Handle input distribution

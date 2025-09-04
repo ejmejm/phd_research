@@ -4,6 +4,7 @@ from typing import Iterator, Tuple, Callable, List, Optional
 import equinox as eqx
 import hydra
 import jax
+import jax.numpy as jnp
 import numpy as np
 from omegaconf import DictConfig
 import optax
@@ -17,6 +18,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
     set_seed,
     standardize_targets,
     StandardizationStats,
+    rng_from_string,
 )
 # from phd.feature_search.jax_core.idbd import IDBD
 from phd.feature_search.jax_core.models import MLP
@@ -33,7 +35,8 @@ logger = logging.getLogger(__name__)
 
 def prepare_components(cfg: DictConfig):
     """Prepare the components based on configuration."""
-    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**31)
+    rng = jax.random.key(base_seed)
     task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
     use_bias = cfg.model.get('use_bias', True)
     
@@ -46,9 +49,8 @@ def prepare_components(cfg: DictConfig):
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
-        seed = seed_from_string(base_seed, 'model'),
+        key = rng_from_string(rng, 'model'),
     )
-    model.to(cfg.device)
     
     criterion = (optax.softmax_cross_entropy if cfg.task.type == 'classification'
                 else optax.l2_loss)
@@ -104,7 +106,8 @@ def prepare_components(cfg: DictConfig):
 
 def prepare_ltu_geoff_experiment(cfg: DictConfig):
     set_seed(cfg.seed)
-    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**31)
+    rng = jax.random.key(base_seed)
     
     task, model, criterion, optimizer, repr_optimizer, cbp_tracker = \
         prepare_components(cfg)
@@ -124,28 +127,20 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
         cbp_tracker.incoming_weight_init = 'binary'
     
     # Init target output weights to kaiming uniform and predictor output weights to zero
-    task_init_generator = torch.Generator(device=task.weights[-1].device)
-    task_init_generator.manual_seed(seed_from_string(base_seed, 'task_init_generator'))
-    torch.nn.init.kaiming_uniform_(
-        task.weights[-1],
-        mode = 'fan_in',
-        nonlinearity = 'linear',
-        generator = task_init_generator,
+    task_init_key = rng_from_string(rng, 'task_init_key')
+    task.weights[-1] = jax.random.uniform(
+        task_init_key,
+        task.weights[-1].shape,
+        minval = -jnp.sqrt(6 / task.weights[-1].shape[0]),
+        maxval = jnp.sqrt(6 / task.weights[-1].shape[0]),
     )
-    torch.nn.init.zeros_(model.layers[-1].weight)
+    model = eqx.tree_at(lambda m: m.layers[-1].weight, model, jnp.zeros_like(model.layers[-1].weight))
     
-    # Change LTU threshold for target and predictors
-    ltu_threshold = 0.0 # 0.1 * cfg.task.n_features
-    for layer in model.layers:
-        if isinstance(layer, LTU):
-            layer.threshold = ltu_threshold
-    task.activation_fn.threshold = ltu_threshold
+    # Note: LTU thresholds are all set to 0.0 by default
 
-    torch.manual_seed(seed_from_string(base_seed, 'experiment_setup'))
+    set_seed(seed_from_string(base_seed, 'experiment_setup'))
 
-    return task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker
-
-
+    return task, model, criterion, optimizer, repr_optimizer, cbp_tracker
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search')
@@ -158,24 +153,26 @@ def main(cfg: DictConfig) -> None:
     
     cfg = init_experiment(cfg.project, cfg)
 
-    task, task_iterator, model, criterion, optimizer, repr_optimizer, recycler, cbp_tracker = \
+    task, model, criterion, optimizer, repr_optimizer, cbp_tracker = \
         prepare_ltu_geoff_experiment(cfg)
-    model.forward = model_distractor_forward_pass.__get__(model)
+        
+    # TODO: Implement distractor tracking
+    # model.forward = model_distractor_forward_pass.__get__(model)
     
-    distractor_tracker = DistractorTracker(
-        model,
-        cfg.task.distractor_chance,
-        tuple(cfg.task.distractor_mean_range),
-        tuple(cfg.task.distractor_std_range),
-        seed = seed_from_string(cfg.seed, 'distractor_tracker'),
-    )
+    # distractor_tracker = DistractorTracker(
+    #     model,
+    #     cfg.task.distractor_chance,
+    #     tuple(cfg.task.distractor_mean_range),
+    #     tuple(cfg.task.distractor_std_range),
+    #     seed = seed_from_string(cfg.seed, 'distractor_tracker'),
+    # )
     
-    run_experiment(
-        cfg, task, task_iterator, model, criterion, optimizer,
-        repr_optimizer, cbp_tracker, distractor_tracker,
-    )
+    # run_experiment(
+    #     cfg, task, task_iterator, model, criterion, optimizer,
+    #     repr_optimizer, cbp_tracker, distractor_tracker,
+    # )
     
-    finish_experiment(cfg)
+    # finish_experiment(cfg)
 
 
 if __name__ == '__main__':

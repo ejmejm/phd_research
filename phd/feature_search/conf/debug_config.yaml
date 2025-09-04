@@ -2,13 +2,13 @@ defaults:
 - full_feature_search
 - _self_
 
-wandb: true
+wandb: false
 comet_ml: false
 
 device: cpu
 
 model:
-  hidden_dim: 5120
+  hidden_dim: 1240
 
 task:
   distractor_chance: 0.0
@@ -25,7 +25,7 @@ train:
   standardize_cumulants: true
 
 optimizer:
-  name: idbd
+  name: rmsprop # idbd
   learning_rate: 1.0 # ${eval:0.03 / ${model.hidden_dim} ** 0.75}
   version: squared_grads
   weight_decay: 0.0

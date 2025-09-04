@@ -130,7 +130,6 @@ def set_seed(seed: Optional[int]):
     """Set random seeds for reproducibility."""
     if seed is not None:
         random.seed(seed)
-        jax.random.seed(seed)
         np.random.seed(seed)
 
 
@@ -318,7 +317,6 @@ def prepare_components(cfg: DictConfig, model: Optional[eqx.Module] = None):
             n_frozen_layers = cfg.model.n_frozen_layers,
             key = rng_from_string(rng, 'model'),
         )
-    model.to(cfg.device)
     
     criterion = (optax.softmax_cross_entropy if cfg.task.type == 'classification'
                 else optax.l2_loss)
