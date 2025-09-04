@@ -1,3 +1,4 @@
+from ctypes import c_int32
 import hashlib
 import random
 from typing import Optional, Tuple
@@ -133,11 +134,19 @@ def set_seed(seed: Optional[int]):
         np.random.seed(seed)
 
 
+def seed_from_string(seed: Optional[int], string: str) -> Optional[int]:
+    """Deterministic hash of a string."""
+    if seed is None:
+        return random.randint(0, 2**32)
+    return seed + int(hashlib.md5(string.encode()).hexdigest(), 16) % (2**32)
+
+
 def rng_from_string(rng: Optional[PRNGKeyArray], string: str) -> PRNGKeyArray:
     """Rng key based on prior key + deterministic hash of a string."""
     if rng is None:
-        return jax.random.PRNGKey(random.randint(0, 2**32))
-    return jax.random.fold_in(rng, int(hashlib.md5(string.encode()).hexdigest(), 16))
+        return jax.random.key(random.randint(0, 2**31))
+    string_int = c_int32(int(hashlib.md5(string.encode()).hexdigest(), 16))
+    return jax.random.fold_in(rng, string_int)
 
 
 # def get_model_statistics(
@@ -292,10 +301,10 @@ def standardize_targets(
 
 def prepare_components(cfg: DictConfig, model: Optional[eqx.Module] = None):
     """Prepare the components based on configuration."""
-    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**32)
-    rng = jax.random.PRNGKey(base_seed)
+    base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**31)
+    rng = jax.random.key(base_seed)
     
-    task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
+    task = prepare_task(cfg, seed=seed_from_string(rng, 'task'))
     
     # Initialize model and optimizer
     if model is None:
@@ -307,7 +316,7 @@ def prepare_components(cfg: DictConfig, model: Optional[eqx.Module] = None):
             weight_init_method = cfg.model.weight_init_method,
             activation = cfg.model.activation,
             n_frozen_layers = cfg.model.n_frozen_layers,
-            seed = seed_from_string(base_seed, 'model'),
+            key = rng_from_string(rng, 'model'),
         )
     model.to(cfg.device)
     
