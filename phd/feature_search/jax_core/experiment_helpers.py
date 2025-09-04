@@ -7,7 +7,7 @@ import equinox as eqx
 from equinox import nn
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, PyTree, PRNGKeyArray
+from jaxtyping import Array, Float, Int, PyTree, PRNGKeyArray
 import numpy as np
 import omegaconf
 from omegaconf import DictConfig
@@ -226,11 +226,10 @@ def rng_from_string(rng: Optional[PRNGKeyArray], string: str) -> PRNGKeyArray:
 
 class StandardizationStats(eqx.Module):
     """Holds running statistics for standardization."""
-    def __init__(self, gamma: float = 0.99):
-        self.running_mean = jnp.zeros(1)
-        self.running_var = jnp.ones(1)
-        self.step = jnp.zeros(1)
-        self.gamma = gamma
+    running_mean: Float[Array, ''] = eqx.field(default=jnp.zeros(1))
+    running_var: Float[Array, ''] = eqx.field(default=jnp.ones(1))
+    step: Int[Array, ''] = eqx.field(default=jnp.zeros(1))
+    gamma: float = eqx.field(default=0.99)
 
 
 def standardize_targets(

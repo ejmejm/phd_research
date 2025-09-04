@@ -5,6 +5,7 @@ import equinox as eqx
 import hydra
 import jax
 import jax.numpy as jnp
+from jaxtyping import Array, Float, Int
 import numpy as np
 from omegaconf import DictConfig
 import optax
@@ -22,6 +23,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
 )
 # from phd.feature_search.jax_core.idbd import IDBD
 from phd.feature_search.jax_core.models import MLP
+from phd.feature_search.jax_core.optimizer import EqxOptimizer
 # from phd.feature_search.jax_core.feature_recycling import CBPTracker
 from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
 from phd.research_utils.logging import *
@@ -143,6 +145,89 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
     return task, model, criterion, optimizer, repr_optimizer, cbp_tracker
 
 
+
+# General structure for training loop:
+# 1. Do setup (setup function and holder class)
+# 2. Scan over training steps for a set number of steps (individual step, and multiple steps via scan functions)
+# 3. Log (log function)
+# 4. Repeat from step 2
+
+
+class TrainState(eqx.Module):
+    # Static
+    cfg: DictConfig = eqx.field(static=True)
+    criterion: Callable = eqx.field(static=True)
+    log_utility_stats: bool = eqx.field(static=True)
+    log_pruning_stats: bool = eqx.field(static=True)
+    log_model_stats: bool = eqx.field(static=True)
+    log_optimizer_stats: bool = eqx.field(static=True)
+    
+    # Non-static
+    model: MLP
+    optimizer: EqxOptimizer
+    repr_optimizer: Optional[EqxOptimizer]
+    cbp_tracker: Any # Optional[CBPTracker]
+    distractor_tracker: Any # Optional[DistractorTracker]
+    
+    step: Int[Array, '']
+    cumulant_stats: StandardizationStats
+    
+    def __init__(self, cfg, criterion, model, optimizer, repr_optimizer, cbp_tracker, distractor_tracker):
+        self.cfg = cfg
+        self.criterion = criterion
+        self.model = model
+        self.optimizer = optimizer
+        self.repr_optimizer = repr_optimizer
+        self.cbp_tracker = cbp_tracker
+        self.distractor_tracker = distractor_tracker
+        self.step = jnp.int32(0)
+        self.cumulant_stats = StandardizationStats(gamma=0.99)
+        
+        self.log_utility_stats = self.cfg.train.get('log_utility_stats', False)
+        self.log_pruning_stats = self.cfg.train.get('log_pruning_stats', False)
+        self.log_model_stats = self.cfg.train.get('log_model_stats', False)
+        self.log_optimizer_stats = self.cfg.train.get('log_optimizer_stats', False)
+    
+
+def train_step(
+    train_state: TrainState,
+    data: Tuple[Float[Array, 'batch_size n_inputs'], Float[Array, 'batch_size n_outputs']],
+) -> TrainState:
+    inputs, targets = data
+    print(inputs)
+
+
+def run_experiment(
+        cfg: DictConfig,
+        task: NonlinearGEOFFTask,
+        model: MLP,
+        criterion: Callable,
+        optimizer: EqxOptimizer,
+        repr_optimizer: Optional[EqxOptimizer],
+        cbp_tracker, # : Optional[CBPTracker],
+        distractor_tracker, # : DistractorTracker,
+    ):
+    use_bias = cfg.model.get('use_bias', True)
+    
+    # TODO: Implement distractor
+    # # Distractor setup
+    # n_hidden_units = model.layers[-1].in_features
+    # first_feature_idx = 1 if use_bias else 0 # First feature is bias if enabled
+    # distractor_tracker.process_new_features(list(range(first_feature_idx, n_hidden_units)))
+    
+    train_state = TrainState(
+        model = model,
+        optimizer = optimizer,
+        repr_optimizer = repr_optimizer,
+        cbp_tracker = cbp_tracker,
+        distractor_tracker = distractor_tracker,
+        cfg = cfg,
+        criterion = criterion,
+    )
+    
+    train_step(train_state, (None, None))
+
+
 @hydra.main(config_path='../conf', config_name='full_feature_search')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
@@ -166,11 +251,12 @@ def main(cfg: DictConfig) -> None:
     #     tuple(cfg.task.distractor_std_range),
     #     seed = seed_from_string(cfg.seed, 'distractor_tracker'),
     # )
+    distractor_tracker = None
     
-    # run_experiment(
-    #     cfg, task, task_iterator, model, criterion, optimizer,
-    #     repr_optimizer, cbp_tracker, distractor_tracker,
-    # )
+    run_experiment(
+        cfg, task, model, criterion, optimizer, repr_optimizer,
+        cbp_tracker, distractor_tracker,
+    )
     
     # finish_experiment(cfg)
 
