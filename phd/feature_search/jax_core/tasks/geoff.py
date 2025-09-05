@@ -105,16 +105,16 @@ class NonlinearGEOFFTask(eqx.Module):
             # Generate uniform samples for mean and std
             mean_key, std_key, key = random.split(key, 3)
             self.input_mean = random.uniform(
-                mean_key, 
-                shape=(n_features,), 
-                minval=input_mean_range[0], 
-                maxval=input_mean_range[1]
+                mean_key,
+                shape = (n_features,),
+                minval = input_mean_range[0],
+                maxval = input_mean_range[1],
             )
             self.input_std = random.uniform(
-                std_key, 
-                shape=(n_features,), 
-                minval=input_std_range[0], 
-                maxval=input_std_range[1]
+                std_key,
+                shape = (n_features,),
+                minval = input_std_range[0],
+                maxval = input_std_range[1],
             )
         
         # Initialize network weights and accumulators based on layers configuration
@@ -276,7 +276,7 @@ class NonlinearGEOFFTask(eqx.Module):
         new_rng, flip_key, x_key = random.split(self.rng, 3)
 
         # Flip weights according to accumulators
-        new_weights = []
+        new_weights = [self.weights[i] for i in range(self.n_stationary_layers)]
         new_accumulators = []
         flip_keys = random.split(flip_key, len(self.weights))
         for layer_idx in range(self.n_stationary_layers, len(self.weights)):

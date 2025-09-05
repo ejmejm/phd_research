@@ -286,8 +286,7 @@ def standardize_targets(
     running_var = jnp.clip(running_var, min=eps)
 
     # Numerical hygiene: clamp and squash accidental NaNs.
-    if jnp.isnan(running_var):
-        running_var[:] = eps
+    running_var = jnp.where(jnp.isnan(running_var), eps, running_var)
 
     return z, tree_replace(
         stats,

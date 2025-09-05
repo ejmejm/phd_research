@@ -1,3 +1,4 @@
+from functools import partial
 import logging
 from typing import Iterator, Tuple, Callable, List, Optional
 
@@ -5,7 +6,7 @@ import equinox as eqx
 import hydra
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float, Int, PRNGKeyArray
 import numpy as np
 from omegaconf import DictConfig
 import optax
@@ -26,6 +27,7 @@ from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizer import EqxOptimizer
 # from phd.feature_search.jax_core.feature_recycling import CBPTracker
 from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
+from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
 
 
@@ -55,7 +57,7 @@ def prepare_components(cfg: DictConfig):
     )
     
     criterion = (optax.softmax_cross_entropy if cfg.task.type == 'classification'
-                else optax.l2_loss)
+                else lambda x, y: optax.l2_loss(x, y).mean())
     optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
     
     # Determine if we need separate optimizers for the intermediate and output layers
@@ -142,7 +144,7 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
 
     set_seed(seed_from_string(base_seed, 'experiment_setup'))
 
-    return task, model, criterion, optimizer, repr_optimizer, cbp_tracker
+    return task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng
 
 
 
@@ -171,8 +173,9 @@ class TrainState(eqx.Module):
     
     step: Int[Array, '']
     cumulant_stats: StandardizationStats
+    rng: PRNGKeyArray
     
-    def __init__(self, cfg, criterion, model, optimizer, repr_optimizer, cbp_tracker, distractor_tracker):
+    def __init__(self, cfg, criterion, model, optimizer, repr_optimizer, cbp_tracker, distractor_tracker, rng):
         self.cfg = cfg
         self.criterion = criterion
         self.model = model
@@ -182,6 +185,7 @@ class TrainState(eqx.Module):
         self.distractor_tracker = distractor_tracker
         self.step = jnp.int32(0)
         self.cumulant_stats = StandardizationStats(gamma=0.99)
+        self.rng = rng
         
         self.log_utility_stats = self.cfg.train.get('log_utility_stats', False)
         self.log_pruning_stats = self.cfg.train.get('log_pruning_stats', False)
@@ -189,12 +193,75 @@ class TrainState(eqx.Module):
         self.log_optimizer_stats = self.cfg.train.get('log_optimizer_stats', False)
     
 
+class StepStats(eqx.Module):
+    loss: Float[Array, '']
+    targets: Float[Array, 'batch_size n_outputs']
+    # cumulant_loss: Float[Array, ''] = eqx.field(default=jnp.zeros(1))
+    # mean_pred_loss: Float[Array, '']
+    # effective_lr: Float[Array, '']
+    # pruned_accum: Int[Array, '']
+    # pruned_newest_feature_accum: Int[Array, '']
+    # n_steps_since_log: Int[Array, '']
+
+
 def train_step(
     train_state: TrainState,
     data: Tuple[Float[Array, 'batch_size n_inputs'], Float[Array, 'batch_size n_outputs']],
-) -> TrainState:
+) -> Tuple[TrainState, StepStats]:
     inputs, targets = data
-    print(inputs)
+    cfg, model, optimizer, repr_optimizer = \
+        train_state.cfg, train_state.model, train_state.optimizer, train_state.repr_optimizer
+    cbp_tracker, distractor_tracker = \
+        train_state.cbp_tracker, train_state.distractor_tracker
+    
+    rng, noise_key, model_key = jax.random.split(train_state.rng, 3)
+    
+    # Add noise to targets
+    if cfg.task.noise_std > 0:
+        targets += jax.random.normal(noise_key, targets.shape) * cfg.task.noise_std
+        
+    standardized_targets, cumulant_stats = standardize_targets(targets, train_state.cumulant_stats)
+    
+    if cfg.train.standardize_cumulants:
+        targets = standardized_targets
+    
+    if train_state.cbp_tracker is not None:
+        # TODO: Implement CBP tracker
+        pass
+
+    def compute_loss(model, inputs, targets):
+        outputs, param_inputs = jax.vmap(partial(model, key=model_key))(inputs)
+        loss = train_state.criterion(outputs, targets)
+        return loss, (outputs, param_inputs)
+    
+    (loss, (outputs, param_inputs)), grads = jax.value_and_grad(
+        compute_loss, has_aux=True)(model, inputs, targets)
+    
+    # Backward pass
+    updates, optimizer = optimizer.with_update(grads, model)
+    if repr_optimizer is not None:
+        # TODO: Set breakpoint to make sure updates are combined correctly
+        repr_updates, repr_optimizer = repr_optimizer.with_update(grads, model)
+        updates = eqx.combine(updates, repr_updates)
+    
+    model = eqx.apply_updates(model, updates)
+    
+    # Update state
+    train_state_updates = dict(
+        model = model,
+        optimizer = optimizer,
+        repr_optimizer = repr_optimizer,
+        cbp_tracker = cbp_tracker,
+        distractor_tracker = distractor_tracker,
+        step = train_state.step + 1,
+        cumulant_stats = cumulant_stats,
+        rng = rng,
+    )
+    train_state_updates = {k: v for k, v in train_state_updates.items() if v is not None}
+    train_state = tree_replace(train_state, **train_state_updates)
+    step_stats = StepStats(loss, targets)
+    
+    return train_state, step_stats
 
 
 def run_experiment(
@@ -206,8 +273,9 @@ def run_experiment(
         repr_optimizer: Optional[EqxOptimizer],
         cbp_tracker, # : Optional[CBPTracker],
         distractor_tracker, # : DistractorTracker,
+        rng: PRNGKeyArray,
     ):
-    use_bias = cfg.model.get('use_bias', True)
+    use_bias = cfg.model.get('use_bias', True) # TODO: Add bias to model inputs
     
     # TODO: Implement distractor
     # # Distractor setup
@@ -223,9 +291,15 @@ def run_experiment(
         distractor_tracker = distractor_tracker,
         cfg = cfg,
         criterion = criterion,
+        rng = rng,
     )
     
-    train_step(train_state, (None, None))
+    for _ in range(2):
+        task, data = task.generate_batch(1)
+        train_state, step_stats = train_step(train_state, data)
+        
+    print(step_stats)
+    print(train_state)
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search')
@@ -238,7 +312,7 @@ def main(cfg: DictConfig) -> None:
     
     cfg = init_experiment(cfg.project, cfg)
 
-    task, model, criterion, optimizer, repr_optimizer, cbp_tracker = \
+    task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng = \
         prepare_ltu_geoff_experiment(cfg)
         
     # TODO: Implement distractor tracking
@@ -255,7 +329,7 @@ def main(cfg: DictConfig) -> None:
     
     run_experiment(
         cfg, task, model, criterion, optimizer, repr_optimizer,
-        cbp_tracker, distractor_tracker,
+        cbp_tracker, distractor_tracker, rng,
     )
     
     # finish_experiment(cfg)
