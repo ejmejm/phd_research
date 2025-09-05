@@ -13,6 +13,7 @@ import omegaconf
 from omegaconf import DictConfig
 import optax
 
+from .idbd import optax_idbd
 from .models import MLP
 from .optimizer import EqxOptimizer
 from .tasks.geoff import NonlinearGEOFFTask
@@ -110,17 +111,14 @@ def prepare_optimizer(
         return EqxOptimizer(optimizer, model, filter_spec)
         
     elif optimizer_name == 'idbd':
-        raise NotImplementedError('IDBD optimizer is not implemented for JAX yet.')
-        # kwargs = _extract_kwargs(
-        #     ['learning_rate', 'meta_learning_rate', 'version', 'weight_decay', 'autostep', 'step_size_decay'], 
-        #     {'version': 'squared_grads', 'weight_decay': 0, 'autostep': True}
-        # )
-        # # Map learning_rate to init_lr for IDBD API
-        # if 'learning_rate' in kwargs:
-        #     kwargs['init_lr'] = kwargs.pop('learning_rate')
-        # if 'meta_learning_rate' in kwargs:
-        #     kwargs['meta_lr'] = kwargs.pop('meta_learning_rate')
-        # return IDBD(trainable_params, **kwargs)
+        kwargs = _extract_kwargs(
+            ['learning_rate', 'meta_learning_rate', 'weight_decay', 'autostep', 'step_size_decay'],                     
+            {'version': 'squared_grads', 'weight_decay': 0, 'autostep': True, 'step_size_decay': 0.0},
+        )
+        kwargs['init_lr'] = kwargs.pop('learning_rate')
+        kwargs['meta_lr'] = kwargs.pop('meta_learning_rate')
+        optimizer = optax_idbd(**kwargs)
+        return EqxOptimizer(optimizer, model, filter_spec)
         
     else:
         raise ValueError(f'Invalid optimizer type: {optimizer_name}')

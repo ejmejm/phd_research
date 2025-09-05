@@ -31,7 +31,11 @@ class EqxOptimizer(eqx.Module):
     def with_update(self, grads, model) -> Tuple[PyTree, 'EqxOptimizer']:
         """Update the optimizer state and return a new optimizer."""
         if self.filter_spec is not None:
-            grads = eqx.filter(grads, self.filter_spec)
+            if isinstance(grads, tuple):
+                grads = tuple(eqx.filter(g, self.filter_spec) for g in grads)
+            else:
+                grads = eqx.filter(grads, self.filter_spec)
+            model = eqx.filter(model, self.filter_spec)
         
         updates, new_state = self.optimizer.update(grads, self.state, model)
         return updates, tree_replace(self, state=new_state)

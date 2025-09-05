@@ -25,11 +25,11 @@ train:
   standardize_cumulants: true
 
 optimizer:
-  name: rmsprop # idbd
+  name: idbd
   learning_rate: 1.0 # ${eval:0.03 / ${model.hidden_dim} ** 0.75}
   version: squared_grads
   weight_decay: 0.0
-  autostep: true
+  autostep: false # true
   step_size_decay: 0.0
 
 

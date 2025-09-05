@@ -234,11 +234,18 @@ def train_step(
         loss = train_state.criterion(outputs, targets)
         return loss, (outputs, param_inputs)
     
+    # Backward pass
     (loss, (outputs, param_inputs)), grads = jax.value_and_grad(
         compute_loss, has_aux=True)(model, inputs, targets)
     
-    # Backward pass
-    updates, optimizer = optimizer.with_update(grads, model)
+    # If using IDBD we also need the prediction gradients
+    if cfg.optimizer.name == 'idbd':
+        output_grads = jax.grad(
+            lambda m, x: jax.vmap(partial(m, key=model_key))(x)[0].sum())(model, inputs)
+        updates, optimizer = optimizer.with_update((grads, output_grads), model)
+    else:
+        updates, optimizer = optimizer.with_update(grads, model)
+    
     if repr_optimizer is not None:
         # TODO: Set breakpoint to make sure updates are combined correctly
         repr_updates, repr_optimizer = repr_optimizer.with_update(grads, model)
