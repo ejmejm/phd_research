@@ -8,7 +8,7 @@ comet_ml: false
 device: cpu
 
 model:
-  hidden_dim: 1240
+  hidden_dim: 20_000 # 1240
 
 task:
   distractor_chance: 0.0

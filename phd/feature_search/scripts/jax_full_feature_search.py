@@ -30,6 +30,15 @@ from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
 from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
 
+# TODO:
+# 1. Add full train loop
+# 2. Add logging
+# 3. Add bias
+# 4. Add compute CBP
+# 5. Add distractors?
+
+TRAIN_LOOP_UNROLL = 5
+
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +280,29 @@ def train_step(
     return train_state, step_stats
 
 
+def train_multi_step(
+    train_state: TrainState,
+    task: NonlinearGEOFFTask,
+    n_steps: int,
+) -> Tuple[TrainState, StepStats]:
+
+    def _step(state, _):
+        train_state, task = state
+        task, data = task.generate_batch(1)
+        train_state, step_stats = train_step(train_state, data)
+        return (train_state, task), step_stats
+    
+    (train_state, task), step_stats = jax.lax.scan(
+        _step,
+        init = (train_state, task),
+        xs = None,
+        length = n_steps,
+        unroll = TRAIN_LOOP_UNROLL,
+    )
+    
+    return train_state, task, step_stats
+
+
 def run_experiment(
         cfg: DictConfig,
         task: NonlinearGEOFFTask,
@@ -301,12 +333,19 @@ def run_experiment(
         rng = rng,
     )
     
-    for _ in range(2):
-        task, data = task.generate_batch(1)
-        train_state, step_stats = train_step(train_state, data)
+    train_fn = jax.jit(train_multi_step, static_argnums=(2,))
+    
+    sequence_length = cfg.train.log_freq
+    train_cycles = cfg.train.total_steps // sequence_length
+    
+    train_state, task, step_stats = train_fn(train_state, task, sequence_length)
         
-    print(step_stats)
-    print(train_state)
+    import time
+    start_time = time.time()
+    for cycle in range(train_cycles):
+        train_state, task, step_stats = train_fn(train_state, task, sequence_length)
+        # print(f"Cycle {cycle}")
+    print(f"Time taken: {time.time() - start_time:.2f}s")
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search')

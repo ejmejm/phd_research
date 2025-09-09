@@ -3,6 +3,7 @@ defaults:
 
 model:
   activation: tanh
+  use_bias: true
 
 # Task parameters
 task:
