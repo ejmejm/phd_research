@@ -35,6 +35,7 @@ feature_recycling:
   recycle_rate: 0.0 # Fraction of features that are replaced each step
   utility_decay: 0.99 # Parameter used in utility computation
   feature_protection_steps: 100 # Number of steps a new feature is immune to pruning
+  utility_reset_mode: median # {median, zero}
   initial_step_size_method: constant # {constant, mean, median} method used to set the step size of new features
                                      # constant will be the value set by the optimizer, and mean/median will take
                                      # the mean/median of the step sizes of other features in the same layer

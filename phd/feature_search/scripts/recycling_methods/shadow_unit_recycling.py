@@ -484,6 +484,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             outgoing_weight_init = 'zeros',
             incoming_weight_init = 'binary',
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
+            utility_reset_mode = cfg.feature_recycling.utility_reset_mode,
             seed = seed_from_string(base_seed, 'cbp_tracker'),
             utility_type = 'cbp',
         )
@@ -501,6 +502,7 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
             incoming_weight_init = 'binary',
             outgoing_weight_init = 'zeros',
             initial_step_size_method = cfg.shadow_feature_recycling.initial_step_size_method,
+            utility_reset_mode = cfg.shadow_feature_recycling.utility_reset_mode,
             seed = seed_from_string(base_seed, 'shadow_cbp_tracker'),
             utility_type = cfg.shadow_feature_recycling.utility_type,
         )
