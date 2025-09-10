@@ -21,7 +21,7 @@ parameters:
   feature_recycling.utility_reset_mode: zero
 
   feature_recycling.recycle_rate: ["${eval:2**-14}", "${eval:2**-12}", "${eval:2**-10}", "${eval:2**-8}", "${eval:2**-6}", "${eval:2**-4}"]
-  feature_recycling.maturity_threshold: [32, 128, 256, 1024, 4096, 16384]
+  feature_recycling.feature_protection_steps: [32, 128, 256, 1024, 4096, 16384]
   optimizer.learning_rate: ["${eval:2**-10}", "${eval:2**-12}", "${eval:2**-14}", "${eval:2**-16}", "${eval:2**-18}", "${eval:2**-20}"]
   optimizer.meta_learning_rate: ["${eval:2**-12}", "${eval:2**-10}", "${eval:2**-8}", "${eval:2**-6}"]
   

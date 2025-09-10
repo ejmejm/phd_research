@@ -9,6 +9,7 @@ device: cpu
 
 model:
   hidden_dim: 20_000 # 1240
+  n_frozen_layers: 0
 
 task:
   distractor_chance: 0.0
