@@ -1,5 +1,5 @@
 import random
-from typing import Optional
+from typing import Optional, Tuple
 
 import equinox as eqx
 import jax
@@ -61,7 +61,7 @@ class CBPTracker(eqx.Module):
     def prune_layer_features(
         self,
         layer: eqx.Module,
-        reset_idxs: List[int],
+        path: Tuple[...], # Of types GetArrKey (jax.tree_util.GetAttrKey)
     ) -> Array:
         pass
     

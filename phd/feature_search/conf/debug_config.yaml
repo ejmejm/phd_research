@@ -26,7 +26,7 @@ train:
   standardize_cumulants: true
 
 optimizer:
-  name: idbd
+  name: adam # idbd
   learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
   version: squared_grads
   weight_decay: 0.0
