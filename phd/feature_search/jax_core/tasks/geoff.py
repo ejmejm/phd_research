@@ -277,7 +277,7 @@ class NonlinearGEOFFTask(eqx.Module):
 
         # Flip weights according to accumulators
         new_weights = [self.weights[i] for i in range(self.n_stationary_layers)]
-        new_accumulators = []
+        new_accumulators = [0.0 for _ in range(self.n_stationary_layers)]
         flip_keys = random.split(flip_key, len(self.weights))
         for layer_idx in range(self.n_stationary_layers, len(self.weights)):
             new_weight, accumulator = self._flip_signs(

@@ -9,6 +9,8 @@ from jaxtyping import Array, Float
 import optax
 from optax._src import base
 
+from .utils import tree_unzip
+
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,9 @@ def optax_idbd(
     def init_fn(params):
         assert autostep or step_size_decay == 0.0, "Step size decay is only supported with autostep!"
         
+        if step_size_decay != 0.0:
+            raise NotImplementedError("Step-size decay is not implemented with JAX!")
+        
         if autostep:
             # Check that parameters match a linear layer structure
             weights = eqx.filter(params, lambda x: isinstance(x, Array) and x.ndim in (2, 3))
@@ -85,7 +90,34 @@ def optax_idbd(
         h_decay_term = jax.tree.map(jnp.square, prediction_grads)
         
         if autostep:
-            pass
+            def _autostep_update(beta, h, v, loss_grads, h_decay_term):
+                alpha = jnp.exp(beta)
+                v = jnp.maximum(
+                    jnp.abs(h * loss_grads),
+                    v + 1.0 / tau * alpha * h_decay_term * (jnp.abs(h * loss_grads) - v),
+                )
+                new_alpha = alpha * jnp.exp(meta_lr * h * loss_grads / v)
+                alpha = jnp.where(v != 0, new_alpha, alpha)
+                
+                raw_effective_step_size = jnp.sum(alpha * h_decay_term, axis=-1, keepdims=True)
+                effective_step_size = jnp.clip(raw_effective_step_size, min=1.0)
+                
+                alpha = alpha / effective_step_size
+                beta = jnp.log(alpha)
+                
+                return alpha, beta, v, raw_effective_step_size.squeeze(-1)
+            
+            results = jax.tree.map(
+                _autostep_update,
+                beta, h, v, loss_grads, h_decay_term,
+            )
+            alpha, beta, v, raw_effective_step_size = tree_unzip(results, 4)
+            
+            print('test')
+            
+            # raw_effective_step_size = torch.sum(alpha * h_decay_term, dim=-1)
+            # effective_step_size = torch.clamp(raw_effective_step_size, min=1.0)
+            # effective_step_size = effective_step_size.unsqueeze(-1)
         
         else:
             beta = jax.tree.map(
