@@ -1,12 +1,10 @@
 import logging
 from typing import NamedTuple, Optional
 
-import chex
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float 
-import optax
+from jaxtyping import Array 
 from optax._src import base
 
 from .utils import tree_unzip
@@ -112,12 +110,6 @@ def optax_idbd(
                 beta, h, v, loss_grads, h_decay_term,
             )
             alpha, beta, v, raw_effective_step_size = tree_unzip(results, 4)
-            
-            print('test')
-            
-            # raw_effective_step_size = torch.sum(alpha * h_decay_term, dim=-1)
-            # effective_step_size = torch.clamp(raw_effective_step_size, min=1.0)
-            # effective_step_size = effective_step_size.unsqueeze(-1)
         
         else:
             beta = jax.tree.map(

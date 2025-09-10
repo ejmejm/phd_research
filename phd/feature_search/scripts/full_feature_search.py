@@ -312,6 +312,9 @@ def run_experiment(
     n_hidden_units = model.layers[-1].in_features
     first_feature_idx = 1 if use_bias else 0 # First feature is bias if enabled
     distractor_tracker.process_new_features(list(range(first_feature_idx, n_hidden_units)))
+    
+    print('=======================')
+    print(cbp_tracker._utility_reset_mode, cbp_tracker.replace_rate, cbp_tracker.maturity_threshold)
 
     # Training loop
     step = 0
