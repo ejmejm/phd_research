@@ -1,3 +1,4 @@
+import logging
 import random
 from typing import Optional, Tuple
 
@@ -6,8 +7,12 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 
+from .models import lecun_uniform
 from .optimizer import EqxOptimizer
 from .utils import tree_replace
+
+
+logger = logging.getLogger(__name__)
 
 
 class FeatureStats(eqx.Module):
@@ -38,17 +43,31 @@ class CBPTracker(eqx.Module):
         replace_rate: float = 1e-4,
         decay_rate: float = 0.99,
         maturity_threshold: int = 100,
-        incoming_weight_init: str = 'kaiming_uniform', # {'kaiming_uniform', 'binary'}
-        outgoing_weight_init: str = 'zeros', # {'zeros', 'kaiming_uniform'}
+        incoming_weight_init: str = 'lecun_uniform', # {'lecun_uniform', 'kaiming_uniform', 'binary'}
+        outgoing_weight_init: str = 'zeros', # {'zeros', 'lecun_uniform', 'kaiming_uniform'}
         utility_reset_mode: str = 'median', # {'median', 'zero'}
         initial_step_size_method: str = 'constant', # {'constant', 'mean', 'median'}
         filter_spec: Optional[PyTree] = None,
         rng: Optional[PRNGKeyArray] = None,
     ):
         assert utility_reset_mode in {'median', 'zero'}
-        assert incoming_weight_init in {'kaiming_uniform', 'binary'}
+        assert incoming_weight_init in {'lecun_uniform', 'kaiming_uniform', 'binary'}
         assert outgoing_weight_init in {'zeros', 'kaiming_uniform'}
         assert initial_step_size_method in {'constant', 'mean', 'median'}
+        
+        if incoming_weight_init == 'kaiming_uniform':
+            logger.warning(
+                "Kaiming uniform weight initialization is deprecated in the JAX implementation."
+                "Using lecun_uniform instead.",
+            )
+            incoming_weight_init = 'lecun_uniform'
+            
+        if outgoing_weight_init == 'kaiming_uniform':
+            logger.warning(
+                "Kaiming uniform weight initialization is deprecated in the JAX implementation."
+                "Using lecun_uniform instead.",
+            )
+            outgoing_weight_init = 'lecun_uniform'
         
         if filter_spec is not None:
             model = eqx.filter(model, filter_spec)
@@ -111,34 +130,98 @@ class CBPTracker(eqx.Module):
         """Returns a boolean mask of which features to prune and the number of features to prune."""
         
         # Determine which features are eligible for replacement, and which to replace
-        eligibility_mask = feature_stats.age > self.maturity_threshold
-        n_eligible_replacements = jnp.sum(eligibility_mask)
         n_available_replacements = feature_stats.replacement_accumulator.astype(jnp.int32)
-        n_replacements = jnp.minimum(n_available_replacements, n_eligible_replacements)
         
-        # Compute the threshold for pruning
-        filtered_utility = jnp.where(eligibility_mask, feature_stats.utility, jnp.inf)
-        utility_ranking = jnp.argsort(filtered_utility)
-        utility_threshold = filtered_utility[utility_ranking[n_replacements - 1]]
+        def _make_mask():
+            eligibility_mask = feature_stats.age > self.maturity_threshold
+            n_eligible_replacements = jnp.sum(eligibility_mask)
+            n_replacements = jnp.minimum(n_available_replacements, n_eligible_replacements)
+            
+            # Compute the threshold for pruning
+            filtered_utility = jnp.where(eligibility_mask, feature_stats.utility, jnp.inf)
+            utility_ranking = jnp.argsort(filtered_utility)
+            utility_threshold = filtered_utility[utility_ranking[n_replacements - 1]]
+            
+            # Construct the prune mask
+            prune_mask = jnp.where(filtered_utility <= utility_threshold, True, False)
+            prune_mask = prune_mask & eligibility_mask
         
-        # Construct the prune mask
-        prune_mask = jnp.where(filtered_utility <= utility_threshold, True, False)
-        prune_mask = prune_mask & eligibility_mask
+        # TODO: Test how much of a difference this makes in performance
+        prune_mask, n_replacements = jax.lax.cond(
+            n_available_replacements > 0,
+            _make_mask,
+            lambda: (jnp.zeros(feature_stats.utility.shape, dtype=jnp.bool_), 0)
+        )
         
         return prune_mask, n_replacements
     
+    def _reset_feature_stats(self, feature_stats: FeatureStats, prune_mask: Bool[Array, 'n_features']):
+        """Resets the feature stats for the given layer and indices."""
+        age = jnp.where(prune_mask, 0, feature_stats.age)
+
+        if self.utility_reset_mode == 'median':
+            reset_val = feature_stats.utility.median()
+        elif self.utility_reset_mode == 'zero':
+            reset_val = 0
+        else:
+            raise ValueError(f"Invalid utility reset mode: {self.utility_reset_mode}")
+        utility = jnp.where(prune_mask, reset_val, feature_stats.utility)
+        
+        return tree_replace(
+            feature_stats,
+            age = age,
+            utility = utility,
+        )
+    
+    def _reinit_input_weights(
+        self,
+        in_weights: Float[Array, 'n_features in_features'],
+        prune_mask: Bool[Array, 'n_features'],
+        rng: PRNGKeyArray,
+    ):
+        """Selectively reinitialize the weights that output the features of interest."""    
+        if self.incoming_weight_init == 'lecun_uniform':
+            new_in_weights = lecun_uniform(rng, in_weights.shape)
+        elif self.incoming_weight_init == 'binary':
+            new_in_weights = jax.random.randint(rng, in_weights.shape, 0, 2, dtype=jnp.float32) * 2.0 - 1.0
+        else:
+            raise ValueError(f"Invalid weight initialization: {self.incoming_weight_init}")
+        
+        return jnp.where(jnp.expand_dims(prune_mask, 1), new_in_weights, in_weights)
+    
+    def _reinit_output_weights(
+        self,
+        out_weights: Float[Array, 'out_features n_features'],
+        prune_mask: Bool[Array, 'n_features'],
+        rng: PRNGKeyArray,
+    ):
+        """Selectively reinitialize the weights that output the features of interest."""    
+        if self.outgoing_weight_init == 'zeros':
+            new_out_weights = jnp.zeros_like(out_weights)
+        elif self.outgoing_weight_init == 'lecun_uniform':
+            new_out_weights = lecun_uniform(rng, out_weights.shape)
+        else:
+            raise ValueError(f"Invalid weight initialization: {self.outgoing_weight_init}")
+
+        return jnp.where(jnp.expand_dims(prune_mask, 0), new_out_weights, out_weights)
+    
     def prune_layer_features(
         self,
-        weights: Float[Array, 'out_features in_features'],
-        input_values: Float[Array, 'batch_size in_features'],
+        in_weights: Float[Array, 'n_features in_features'],
+        out_weights: Float[Array, 'out_features n_features'],
+        activation_values: Float[Array, 'batch_size n_features'],
         feature_stats: FeatureStats,
         # path: Tuple[...], # Of types GetArrKey (jax.tree_util.GetAttrKey)
         optimizer_state: PyTree = None,
+        *
+        rng: PRNGKeyArray,
     ) -> Tuple[FeatureStats, Optional[EqxOptimizer], Array]:
-        assert weights.ndim == 2, "Weights must be 2D"
-        n_features = weights.shape[1]
+        assert in_weights.ndim == 2, "Weights must be 2D"
+        assert out_weights.ndim == 2, "Weights must be 2D"
+        n_features = out_weights.shape[1]
         
-        feature_stats = self._compute_new_feature_stats(feature_stats, weights, input_values)
+        # Update feature stats
+        feature_stats = self._compute_new_feature_stats(feature_stats, out_weights, activation_values)
         
         # Get indices to reinitialize (prune mask)
         prune_mask, n_replacements = self._make_prune_mask(feature_stats)
@@ -147,8 +230,16 @@ class CBPTracker(eqx.Module):
             replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
         )
         
+        # TODO: Add optimization that doesn't do this if n_replacements is 0
+        
         # Reset stats for those features
+        feature_stats = self._reset_feature_stats(feature_stats, prune_mask)
+        
+        in_weight_key, out_weight_key, in_optim_key, out_optim_key = jax.random.split(rng, 4)
+        
         # Reinit input and output weights for given features
+        in_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
+        out_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
         
         # Reinit optimizer input and output weight states for given features
         
