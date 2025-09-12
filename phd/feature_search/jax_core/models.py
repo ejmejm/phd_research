@@ -1,10 +1,28 @@
+from functools import partial
+from typing import Callable, List, Optional, Tuple, Any
+
 import jax
 import jax.numpy as jnp
 import equinox as eqx
 import equinox.nn as nn
-from typing import Callable, List, Optional, Tuple, Any
 from jax import Array
 from jaxtyping import PRNGKeyArray
+
+
+@partial(jax.jit, static_argnums=(1, 2))
+def lecun_uniform(key: PRNGKeyArray, shape: Tuple[int, ...], in_dim: Optional[int] = None) -> Array:
+    """LeCun uniform initialization."""
+    in_dim = shape[-1] if in_dim is None else in_dim
+    bound = 1 / jnp.sqrt(in_dim)
+    return jax.random.uniform(key, shape, minval=-bound, maxval=bound)
+
+
+@partial(jax.jit, static_argnames=('shape', 'in_dim',))
+def kaiming_uniform(key: PRNGKeyArray, shape: Tuple[int, ...], gain: float = 1.0, in_dim: Optional[int] = None) -> Array:
+    """Kaiming uniform initialization."""
+    in_dim = shape[-1] if in_dim is None else in_dim
+    bound = gain * jnp.sqrt(3.0) / jnp.sqrt(in_dim)
+    return jax.random.uniform(key, shape, minval=-bound, maxval=bound)
 
 
 def ltu(x: Array, threshold: float = 0.0) -> Array:
