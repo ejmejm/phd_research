@@ -1,1 +1,1 @@
-from .optimizer import EqxOptimizer
+from .optimizers import optimizer # import EqxOptimizer

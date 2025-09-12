@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from jaxtyping import Array 
 from optax._src import base
 
-from .utils import tree_unzip
+from phd.feature_search.jax_core.utils import tree_unzip
 
 
 logger = logging.getLogger(__name__)

@@ -14,9 +14,8 @@ from omegaconf import DictConfig
 import optax
 
 from .feature_recycling import CBPTracker
-from .idbd import optax_idbd
 from .models import MLP
-from .optimizer import EqxOptimizer
+from .optimizers import EqxOptimizer, optax_idbd
 from .tasks.geoff import NonlinearGEOFFTask
 from .utils import tree_replace
 

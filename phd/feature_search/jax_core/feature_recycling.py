@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 
 from .models import lecun_uniform
-from .optimizer import EqxOptimizer
+from .optimizers import EqxOptimizer
 from .utils import tree_replace
 
 

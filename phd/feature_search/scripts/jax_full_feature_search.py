@@ -22,9 +22,8 @@ from phd.feature_search.jax_core.experiment_helpers import (
     StandardizationStats,
     rng_from_string,
 )
-# from phd.feature_search.jax_core.idbd import IDBD
 from phd.feature_search.jax_core.models import MLP
-from phd.feature_search.jax_core.optimizer import EqxOptimizer
+from phd.feature_search.jax_core.optimizers import EqxOptimizer
 from phd.feature_search.jax_core.feature_recycling import CBPTracker
 from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
 from phd.feature_search.jax_core.utils import tree_replace
@@ -350,6 +349,7 @@ def run_experiment(
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
+    cfg.optimizer.name = 'idbd'
     
     jax.config.update('jax_platform_name', cfg.device)
     print(f"JAX is using device: {jax.devices(cfg.device)[0]}")
