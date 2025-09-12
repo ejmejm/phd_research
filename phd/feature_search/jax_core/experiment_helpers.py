@@ -13,6 +13,7 @@ import omegaconf
 from omegaconf import DictConfig
 import optax
 
+from .feature_recycling import CBPTracker
 from .idbd import optax_idbd
 from .models import MLP
 from .optimizer import EqxOptimizer
@@ -87,28 +88,28 @@ def prepare_optimizer(
         optimizer = optax.adam(learning_rate=kwargs['learning_rate'])
         if kwargs['weight_decay'] != 0:
             optimizer = optax.chain(optimizer, optax.add_decayed_weights(kwargs['weight_decay']))
-        return EqxOptimizer(optimizer, model, filter_spec)
+        return EqxOptimizer(optimizer, model, filter_spec, name='adam')
         
     elif optimizer_name == 'rmsprop':
         kwargs = _extract_kwargs(['learning_rate', 'weight_decay'], {'weight_decay': 0})
         optimizer = optax.rmsprop(learning_rate=kwargs['learning_rate'], decay=0.999)
         if kwargs['weight_decay'] != 0:
             optimizer = optax.chain(optimizer, optax.add_decayed_weights(kwargs['weight_decay']))
-        return EqxOptimizer(optimizer, model, filter_spec)
+        return EqxOptimizer(optimizer, model, filter_spec, name='rmsprop')
         
     elif optimizer_name == 'sgd':
         kwargs = _extract_kwargs(['learning_rate', 'weight_decay'], {'weight_decay': 0})
         optimizer = optax.sgd(learning_rate=kwargs['learning_rate'])
         if kwargs['weight_decay'] != 0:
             optimizer = optax.chain(optimizer, optax.add_decayed_weights(kwargs['weight_decay']))
-        return EqxOptimizer(optimizer, model, filter_spec)
+        return EqxOptimizer(optimizer, model, filter_spec, name='sgd')
     
     elif optimizer_name == 'sgd_momentum':
         kwargs = _extract_kwargs(['learning_rate', 'weight_decay'], {'weight_decay': 0, 'momentum': 0.9})
         optimizer = optax.sgd(learning_rate=kwargs['learning_rate'], momentum=kwargs['momentum'])
         if kwargs['weight_decay'] != 0:
             optimizer = optax.chain(optimizer, optax.add_decayed_weights(kwargs['weight_decay']))
-        return EqxOptimizer(optimizer, model, filter_spec)
+        return EqxOptimizer(optimizer, model, filter_spec, name='sgd')
         
     elif optimizer_name == 'idbd':
         kwargs = _extract_kwargs(
@@ -118,7 +119,7 @@ def prepare_optimizer(
         kwargs['init_lr'] = kwargs.pop('learning_rate')
         kwargs['meta_lr'] = kwargs.pop('meta_learning_rate')
         optimizer = optax_idbd(**kwargs)
-        return EqxOptimizer(optimizer, model, filter_spec)
+        return EqxOptimizer(optimizer, model, filter_spec, name='idbd')
         
     else:
         raise ValueError(f'Invalid optimizer type: {optimizer_name}')
@@ -318,22 +319,18 @@ def prepare_components(cfg: DictConfig, model: Optional[eqx.Module] = None):
                 else optax.l2_loss)
     optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
     
-    # # TODO: Implement CBP tracker in JAX
-    # # Initialize CBP tracker
-    # if cfg.feature_recycling.use_cbp_utility:
-    #     cbp_tracker = CBPTracker(
-    #         optimizer = optimizer,
-    #         replace_rate = cfg.feature_recycling.recycle_rate,
-    #         decay_rate = cfg.feature_recycling.utility_decay,
-    #         maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-    #         initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
-    #         utility_reset_mode = cfg.feature_recycling.utility_reset_mode,
-    #         seed = seed_from_string(base_seed, 'cbp_tracker'),
-    #     )
-    #     cbp_tracker.track_sequential(model.layers)
-    # else:
-    #     cbp_tracker = None
-    
-    cbp_tracker = None
+    # Initialize CBP tracker
+    if cfg.feature_recycling.use_cbp_utility:
+        cbp_tracker = CBPTracker(
+            model = model,
+            replace_rate = cfg.feature_recycling.recycle_rate,
+            decay_rate = cfg.feature_recycling.utility_decay,
+            maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+            initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
+            filter_spec = None, # Don't forget to add if doing more than 2 layers
+            rng = rng_from_string(rng, 'cbp_tracker'),
+        )
+    else:
+        cbp_tracker = None
     
     return task, model, criterion, optimizer, cbp_tracker

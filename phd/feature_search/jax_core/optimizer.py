@@ -8,6 +8,7 @@ from phd.feature_search.jax_core.utils import tree_replace
 
 
 class EqxOptimizer(eqx.Module):
+    name: str = eqx.field(static=True)
     optimizer: optax.GradientTransformation = eqx.field(static=True)
     filter_spec: Optional[PyTree] = eqx.field(default=None, static=True)
     state: PyTree
@@ -17,6 +18,7 @@ class EqxOptimizer(eqx.Module):
         optimizer: optax.GradientTransformation,
         model: eqx.Module,
         filter_spec: Optional[PyTree] = None,
+        name: Optional[str] = None,
     ):
         self.optimizer = optimizer
         self.filter_spec = filter_spec
@@ -27,6 +29,7 @@ class EqxOptimizer(eqx.Module):
             trainable_params = model
         
         self.state = self.optimizer.init(trainable_params)
+        self.name = name
 
     def with_update(self, grads, model) -> Tuple[PyTree, 'EqxOptimizer']:
         """Update the optimizer state and return a new optimizer."""

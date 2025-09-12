@@ -13,7 +13,7 @@ from jaxtyping import PRNGKeyArray
 def lecun_uniform(key: PRNGKeyArray, shape: Tuple[int, ...], in_dim: Optional[int] = None) -> Array:
     """LeCun uniform initialization."""
     in_dim = shape[-1] if in_dim is None else in_dim
-    bound = 1 / jnp.sqrt(in_dim)
+    bound = jnp.sqrt(3.0) / jnp.sqrt(in_dim)
     return jax.random.uniform(key, shape, minval=-bound, maxval=bound)
 
 

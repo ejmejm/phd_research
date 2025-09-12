@@ -1,6 +1,6 @@
 import logging
 import random
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import equinox as eqx
 import jax
@@ -205,6 +205,69 @@ class CBPTracker(eqx.Module):
 
         return jnp.where(jnp.expand_dims(prune_mask, 0), new_out_weights, out_weights)
     
+    
+    def _reset_input_optim_state(
+        self,
+        optimizer_state: Dict[str, Array],
+        prune_mask: Bool[Array, 'n_features'],
+    ):
+        """
+        Reset the optimizer state for the weights that output features at the given indices.
+        Currently works for SGD and Adam (without step reset) optimizers.
+        """
+        # if 
+        
+        # if layer.weight in self.optimizer.state:
+        #     optim_state = self.optimizer.state[layer.weight]
+            
+        #     # Get mean and median beta over inputs for the entire layer
+        #     if isinstance(self.optimizer, IDBD) and 'beta' in optim_state and self.initial_step_size_method != 'constant':
+        #         mean_beta = optim_state['beta'].mean()
+        #         median_beta = optim_state['beta'].median()
+            
+        #     for key, value in optim_state.items():
+        #         if value.shape == layer.weight.shape:
+        #             if value is not None:
+        #                 optim_state[key][idxs, :] = 0
+        #         else:
+        #             warnings.warn(
+        #                 f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
+        #                 f"parameter: {layer.weight.shape}, state value: {value.shape}"
+        #             )
+            
+        #     # Because a whole output unit is reset, it is unclear how the new step-size should be set.
+        #     # Because it is created with the same inputs though, using the step-sizes that have been
+        #     # used across the whole of the layer seems like a reasonable choice.
+        #     # It could also make sense to simply decide this with a constant formula based on the number of input units.
+        #     # This latter choice would make more sense if the layers were not uniform in structure.
+        #     # TODO: Make sure to test this choice once moving onto networks with more than one layer of feature recycling.
+        #     if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
+        #         if self.initial_step_size_method == 'constant':
+        #             optim_state['beta'][idxs, :] = math.log(self.optimizer.init_lr)
+        #         elif self.initial_step_size_method == 'mean':
+        #             optim_state['beta'][idxs, :] = mean_beta
+        #         elif self.initial_step_size_method == 'median':
+        #             optim_state['beta'][idxs, :] = median_beta
+        #         else:
+        #             raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
+                
+        # if layer.bias is not None and layer.bias in self.optimizer.state:
+        #     optim_state = self.optimizer.state[layer.bias]
+            
+        #     for key, value in optim_state.items():
+        #         if value.shape == layer.bias.shape:
+        #             if value is not None:
+        #                 optim_state[key][idxs] = 0
+        #         else:
+        #             warnings.warn(
+        #                 f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
+        #                 f"parameter: {layer.bias.shape}, state value: {value.shape}"
+        #             )
+            
+        #     if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
+        #         optim_state['beta'][idxs] = math.log(self.optimizer.init_lr)
+        pass
+    
     def prune_layer_features(
         self,
         in_weights: Float[Array, 'n_features in_features'],
@@ -248,14 +311,14 @@ class CBPTracker(eqx.Module):
     def prune_features(
         self,
         model: eqx.Module,
-        activation_values: eqx.Module,
+        input_values: eqx.Module,
         optimizer: Optional[EqxOptimizer] = None,
     ) -> eqx.Module:
         """Prune features based on CBP utility and return a mask over the features reset.
         
         Args:
             model: The full model to prune
-            activation_values: Pytree matching the structure of model with the activation values for each layer
+            input_values: Pytree matching the structure of model with the input values for each layer
             optimizer: The optimizer optimizing the given model
             filter_spec: Boolean Pytree matching the structure of model with True for prunable layers
             
@@ -263,6 +326,9 @@ class CBPTracker(eqx.Module):
             A mask over the features reset
         """
         # Tree map prune_layer_features to each set of weights in the model
+        # TODO: Change input_values to be all input values and mimic model shape
+        # TODO: Change optimizers to all use the same type of state with a unified Adam state,
+        #       and make sure they have per-weight step-sizes
         pass
         
         
@@ -275,8 +341,6 @@ class CBPTracker(eqx.Module):
         #         reset_idxs[layer] = layer_reset_idxs
         # return reset_idxs
     
-    def track(self, layer: eqx.Module):
-        pass
     
     def get_statistics(self, layer: eqx.Module):
         pass

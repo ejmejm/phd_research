@@ -25,7 +25,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
 # from phd.feature_search.jax_core.idbd import IDBD
 from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizer import EqxOptimizer
-# from phd.feature_search.jax_core.feature_recycling import CBPTracker
+from phd.feature_search.jax_core.feature_recycling import CBPTracker
 from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
 from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
@@ -98,21 +98,20 @@ def prepare_components(cfg: DictConfig):
         logger.info(f"Using single optimizer: {cfg.optimizer.name}")
     
     # # TODO: Implement CBP tracker in JAX
-    # # Initialize CBP tracker
-    # if cfg.feature_recycling.use_cbp_utility:
-    #     cbp_cls = SignedCBPTracker if cfg.feature_recycling.use_signed_utility else CBPTracker
-    #     cbp_tracker = cbp_cls(
-    #         optimizer = optimizer,
-    #         replace_rate = cfg.feature_recycling.recycle_rate,
-    #         decay_rate = cfg.feature_recycling.utility_decay,
-    #         maturity_threshold = cfg.feature_recycling.feature_protection_steps,
-    #         initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
-    #         seed = seed_from_string(base_seed, 'cbp_tracker'),
-    #     )
-    #     cbp_tracker.track_sequential(model.layers)
-    # else:
-    #     cbp_tracker = None
-    cbp_tracker = None
+    # Initialize CBP tracker
+    if cfg.feature_recycling.use_cbp_utility:
+        cbp_tracker = CBPTracker(
+            model = model,
+            replace_rate = cfg.feature_recycling.recycle_rate,
+            decay_rate = cfg.feature_recycling.utility_decay,
+            maturity_threshold = cfg.feature_recycling.feature_protection_steps,
+            initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
+            incoming_weight_init = 'binary',
+            filter_spec = None, # Don't forget to add if doing more than 2 layers
+            rng = rng_from_string(rng, 'cbp_tracker'),
+        )
+    else:
+        cbp_tracker = None
         
     return task, model, criterion, optimizer, repr_optimizer, cbp_tracker
 
@@ -135,9 +134,8 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
     assert cfg.task.activation == 'ltu', \
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
-
-    if cbp_tracker is not None:
-        cbp_tracker.incoming_weight_init = 'binary'
+    assert cbp_tracker.incoming_weight_init == 'binary', \
+        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
     
     # Init target output weights to kaiming uniform and predictor output weights to zero
     task_init_key = rng_from_string(rng, 'task_init_key')
@@ -177,7 +175,7 @@ class TrainState(eqx.Module):
     model: MLP
     optimizer: EqxOptimizer
     repr_optimizer: Optional[EqxOptimizer]
-    cbp_tracker: Any # Optional[CBPTracker]
+    cbp_tracker: Optional[CBPTracker]
     distractor_tracker: Any # Optional[DistractorTracker]
     
     step: Int[Array, '']
@@ -233,10 +231,6 @@ def train_step(
     
     if cfg.train.standardize_cumulants:
         targets = standardized_targets
-    
-    if train_state.cbp_tracker is not None:
-        # TODO: Implement CBP tracker
-        pass
 
     def compute_loss(model, inputs, targets):
         outputs, param_inputs = jax.vmap(partial(model, key=model_key))(inputs)
@@ -261,6 +255,10 @@ def train_step(
         updates = eqx.combine(updates, repr_updates)
     
     model = eqx.apply_updates(model, updates)
+    
+    if train_state.cbp_tracker is not None:
+        # TODO: Implement CBP tracker
+        train_state.cbp_tracker.prune_features(model, inputs, optimizer)
     
     # Update state
     train_state_updates = dict(
