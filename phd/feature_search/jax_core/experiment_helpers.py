@@ -15,7 +15,7 @@ import optax
 
 from .feature_recycling import CBPTracker
 from .models import MLP
-from .optimizers import EqxOptimizer, optax_idbd
+from .optimizers import EqxOptimizer, optax_idbd, custom_optax_adam
 from .tasks.geoff import NonlinearGEOFFTask
 from .utils import tree_replace
 
@@ -84,9 +84,11 @@ def prepare_optimizer(
 
     if optimizer_name == 'adam':
         kwargs = _extract_kwargs(['learning_rate', 'weight_decay'], {'weight_decay': 0})
-        optimizer = optax.adam(learning_rate=kwargs['learning_rate'])
-        if kwargs['weight_decay'] != 0:
-            optimizer = optax.chain(optimizer, optax.add_decayed_weights(kwargs['weight_decay']))
+        weight_decay = kwargs.pop('weight_decay')
+        kwargs['lr'] = kwargs.pop('learning_rate')
+        optimizer = custom_optax_adam(**kwargs)
+        if weight_decay != 0:
+            optimizer = optax.chain(optimizer, optax.add_decayed_weights(weight_decay))
         return EqxOptimizer(optimizer, model, filter_spec, name='adam')
         
     elif optimizer_name == 'rmsprop':

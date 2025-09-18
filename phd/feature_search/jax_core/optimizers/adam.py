@@ -39,8 +39,16 @@ def custom_optax_adam(
     Returns:
         A :class:`optax.GradientTransformation` object.
     """
-
     def init_fn(params):
+        if not 0.0 <= lr:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if not 0.0 <= eps:
+            raise ValueError(f"Invalid epsilon value: {eps}")
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 0: {betas[0]}")
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
+        
         lr = jnp.array(lr, dtype=jnp.float32)
         step = jax.tree.map(lambda x: jnp.zeros(x.shape[-1], dtype=jnp.int32), params)
         exp_avg = jax.tree.map(lambda x: jnp.zeros_like(x, dtype=jnp.float32), params)
@@ -49,58 +57,38 @@ def custom_optax_adam(
         return AdamState(lr=lr, step=step, exp_avg=exp_avg, exp_avg_sq=exp_avg_sq)
 
     def update_fn(updates, state, params):
-        loss_grads, prediction_grads = updates
-        beta, h, v = state
+        loss_grads = updates
+        lr, step, exp_avg, exp_avg_sq = state
         
-        h_decay_term = jax.tree.map(jnp.square, prediction_grads)
-        
-        if autostep:
-            def _autostep_update(beta, h, v, loss_grads, h_decay_term):
-                alpha = jnp.exp(beta)
-                v = jnp.maximum(
-                    jnp.abs(h * loss_grads),
-                    v + 1.0 / tau * alpha * h_decay_term * (jnp.abs(h * loss_grads) - v),
-                )
-                new_alpha = alpha * jnp.exp(meta_lr * h * loss_grads / v)
-                alpha = jnp.where(v != 0, new_alpha, alpha)
-                
-                raw_effective_step_size = jnp.sum(alpha * h_decay_term, axis=-1, keepdims=True)
-                effective_step_size = jnp.clip(raw_effective_step_size, min=1.0)
-                
-                alpha = alpha / effective_step_size
-                beta = jnp.log(alpha)
-                
-                return alpha, beta, v, raw_effective_step_size.squeeze(-1)
+        def _adam_update(step, exp_avg, exp_avg_sq, grad):
+            # Decay the first and second moment running average coefficient 
+            exp_avg = exp_avg * betas[0] + grad * (1 - betas[0])
+            exp_avg_sq = exp_avg_sq * betas[1] + grad**2 * (1 - betas[1])
             
-            results = jax.tree.map(
-                _autostep_update,
-                beta, h, v, loss_grads, h_decay_term,
-            )
-            alpha, beta, v, raw_effective_step_size = tree_unzip(results, 4)
+            # Bias correction
+            bias_correction1 = 1 - betas[0]**step
+            bias_correction2 = 1 - betas[1]**step
+
+            step_size = lr * jnp.sqrt(bias_correction2) / bias_correction1
+            denom = jnp.sqrt(exp_avg_sq) + eps
+
+            param_update = -step_size * exp_avg / denom
+            
+            return param_update, exp_avg, exp_avg_sq
         
-        else:
-            beta = jax.tree.map(
-                lambda b_i, g_i, h_i: b_i + meta_lr * g_i * h_i,
-                beta, prediction_grads, h,
-            )
-            alpha = jax.tree.map(jnp.exp, beta)
-        
-        # Update gradient trace (h)
-        h = jax.tree.map(
-            lambda h_i, a_i, g_i, d_i: h_i * jnp.clip(1 - a_i * d_i, min=0) + a_i * g_i,
-            h, alpha, loss_grads, h_decay_term,
+        results = jax.tree.map(
+            _adam_update,
+            step, exp_avg, exp_avg_sq, loss_grads,
         )
-        
-        # Compute parameter updates
-        weight_decay_term = jax.tree.map(
-            lambda p_i: weight_decay * p_i, params)
-        param_updates = jax.tree.map(
-            lambda a_i, g_i, w_i: -a_i * (g_i + w_i),
-            alpha, loss_grads, weight_decay_term,
-        )
+        param_updates, exp_avg, exp_avg_sq = tree_unzip(results, 3)
         
         # Update state
-        state = IDBDState(beta=beta, h=h, v=v)
+        state = AdamState(
+            lr = lr,
+            step = step + 1,
+            exp_avg = exp_avg,
+            exp_avg_sq = exp_avg_sq,
+        )
         
         return param_updates, state
 
