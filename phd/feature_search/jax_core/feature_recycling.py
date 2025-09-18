@@ -9,6 +9,8 @@ from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 
 from .models import lecun_uniform
 from .optimizers import EqxOptimizer
+from .optimizers.adam import AdamState
+from .optimizers.idbd import IDBDState
 from .utils import tree_replace, tree_unzip
 
 
@@ -219,65 +221,87 @@ class CBPTracker(eqx.Module):
     
     def _reset_input_optim_state(
         self,
-        optimizer_state: Dict[str, Array],
+        optim_layer_state: Optional[NamedTuple],
         prune_mask: Bool[Array, 'n_features'],
-    ):
-        """
-        Reset the optimizer state for the weights that output features at the given indices.
-        Currently works for SGD and Adam (without step reset) optimizers.
-        """
-        # if 
+    ) -> Optional[NamedTuple]:
+        """Reset the optimizer state for the weights that output features at the given indices."""
+        if optim_layer_state is None:
+            return None
         
-        # if layer.weight in self.optimizer.state:
-        #     optim_state = self.optimizer.state[layer.weight]
-            
-        #     # Get mean and median beta over inputs for the entire layer
-        #     if isinstance(self.optimizer, IDBD) and 'beta' in optim_state and self.initial_step_size_method != 'constant':
-        #         mean_beta = optim_state['beta'].mean()
-        #         median_beta = optim_state['beta'].median()
-            
-        #     for key, value in optim_state.items():
-        #         if value.shape == layer.weight.shape:
-        #             if value is not None:
-        #                 optim_state[key][idxs, :] = 0
-        #         else:
-        #             warnings.warn(
-        #                 f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
-        #                 f"parameter: {layer.weight.shape}, state value: {value.shape}"
-        #             )
-            
-        #     # Because a whole output unit is reset, it is unclear how the new step-size should be set.
-        #     # Because it is created with the same inputs though, using the step-sizes that have been
-        #     # used across the whole of the layer seems like a reasonable choice.
-        #     # It could also make sense to simply decide this with a constant formula based on the number of input units.
-        #     # This latter choice would make more sense if the layers were not uniform in structure.
-        #     # TODO: Make sure to test this choice once moving onto networks with more than one layer of feature recycling.
-        #     if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
-        #         if self.initial_step_size_method == 'constant':
-        #             optim_state['beta'][idxs, :] = math.log(self.optimizer.init_lr)
-        #         elif self.initial_step_size_method == 'mean':
-        #             optim_state['beta'][idxs, :] = mean_beta
-        #         elif self.initial_step_size_method == 'median':
-        #             optim_state['beta'][idxs, :] = median_beta
-        #         else:
-        #             raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
-                
-        # if layer.bias is not None and layer.bias in self.optimizer.state:
-        #     optim_state = self.optimizer.state[layer.bias]
-            
-        #     for key, value in optim_state.items():
-        #         if value.shape == layer.bias.shape:
-        #             if value is not None:
-        #                 optim_state[key][idxs] = 0
-        #         else:
-        #             warnings.warn(
-        #                 f"Cannot reset optimizer state for {key} of layer '{layer}' because shapes do not match, "
-        #                 f"parameter: {layer.bias.shape}, state value: {value.shape}"
-        #             )
-            
-        #     if isinstance(self.optimizer, IDBD) and 'beta' in optim_state:
-        #         optim_state['beta'][idxs] = math.log(self.optimizer.init_lr)
-        pass
+        if isinstance(optim_layer_state, IDBDState):
+            mean_beta = jnp.mean(optim_layer_state.beta)
+            median_beta = jnp.median(optim_layer_state.beta)
+        
+        prune_mask = jnp.expand_dims(prune_mask, 1)
+        
+        new_vals = []
+        for i, value in enumerate(optim_layer_state):
+            if value.ndim == 2:
+                new_vals.append(jnp.where(prune_mask, 0, value))
+            else:
+                logger.warning(
+                    f"Not resetting optimizer state for field `{optim_layer_state._fields[i]}` because ndim != 2 "
+                    f"(not linear weights), ndim: {value.ndim}"
+                )
+                new_vals.append(value)
+        
+        if isinstance(optim_layer_state, IDBDState):
+            beta_idx = optim_layer_state._fields.index('beta')
+            if self.initial_step_size_method == 'constant':
+                new_vals[beta_idx] = jnp.where(prune_mask, optim_layer_state.init_beta, new_vals[beta_idx])
+            elif self.initial_step_size_method == 'mean':
+                new_vals[beta_idx] = jnp.where(prune_mask, mean_beta, new_vals[beta_idx])
+            elif self.initial_step_size_method == 'median':
+                new_vals[beta_idx] = jnp.where(prune_mask, median_beta, new_vals[beta_idx])
+            else:
+                raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
+        
+        return optim_layer_state.__class__(*new_vals)
+    
+    
+    def _reset_output_optim_state(
+        self,
+        optim_layer_state: Optional[NamedTuple],
+        prune_mask: Bool[Array, 'n_features'],
+    ) -> Optional[NamedTuple]:
+        """Reset the optimizer state for the weights that take in features at the given indices."""
+        if optim_layer_state is None:
+            return None
+        
+        
+        # Get mean and median beta per output unit
+        # Use mean/median per output unit because different units may be moving
+        # at different rates.
+        if isinstance(optim_layer_state, IDBDState):
+            mean_betas = jnp.mean(optim_layer_state.beta, axis=1, keepdims=True)
+            median_betas = jnp.median(optim_layer_state.beta, axis=1, keepdims=True)
+        
+        prune_mask = jnp.expand_dims(prune_mask, 0)
+        
+        new_vals = []
+        for i, value in enumerate(optim_layer_state):
+            if value.ndim == 2:
+                new_vals.append(jnp.where(prune_mask, 0, value))
+            else:
+                logger.warning(
+                    f"Not resetting optimizer state for field `{optim_layer_state._fields[i]}` because ndim != 2 "
+                    f"(not linear weights), ndim: {value.ndim}"
+                )
+                new_vals.append(value)
+        
+        if isinstance(optim_layer_state, IDBDState):
+            beta_idx = optim_layer_state._fields.index('beta')
+            if self.initial_step_size_method == 'constant':
+                new_vals[beta_idx] = jnp.where(prune_mask, optim_layer_state.init_beta, new_vals[beta_idx])
+            elif self.initial_step_size_method == 'mean':
+                new_vals[beta_idx] = jnp.where(prune_mask, mean_betas, new_vals[beta_idx])
+            elif self.initial_step_size_method == 'median':
+                new_vals[beta_idx] = jnp.where(prune_mask, median_betas, new_vals[beta_idx])
+            else:
+                raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
+        
+        return optim_layer_state.__class__(*new_vals)
+
     
     def prune_layer_features(
         self,
@@ -316,6 +340,8 @@ class CBPTracker(eqx.Module):
         out_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
         
         # Reinit optimizer input and output weight states for given features
+        in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
+        out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
         
         return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask
     
@@ -406,11 +432,6 @@ class CBPTracker(eqx.Module):
         Returns:
             The pruned model, optimizer, and a mask over the features reset
         """
-        # Tree map prune_layer_features to each set of weights in the model
-        # TODO: Change input_values to be all input values and mimic model shape
-        # TODO: Change optimizers to all use the same type of state with a unified Adam state,
-        #       and make sure they have per-weight step-sizes
-        
         weights, model_structure = jax.tree.flatten(model)
         optim_layer_states = self._extract_layer_optim_states(optimizer.state, len(weights))
         prune_masks = []

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 class IDBDState(NamedTuple):
     """State for the IDBD algorithm."""
+    init_beta: base.Updates
     beta: base.Updates
     h: base.Updates
     v: Optional[base.Updates] = None
@@ -79,11 +80,11 @@ def optax_idbd(
         if autostep:
             v = jax.tree.map(lambda x: jnp.zeros_like(x), params)
         
-        return IDBDState(beta=beta, h=h, v=v)
+        return IDBDState(init_beta=init_beta, beta=beta, h=h, v=v)
 
     def update_fn(updates, state, params):
         loss_grads, prediction_grads = updates
-        beta, h, v = state
+        init_beta, beta, h, v = state
         
         h_decay_term = jax.tree.map(jnp.square, prediction_grads)
         
@@ -133,7 +134,7 @@ def optax_idbd(
         )
         
         # Update state
-        state = IDBDState(beta=beta, h=h, v=v)
+        state = IDBDState(init_beta=init_beta, beta=beta, h=h, v=v)
         
         return param_updates, state
 
