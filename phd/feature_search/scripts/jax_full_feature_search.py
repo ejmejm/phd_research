@@ -257,7 +257,7 @@ def train_step(
     
     if train_state.cbp_tracker is not None:
         # TODO: Implement CBP tracker
-        train_state.cbp_tracker.prune_features(model, inputs, optimizer)
+        train_state.cbp_tracker.prune_features(model, param_inputs, optimizer)
     
     # Update state
     train_state_updates = dict(
