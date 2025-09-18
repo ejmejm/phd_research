@@ -354,7 +354,6 @@ def run_experiment(
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
-    cfg.optimizer.name = 'idbd'
     
     jax.config.update('jax_platform_name', cfg.device)
     print(f"JAX is using device: {jax.devices(cfg.device)[0]}")

@@ -9,7 +9,7 @@ from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 
 from .models import lecun_uniform
 from .optimizers import EqxOptimizer
-from .utils import tree_replace
+from .utils import tree_replace, tree_unzip
 
 
 logger = logging.getLogger(__name__)
@@ -76,14 +76,23 @@ class CBPTracker(eqx.Module):
         assert jnp.all(jnp.array(jax.tree.leaves(jax.tree.map(lambda x: is_linear_weights(x), model)))), \
             "All layers must be 2D weight matrices"
         
-        self.all_feature_stats = jax.tree.map(
-            lambda weights: FeatureStats(
+        self.all_feature_stats = [
+            FeatureStats(
                 age = jnp.zeros(weights.shape[1], dtype=jnp.int32),
                 utility = jnp.zeros(weights.shape[1], dtype=jnp.float32),
                 replacement_accumulator = jnp.zeros(1, dtype=jnp.float32),
-            ),
-            tree = model,
-        )
+            )
+            for weights in jax.tree.leaves(model)[1:]
+        ]
+        
+        # jax.tree.map(
+        #     lambda weights: FeatureStats(
+        #         age = jnp.zeros(weights.shape[1], dtype=jnp.int32),
+        #         utility = jnp.zeros(weights.shape[1], dtype=jnp.float32),
+        #         replacement_accumulator = jnp.zeros(1, dtype=jnp.float32),
+        #     ),
+        #     tree = model,
+        # )
         
         self.incoming_weight_init = incoming_weight_init
         self.outgoing_weight_init = outgoing_weight_init
@@ -308,6 +317,8 @@ class CBPTracker(eqx.Module):
         
         return feature_stats, optimizer_state, prune_mask
     
+    
+    
     def prune_features(
         self,
         model: eqx.Module,
@@ -329,6 +340,35 @@ class CBPTracker(eqx.Module):
         # TODO: Change input_values to be all input values and mimic model shape
         # TODO: Change optimizers to all use the same type of state with a unified Adam state,
         #       and make sure they have per-weight step-sizes
+        
+        weights = jax.tree.leaves(model)
+        
+        # Apply a tree map to the very top level of the optimizer state
+        # (each of the different components of the optimizer state).
+        # For each of these, if the value is a scalar, then you can just
+        # take the scalar.
+        # If it is a PyTree, then unzip it based on the number of layers/weights.
+        # From this I should be able to construct a list of states per weight.
+        # Then I can apply pass them in the same way I pass in the in/out weights.
+        
+        optim_states = jax.tree.map_with_path(
+            lambda _, x: x if jnp.isscalar(x) else tree_unzip(x, len(weights)),
+            optimizer.state,
+            is_leaf = lambda path, _: len(path) == 1, # Only the top level is a leaf
+            is_leaf_takes_path = True,
+        )
+        
+        # Update from the back to the front
+        for i in reversed(range(1, len(weights))):
+            in_weights = weights[i-1] # Shape: (n_features, in_features)
+            out_weights = weights[i] # Shape: (out_features, n_features)
+            activation_values = input_values[i] # Shape: (batch_size, n_features)
+            feature_stats = self.all_feature_stats[i-1]
+            
+            print('test')
+            # optimizer_state = optimizer.state[i]
+            # self.prune_layer_features(in_weights, out_weights, activation_values, feature_stats, optimizer_state, rng)
+        
         pass
         
         

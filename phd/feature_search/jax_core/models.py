@@ -183,8 +183,8 @@ class MLP(eqx.Module):
         param_inputs.append(x)
         output = self.layers[-1](x)
         
-        # Structure param_inputs to match the structure of the model
-        param_inputs = jax.tree.unflatten(jax.tree.structure(self), param_inputs)
+        # # Structure param_inputs to match the structure of the model
+        # param_inputs = jax.tree.unflatten(jax.tree.structure(self), param_inputs)
         
         return output, param_inputs
     
