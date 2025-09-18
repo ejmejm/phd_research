@@ -335,14 +335,19 @@ def run_experiment(
     sequence_length = cfg.train.log_freq
     train_cycles = cfg.train.total_steps // sequence_length
     
-    train_state, task, step_stats = train_fn(train_state, task, sequence_length)
+    # train_state, task, step_stats = train_fn(train_state, task, sequence_length)
         
-    import time
-    start_time = time.time()
+    # import time
+    # start_time = time.time()
+    # for cycle in range(train_cycles):
+    #     train_state, task, step_stats = train_fn(train_state, task, sequence_length)
+    #     # print(f"Cycle {cycle}")
+    # print(f"Time taken: {time.time() - start_time:.2f}s")
+    
     for cycle in range(train_cycles):
         train_state, task, step_stats = train_fn(train_state, task, sequence_length)
+        print(step_stats.loss.mean().item())
         # print(f"Cycle {cycle}")
-    print(f"Time taken: {time.time() - start_time:.2f}s")
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search')

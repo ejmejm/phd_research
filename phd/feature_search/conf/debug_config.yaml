@@ -13,7 +13,7 @@ model:
 
 task:
   distractor_chance: 0.0
-  noise_std: 0.4
+  noise_std: 0.0
   distractor_mean_range: [ 0.0, 0.0 ]
 
 feature_recycling:
@@ -23,10 +23,11 @@ feature_recycling:
 
 train:
   total_steps: 200_000
+  log_freq: 5_000
   standardize_cumulants: true
 
 optimizer:
-  name: adam # idbd
+  name: rmsprop
   learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
   version: squared_grads
   weight_decay: 0.0
