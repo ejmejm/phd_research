@@ -220,7 +220,7 @@ def train_step(
     cbp_tracker, distractor_tracker = \
         train_state.cbp_tracker, train_state.distractor_tracker
     
-    rng, noise_key, model_key = jax.random.split(train_state.rng, 3)
+    rng, noise_key, model_key, cbp_key = jax.random.split(train_state.rng, 4)
     
     # Add noise to targets
     if cfg.task.noise_std > 0:
@@ -257,7 +257,7 @@ def train_step(
     
     if train_state.cbp_tracker is not None:
         # TODO: Implement CBP tracker
-        train_state.cbp_tracker.prune_features(model, param_inputs, optimizer)
+        train_state.cbp_tracker.prune_features(model, param_inputs, optimizer, rng=cbp_key)
     
     # Update state
     train_state_updates = dict(

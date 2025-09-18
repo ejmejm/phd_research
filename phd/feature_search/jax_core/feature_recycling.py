@@ -1,6 +1,6 @@
 import logging
 import random
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import equinox as eqx
 import jax
@@ -80,7 +80,7 @@ class CBPTracker(eqx.Module):
             FeatureStats(
                 age = jnp.zeros(weights.shape[1], dtype=jnp.int32),
                 utility = jnp.zeros(weights.shape[1], dtype=jnp.float32),
-                replacement_accumulator = jnp.zeros(1, dtype=jnp.float32),
+                replacement_accumulator = jnp.array(0.0, dtype=jnp.float32),
             )
             for weights in jax.tree.leaves(model)[1:]
         ]
@@ -154,6 +154,8 @@ class CBPTracker(eqx.Module):
             # Construct the prune mask
             prune_mask = jnp.where(filtered_utility <= utility_threshold, True, False)
             prune_mask = prune_mask & eligibility_mask
+            
+            return prune_mask, n_replacements
         
         # TODO: Test how much of a difference this makes in performance
         prune_mask, n_replacements = jax.lax.cond(
@@ -169,7 +171,7 @@ class CBPTracker(eqx.Module):
         age = jnp.where(prune_mask, 0, feature_stats.age)
 
         if self.utility_reset_mode == 'median':
-            reset_val = feature_stats.utility.median()
+            reset_val = jnp.median(feature_stats.utility)
         elif self.utility_reset_mode == 'zero':
             reset_val = 0
         else:
@@ -192,7 +194,7 @@ class CBPTracker(eqx.Module):
         if self.incoming_weight_init == 'lecun_uniform':
             new_in_weights = lecun_uniform(rng, in_weights.shape)
         elif self.incoming_weight_init == 'binary':
-            new_in_weights = jax.random.randint(rng, in_weights.shape, 0, 2, dtype=jnp.float32) * 2.0 - 1.0
+            new_in_weights = jax.random.randint(rng, in_weights.shape, 0, 2).astype(jnp.float32) * 2.0 - 1.0
         else:
             raise ValueError(f"Invalid weight initialization: {self.incoming_weight_init}")
         
@@ -283,9 +285,9 @@ class CBPTracker(eqx.Module):
         out_weights: Float[Array, 'out_features n_features'],
         activation_values: Float[Array, 'batch_size n_features'],
         feature_stats: FeatureStats,
-        # path: Tuple[...], # Of types GetArrKey (jax.tree_util.GetAttrKey)
-        optimizer_state: PyTree = None,
-        *
+        in_optim_state: Optional[NamedTuple] = None,
+        out_optim_state: Optional[NamedTuple] = None,
+        *,
         rng: PRNGKeyArray,
     ) -> Tuple[FeatureStats, Optional[EqxOptimizer], Array]:
         assert in_weights.ndim == 2, "Weights must be 2D"
@@ -315,16 +317,84 @@ class CBPTracker(eqx.Module):
         
         # Reinit optimizer input and output weight states for given features
         
-        return feature_stats, optimizer_state, prune_mask
+        return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask
     
+    # TODO: Make sure the logic here still works when the number of layers is not the same as
+    #       the number of trainable layers.
+    def _extract_layer_optim_states(self, optimizer_state: PyTree, n_layers: int) -> List[NamedTuple]:
+        """Extract the optimizer states for each layer.
+        
+        The optimizer state is typically given as a named tuple of PyTrees, each PyTree individually
+        mimicking the static structure of the model with values for that specific optimization parameter.
+        This function breaksthis down into a list of named tuples, each containing the state of each
+        parameter for the given layer.
+        
+        Args:
+            optimizer_state: The optax optimizer state to extract the states from.
+            n_layers: The number of layers in the model.
+            
+        Returns:
+            A list of named tuples, each containing the state of each parameter for the given layer
+        """
+        # When there is a tuple of states (chained optimizer),
+        # then we just want to the state of the core optimizer
+        if type(optimizer_state) == tuple:
+            optimizer_state = optimizer_state[0]
+        
+        # Apply a tree map to the very top level of the optimizer state (each of the different components of the optimizer state).
+        # For each of these, if the value is a scalar, then you can just take the scalar.
+        # If it is a PyTree, then unzip each layer.
+        # From this I should be able to construct a list of states per weight.
+        # Then I can apply pass them in the same way I pass in the in/out weights.
+        optim_states = jax.tree.map_with_path(
+            lambda _, x: (
+                [x for _ in range(n_layers)] if jnp.isscalar(x)
+                else jax.tree.leaves(x)
+            ),
+            optimizer_state,
+            is_leaf = lambda path, _: len(path) == 1, # Over each comnponent of the optimizer state
+            is_leaf_takes_path = True,
+        )
+        optim_states = [optimizer_state.__class__(*layer_state) for layer_state in zip(*optim_states)]
+        return optim_states
     
-    
+    def _recombine_layer_optim_states(self, original_optim_state: PyTree, optim_layer_states: List[NamedTuple], ) -> PyTree:
+        """Recombine the optimizer states for each layer into a single optimizer state for optax."""
+        is_chained = type(original_optim_state) == tuple
+        core_optim_state: NamedTuple = original_optim_state[0] if is_chained else original_optim_state
+        
+        new_optim_state = []
+        for i in range(len(core_optim_state)):
+            # For scalars, take the value of the scalar in the first layer
+            if jnp.isscalar(core_optim_state[i]):
+                new_optim_state.append(optim_layer_states[0][i])
+            
+            # For PyTrees, combine the values from each layer
+            else:
+                tree_structure = jax.tree.structure(core_optim_state[i])
+                new_optim_state.append(
+                    jax.tree.map(
+                        lambda *args: jax.tree.unflatten(tree_structure, [*args]),
+                        *[layer_state[i] for layer_state in optim_layer_states],
+                    )
+                )
+        new_optim_state = core_optim_state.__class__(*new_optim_state)
+
+        if is_chained:
+            full_optim_state = (new_optim_state, *original_optim_state[1:])
+        else:
+            full_optim_state = new_optim_state
+        
+        return full_optim_state
+        
     def prune_features(
         self,
         model: eqx.Module,
         input_values: eqx.Module,
         optimizer: Optional[EqxOptimizer] = None,
-    ) -> eqx.Module:
+        *,
+        rng: PRNGKeyArray,
+    ) -> Tuple[eqx.Module, EqxOptimizer, List[Bool[Array, 'n_features']]]:
         """Prune features based on CBP utility and return a mask over the features reset.
         
         Args:
@@ -334,52 +404,49 @@ class CBPTracker(eqx.Module):
             filter_spec: Boolean Pytree matching the structure of model with True for prunable layers
             
         Returns:
-            A mask over the features reset
+            The pruned model, optimizer, and a mask over the features reset
         """
         # Tree map prune_layer_features to each set of weights in the model
         # TODO: Change input_values to be all input values and mimic model shape
         # TODO: Change optimizers to all use the same type of state with a unified Adam state,
         #       and make sure they have per-weight step-sizes
         
-        weights = jax.tree.leaves(model)
-        
-        # Apply a tree map to the very top level of the optimizer state
-        # (each of the different components of the optimizer state).
-        # For each of these, if the value is a scalar, then you can just
-        # take the scalar.
-        # If it is a PyTree, then unzip it based on the number of layers/weights.
-        # From this I should be able to construct a list of states per weight.
-        # Then I can apply pass them in the same way I pass in the in/out weights.
-        
-        optim_states = jax.tree.map_with_path(
-            lambda _, x: x if jnp.isscalar(x) else tree_unzip(x, len(weights)),
-            optimizer.state,
-            is_leaf = lambda path, _: len(path) == 1, # Only the top level is a leaf
-            is_leaf_takes_path = True,
-        )
+        weights, model_structure = jax.tree.flatten(model)
+        optim_layer_states = self._extract_layer_optim_states(optimizer.state, len(weights))
+        prune_masks = []
         
         # Update from the back to the front
         for i in reversed(range(1, len(weights))):
+            
+            # Extract values needed for the current layer
             in_weights = weights[i-1] # Shape: (n_features, in_features)
             out_weights = weights[i] # Shape: (out_features, n_features)
+            in_optim_state = optim_layer_states[i-1]
+            out_optim_state = optim_layer_states[i]
             activation_values = input_values[i] # Shape: (batch_size, n_features)
             feature_stats = self.all_feature_stats[i-1]
             
-            print('test')
-            # optimizer_state = optimizer.state[i]
-            # self.prune_layer_features(in_weights, out_weights, activation_values, feature_stats, optimizer_state, rng)
+            # Prune the features
+            feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask = \
+                self.prune_layer_features(
+                    in_weights, out_weights, activation_values,
+                    feature_stats, in_optim_state, out_optim_state, rng=rng,
+                )
+            prune_masks.append(prune_mask)
+            
+            # Apply the updates to the model and optimizer
+            weights[i-1] = in_weights
+            weights[i] = out_weights
+            optim_layer_states[i-1] = in_optim_state
+            optim_layer_states[i] = out_optim_state
+
+        # Recombine the weights and optimizer states
+        model = jax.tree.unflatten(model_structure, weights)
+        new_optim_state = self._recombine_layer_optim_states(optimizer.state, optim_layer_states)
+        optimizer = tree_replace(optimizer, state=new_optim_state)
+        prune_masks = prune_masks[::-1]
         
-        pass
-        
-        
-        # reset_idxs = {}
-        # for layer in self._tracked_layers.keys():
-        #     self._step_replacement_accumulator(layer)
-        #     layer_reset_idxs = self._get_layer_prune_idxs(layer)
-        #     self._prune_layer(layer, layer_reset_idxs)
-        #     if layer_reset_idxs is not None and len(layer_reset_idxs) > 0:
-        #         reset_idxs[layer] = layer_reset_idxs
-        # return reset_idxs
+        return model, optimizer, prune_masks
     
     
     def get_statistics(self, layer: eqx.Module):
