@@ -49,18 +49,20 @@ def custom_optax_adam(
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
         
-        lr = jnp.array(lr, dtype=jnp.float32)
-        step = jax.tree.map(lambda x: jnp.zeros(x.shape[-1], dtype=jnp.int32), params)
+        learning_rate = jnp.array(lr, dtype=jnp.float32)
+        step = jax.tree.map(lambda x: jnp.zeros_like(x, dtype=jnp.int32), params)
         exp_avg = jax.tree.map(lambda x: jnp.zeros_like(x, dtype=jnp.float32), params)
         exp_avg_sq = jax.tree.map(lambda x: jnp.zeros_like(x, dtype=jnp.float32), params)
         
-        return AdamState(lr=lr, step=step, exp_avg=exp_avg, exp_avg_sq=exp_avg_sq)
+        return AdamState(lr=learning_rate, step=step, exp_avg=exp_avg, exp_avg_sq=exp_avg_sq)
 
     def update_fn(updates, state, params):
         loss_grads = updates
         lr, step, exp_avg, exp_avg_sq = state
         
         def _adam_update(step, exp_avg, exp_avg_sq, grad):
+            step += 1
+            
             # Decay the first and second moment running average coefficient 
             exp_avg = exp_avg * betas[0] + grad * (1 - betas[0])
             exp_avg_sq = exp_avg_sq * betas[1] + grad**2 * (1 - betas[1])
@@ -69,23 +71,22 @@ def custom_optax_adam(
             bias_correction1 = 1 - betas[0]**step
             bias_correction2 = 1 - betas[1]**step
 
-            step_size = lr * jnp.sqrt(bias_correction2) / bias_correction1
-            denom = jnp.sqrt(exp_avg_sq) + eps
-
-            param_update = -step_size * exp_avg / denom
+            step_size = lr / bias_correction1
+            denom = jnp.sqrt(bias_correction2 / exp_avg_sq) + eps
+            param_update = exp_avg / denom * -step_size
             
-            return param_update, exp_avg, exp_avg_sq
+            return param_update, step, exp_avg, exp_avg_sq
         
         results = jax.tree.map(
             _adam_update,
             step, exp_avg, exp_avg_sq, loss_grads,
         )
-        param_updates, exp_avg, exp_avg_sq = tree_unzip(results, 3)
+        param_updates, step, exp_avg, exp_avg_sq = tree_unzip(results, 4)
         
         # Update state
         state = AdamState(
             lr = lr,
-            step = step + 1,
+            step = step,
             exp_avg = exp_avg,
             exp_avg_sq = exp_avg_sq,
         )
