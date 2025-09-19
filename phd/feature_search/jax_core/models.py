@@ -160,11 +160,19 @@ class MLP(eqx.Module):
         else:
             raise ValueError(f'Invalid weight initialization method: {init_method}')
     
-    def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Tuple[Array, List[Array]]:
+    def __call__(
+        self,
+        x: Array,
+        set_first_element_to_one: bool = False,
+        *,
+        key: Optional[PRNGKeyArray] = None,
+    ) -> Tuple[Array, List[Array]]:
         """Forward pass through the network.
         
         Args:
             x: Input array
+            set_first_element_to_one: Whether to set the first element of the output of
+                all intermediate layers to 1.0 to create a bias term.
             key: Optional PRNG key (not used but kept for interface compatibility)
             
         Returns:
@@ -178,6 +186,9 @@ class MLP(eqx.Module):
             param_inputs.append(x)
             x = layer(x)
             x = self.activation_fn(x)
+            
+            if set_first_element_to_one:
+                x.at[..., 0].set(1.0)
         
         # Last layer (output layer)
         param_inputs.append(x)

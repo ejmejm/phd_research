@@ -30,11 +30,11 @@ from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
 
 # TODO:
-# 1. Add full train loop
-# 2. Add logging
-# 3. Add bias
-# 4. Add compute CBP
-# 5. Add distractors?
+# - [x] Add full train loop
+# - [ ] Add logging
+# - [x] Add bias
+# - [x] Add compute CBP
+# - [ ] Add distractors?
 
 TRAIN_LOOP_UNROLL = 5
 
@@ -220,6 +220,7 @@ def train_step(
     cbp_tracker, distractor_tracker = \
         train_state.cbp_tracker, train_state.distractor_tracker
     
+    use_bias = cfg.model.get('use_bias', True)
     rng, noise_key, model_key, cbp_key = jax.random.split(train_state.rng, 4)
     
     # Add noise to targets
@@ -232,7 +233,8 @@ def train_step(
         targets = standardized_targets
 
     def compute_loss(model, inputs, targets):
-        outputs, param_inputs = jax.vmap(partial(model, key=model_key))(inputs)
+        outputs, param_inputs = jax.vmap(partial(
+            model, set_first_element_to_one=use_bias, key=model_key))(inputs)
         loss = train_state.criterion(outputs, targets)
         return loss, (outputs, param_inputs)
     
@@ -311,7 +313,6 @@ def run_experiment(
         distractor_tracker, # : DistractorTracker,
         rng: PRNGKeyArray,
     ):
-    use_bias = cfg.model.get('use_bias', True) # TODO: Add bias to model inputs
     
     # TODO: Implement distractor
     # # Distractor setup
