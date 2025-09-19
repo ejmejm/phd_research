@@ -334,22 +334,18 @@ class CBPTracker(eqx.Module):
         )
         
         # TODO: Add optimization that doesn't do this if n_replacements is 0
+        # TODO: Step through manually to make sure weights are reset as expected
         
         # Reset stats for those features
         feature_stats = self._reset_feature_stats(feature_stats, prune_mask)
         
         # Reinit input and output weights for given features
-        nin_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
-        nout_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
+        in_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
+        out_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
         
         # Reinit optimizer input and output weight states for given features
-        nin_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
-        nout_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
-        
-        in_weights = nin_weights
-        out_weights = nout_weights
-        in_optim_state = nin_optim_state
-        out_optim_state = nout_optim_state
+        in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
+        out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
         
         return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask
     
