@@ -136,7 +136,7 @@ class CBPTracker(eqx.Module):
         )
 
     def _make_prune_mask(
-        self, feature_stats: FeatureStats
+        self, feature_stats: FeatureStats, rng: PRNGKeyArray,
     ) -> Tuple[Bool[Array, 'n_features'], Int[Array, '']]:
         """Returns a boolean mask of which features to prune and the number of features to prune."""
         
@@ -149,7 +149,10 @@ class CBPTracker(eqx.Module):
             n_replacements = jnp.minimum(n_available_replacements, n_eligible_replacements)
             
             # Compute the threshold for pruning
-            filtered_utility = jnp.where(eligibility_mask, feature_stats.utility, jnp.inf)
+            # Perturb the utility to avoid ties
+            perturbed_utility = feature_stats.utility + \
+                jax.random.normal(rng, feature_stats.utility.shape) * 1e-12
+            filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
             utility_ranking = jnp.argsort(filtered_utility)
             utility_threshold = filtered_utility[utility_ranking[n_replacements - 1]]
             
@@ -318,11 +321,13 @@ class CBPTracker(eqx.Module):
         assert out_weights.ndim == 2, "Weights must be 2D"
         n_features = out_weights.shape[1]
         
+        in_weight_key, out_weight_key, prune_mask_key = jax.random.split(rng, 3)
+        
         # Update feature stats
         feature_stats = self._compute_new_feature_stats(feature_stats, out_weights, activation_values)
         
         # Get indices to reinitialize (prune mask)
-        prune_mask, n_replacements = self._make_prune_mask(feature_stats)
+        prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
         feature_stats = tree_replace(
             feature_stats,
             replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
@@ -333,15 +338,18 @@ class CBPTracker(eqx.Module):
         # Reset stats for those features
         feature_stats = self._reset_feature_stats(feature_stats, prune_mask)
         
-        in_weight_key, out_weight_key, in_optim_key, out_optim_key = jax.random.split(rng, 4)
-        
         # Reinit input and output weights for given features
-        in_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
-        out_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
+        nin_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
+        nout_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
         
         # Reinit optimizer input and output weight states for given features
-        in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
-        out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
+        nin_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
+        nout_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
+        
+        in_weights = nin_weights
+        out_weights = nout_weights
+        in_optim_state = nin_optim_state
+        out_optim_state = nout_optim_state
         
         return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask
     
@@ -435,9 +443,11 @@ class CBPTracker(eqx.Module):
         weights, model_structure = jax.tree.flatten(model)
         optim_layer_states = self._extract_layer_optim_states(optimizer.state, len(weights))
         prune_masks = []
+        new_feature_stats = []
         
         # Update from the back to the front
         for i in reversed(range(1, len(weights))):
+            rng, layer_rng = jax.random.split(rng)
             
             # Extract values needed for the current layer
             in_weights = weights[i-1] # Shape: (n_features, in_features)
@@ -451,9 +461,10 @@ class CBPTracker(eqx.Module):
             feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask = \
                 self.prune_layer_features(
                     in_weights, out_weights, activation_values,
-                    feature_stats, in_optim_state, out_optim_state, rng=rng,
+                    feature_stats, in_optim_state, out_optim_state, rng=layer_rng,
                 )
             prune_masks.append(prune_mask)
+            new_feature_stats.append(feature_stats)
             
             # Apply the updates to the model and optimizer
             weights[i-1] = in_weights
@@ -467,7 +478,13 @@ class CBPTracker(eqx.Module):
         optimizer = tree_replace(optimizer, state=new_optim_state)
         prune_masks = prune_masks[::-1]
         
-        return model, optimizer, prune_masks
+        new_tracker = tree_replace(
+            self,
+            all_feature_stats = new_feature_stats,
+            rng = rng,
+        )
+        
+        return new_tracker, model, optimizer, prune_masks
     
     
     def get_statistics(self, layer: eqx.Module):
