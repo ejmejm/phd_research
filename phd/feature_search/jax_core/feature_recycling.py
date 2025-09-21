@@ -109,6 +109,7 @@ class CBPTracker(eqx.Module):
             rng = jax.random.PRNGKey(random.randint(0, 2**31))
         self.rng = rng
         
+    @jax.named_call
     def _compute_new_feature_stats(
         self,
         feature_stats: FeatureStats,
@@ -135,6 +136,7 @@ class CBPTracker(eqx.Module):
             replacement_accumulator = replacement_accumulator,
         )
 
+    @jax.named_call
     def _make_prune_mask(
         self, feature_stats: FeatureStats, rng: PRNGKeyArray,
     ) -> Tuple[Bool[Array, 'n_features'], Int[Array, '']]:
@@ -171,6 +173,7 @@ class CBPTracker(eqx.Module):
         
         return prune_mask, n_replacements
     
+    @jax.named_call
     def _reset_feature_stats(self, feature_stats: FeatureStats, prune_mask: Bool[Array, 'n_features']):
         """Resets the feature stats for the given layer and indices."""
         age = jnp.where(prune_mask, 0, feature_stats.age)
@@ -189,6 +192,7 @@ class CBPTracker(eqx.Module):
             utility = utility,
         )
     
+    @jax.named_call
     def _reinit_input_weights(
         self,
         in_weights: Float[Array, 'n_features in_features'],
@@ -205,6 +209,7 @@ class CBPTracker(eqx.Module):
         
         return jnp.where(jnp.expand_dims(prune_mask, 1), new_in_weights, in_weights)
     
+    @jax.named_call
     def _reinit_output_weights(
         self,
         out_weights: Float[Array, 'out_features n_features'],
@@ -221,7 +226,7 @@ class CBPTracker(eqx.Module):
 
         return jnp.where(jnp.expand_dims(prune_mask, 0), new_out_weights, out_weights)
     
-    
+    @jax.named_call
     def _reset_input_optim_state(
         self,
         optim_layer_state: Optional[NamedTuple],
@@ -261,7 +266,7 @@ class CBPTracker(eqx.Module):
         
         return optim_layer_state.__class__(*new_vals)
     
-    
+    @jax.named_call
     def _reset_output_optim_state(
         self,
         optim_layer_state: Optional[NamedTuple],
@@ -305,7 +310,7 @@ class CBPTracker(eqx.Module):
         
         return optim_layer_state.__class__(*new_vals)
 
-    
+    @jax.named_call
     def prune_layer_features(
         self,
         in_weights: Float[Array, 'n_features in_features'],

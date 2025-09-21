@@ -1,5 +1,6 @@
 from functools import partial
 import logging
+import time
 from typing import Iterator, Tuple, Callable, List, Optional
 
 import equinox as eqx
@@ -200,14 +201,16 @@ class TrainState(eqx.Module):
     
 
 class StepStats(eqx.Module):
+    """Stats for a single step."""
     loss: Float[Array, '']
     targets: Float[Array, 'batch_size n_outputs']
-    # cumulant_loss: Float[Array, ''] = eqx.field(default=jnp.zeros(1))
-    # mean_pred_loss: Float[Array, '']
-    # effective_lr: Float[Array, '']
-    # pruned_accum: Int[Array, '']
-    # pruned_newest_feature_accum: Int[Array, '']
-    # n_steps_since_log: Int[Array, '']
+
+
+class MetricsBuffer(eqx.Module):
+    """Buffer for accumulating metrics over a set of steps."""
+    cumulative_loss: Float[Array, ''] = eqx.field(default=jnp.array(0.0))
+    total_samples: Int[Array, ''] = eqx.field(default=jnp.array(0, dtype=jnp.int32))
+    prior_log_step: Int[Array, ''] = eqx.field(default=jnp.array(0, dtype=jnp.int32))
 
 
 def train_step(
@@ -302,6 +305,48 @@ def train_multi_step(
     return train_state, task, step_stats
 
 
+def compute_metrics(
+        metrics_buffer: MetricsBuffer,
+        step_stats: StepStats,
+        cfg: DictConfig,
+        step: int,
+    ) -> Tuple[MetricsBuffer, Dict[str, Any]]:
+    
+    # TODO: Should I transfer to CPU here?
+    cycle_loss = step_stats.loss.sum()
+    steps_since_log = step - metrics_buffer.prior_log_step
+    
+    # Update metrics buffer
+    tree_replace(
+        metrics_buffer,
+        cumulative_loss = metrics_buffer.cumulative_loss + cycle_loss,
+        total_samples = metrics_buffer.total_samples + step_stats.loss.shape[0],
+        prior_log_step = step,
+    )
+    
+    # Compute metrics
+    metrics = {
+        'step': step,
+        'samples': metrics_buffer.total_samples,
+        'loss': cycle_loss / steps_since_log,
+        'cumulative_loss': metrics_buffer.cumulative_loss,
+        'squared_targets': jnp.square(step_stats.targets).mean(),
+    }
+    
+    if cfg.train.get('log_pruning_stats', False):
+        raise NotImplementedError("Pruning stats are not implemented yet!")
+    if cfg.train.get('log_utility_stats', False):
+        raise NotImplementedError("Utility stats are not implemented yet!")
+    if cfg.train.get('log_model_stats', False):
+        raise NotImplementedError("Model stats are not implemented yet!")
+    if cfg.train.get('log_optimizer_stats', False):
+        raise NotImplementedError("Optimizer stats are not implemented yet!")
+    
+    metrics = {k: np.asarray(v) for k, v in metrics.items()}
+    
+    return metrics_buffer, metrics
+
+
 def run_experiment(
         cfg: DictConfig,
         task: NonlinearGEOFFTask,
@@ -330,25 +375,32 @@ def run_experiment(
         criterion = criterion,
         rng = rng,
     )
+    metrics_buffer = MetricsBuffer()
     
     train_fn = jax.jit(train_multi_step, static_argnums=(2,))
     
     sequence_length = cfg.train.log_freq
     train_cycles = cfg.train.total_steps // sequence_length
     
-    # train_state, task, step_stats = train_fn(train_state, task, sequence_length)
-        
-    # import time
-    # start_time = time.time()
-    # for cycle in range(train_cycles):
-    #     train_state, task, step_stats = train_fn(train_state, task, sequence_length)
-    #     # print(f"Cycle {cycle}")
-    # print(f"Time taken: {time.time() - start_time:.2f}s")
+    # Warmup
+    train_fn(train_state, task, sequence_length)
     
-    for cycle in range(train_cycles):
+    start_time = time.time()
+    
+    # Training loop
+    for _ in range(train_cycles):
+        
+        # Train
         train_state, task, step_stats = train_fn(train_state, task, sequence_length)
+        
+        # Metrics
+        metrics_buffer, metrics = compute_metrics(metrics_buffer, step_stats, cfg, step=train_state.step)
+        log_metrics(metrics, cfg, step=train_state.step)
         print(step_stats.loss.mean().item())
-        # print(f"Cycle {cycle}")
+    
+    # Print time taken
+    time_taken = time.time() - start_time
+    print(f"Time taken: {time_taken:.2f}s | Iters/s: {cfg.train.total_steps / time_taken:.2f}")
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search')

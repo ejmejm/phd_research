@@ -2,10 +2,10 @@ defaults:
 - full_feature_search
 - _self_
 
-wandb: false
+wandb: true
 comet_ml: false
 
-device: cpu
+device: cuda
 
 model:
   hidden_dim: 20_000
@@ -22,7 +22,7 @@ feature_recycling:
   initial_step_size_method: mean
 
 train:
-  total_steps: 200_000
+  total_steps: 50_000
   log_freq: 5_000
   standardize_cumulants: true
 
