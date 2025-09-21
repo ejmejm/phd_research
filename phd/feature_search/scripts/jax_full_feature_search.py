@@ -260,6 +260,7 @@ def train_step(
     
     model = eqx.apply_updates(model, updates)
     
+    # CBP resets
     if train_state.cbp_tracker is not None:
         cbp_tracker, model, optimizer, prune_masks = train_state.cbp_tracker.prune_features(
             model, param_inputs, optimizer, rng=cbp_key)

@@ -145,31 +145,21 @@ class CBPTracker(eqx.Module):
         # Determine which features are eligible for replacement, and which to replace
         n_available_replacements = feature_stats.replacement_accumulator.astype(jnp.int32)
         
-        def _make_mask():
-            eligibility_mask = feature_stats.age > self.maturity_threshold
-            n_eligible_replacements = jnp.sum(eligibility_mask)
-            n_replacements = jnp.minimum(n_available_replacements, n_eligible_replacements)
-            
-            # Compute the threshold for pruning
-            # Perturb the utility to avoid ties
-            perturbed_utility = feature_stats.utility + \
-                jax.random.normal(rng, feature_stats.utility.shape) * 1e-12
-            filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
-            utility_ranking = jnp.argsort(filtered_utility)
-            utility_threshold = filtered_utility[utility_ranking[n_replacements - 1]]
-            
-            # Construct the prune mask
-            prune_mask = jnp.where(filtered_utility <= utility_threshold, True, False)
-            prune_mask = prune_mask & eligibility_mask
-            
-            return prune_mask, n_replacements
+        eligibility_mask = feature_stats.age > self.maturity_threshold
+        n_eligible_replacements = jnp.sum(eligibility_mask)
+        n_replacements = jnp.minimum(n_available_replacements, n_eligible_replacements)
         
-        # TODO: Test how much of a difference this makes in performance
-        prune_mask, n_replacements = jax.lax.cond(
-            n_available_replacements > 0,
-            _make_mask,
-            lambda: (jnp.zeros(feature_stats.utility.shape, dtype=jnp.bool_), 0)
-        )
+        # Compute the threshold for pruning
+        # Perturb the utility to avoid ties
+        perturbed_utility = feature_stats.utility + \
+            jax.random.normal(rng, feature_stats.utility.shape) * 1e-12
+        filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
+        utility_ranking = jnp.argsort(filtered_utility)
+        utility_threshold = filtered_utility[utility_ranking[n_replacements - 1]]
+        
+        # Construct the prune mask
+        prune_mask = jnp.where(filtered_utility <= utility_threshold, True, False)
+        prune_mask = prune_mask & eligibility_mask
         
         return prune_mask, n_replacements
     
@@ -309,50 +299,6 @@ class CBPTracker(eqx.Module):
                 raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
         
         return optim_layer_state.__class__(*new_vals)
-
-    @jax.named_call
-    def prune_layer_features(
-        self,
-        in_weights: Float[Array, 'n_features in_features'],
-        out_weights: Float[Array, 'out_features n_features'],
-        activation_values: Float[Array, 'batch_size n_features'],
-        feature_stats: FeatureStats,
-        in_optim_state: Optional[NamedTuple] = None,
-        out_optim_state: Optional[NamedTuple] = None,
-        *,
-        rng: PRNGKeyArray,
-    ) -> Tuple[FeatureStats, Optional[EqxOptimizer], Array]:
-        assert in_weights.ndim == 2, "Weights must be 2D"
-        assert out_weights.ndim == 2, "Weights must be 2D"
-        n_features = out_weights.shape[1]
-        
-        in_weight_key, out_weight_key, prune_mask_key = jax.random.split(rng, 3)
-        
-        # Update feature stats
-        feature_stats = self._compute_new_feature_stats(feature_stats, out_weights, activation_values)
-        
-        # Get indices to reinitialize (prune mask)
-        prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
-        feature_stats = tree_replace(
-            feature_stats,
-            replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
-        )
-        
-        # TODO: Add optimization that doesn't do this if n_replacements is 0
-        # TODO: Step through manually to make sure weights are reset as expected
-        
-        # Reset stats for those features
-        feature_stats = self._reset_feature_stats(feature_stats, prune_mask)
-        
-        # Reinit input and output weights for given features
-        in_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
-        out_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
-        
-        # Reinit optimizer input and output weight states for given features
-        in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
-        out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
-        
-        return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask
     
     # TODO: Make sure the logic here still works when the number of layers is not the same as
     #       the number of trainable layers.
@@ -421,6 +367,57 @@ class CBPTracker(eqx.Module):
             full_optim_state = new_optim_state
         
         return full_optim_state
+
+    @jax.named_call
+    def prune_layer_features(
+        self,
+        in_weights: Float[Array, 'n_features in_features'],
+        out_weights: Float[Array, 'out_features n_features'],
+        activation_values: Float[Array, 'batch_size n_features'],
+        feature_stats: FeatureStats,
+        in_optim_state: Optional[NamedTuple] = None,
+        out_optim_state: Optional[NamedTuple] = None,
+        *,
+        rng: PRNGKeyArray,
+    ) -> Tuple[FeatureStats, Optional[EqxOptimizer], Array]:
+        assert in_weights.ndim == 2, "Weights must be 2D"
+        assert out_weights.ndim == 2, "Weights must be 2D"
+        n_features = out_weights.shape[1]
+        
+        in_weight_key, out_weight_key, prune_mask_key = jax.random.split(rng, 3)
+        
+        # Update feature stats
+        feature_stats = self._compute_new_feature_stats(feature_stats, out_weights, activation_values)
+        
+        # Get indices to reinitialize (prune mask)
+        prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
+        
+        # # Create a dummy prune mask with one random non-zero value
+        # n_features = feature_stats.utility.shape[0]
+        # random_idx = jax.random.randint(prune_mask_key, shape=(), minval=0, maxval=n_features)
+        # prune_mask = jnp.zeros(n_features, dtype=jnp.bool_).at[random_idx].set(True)
+        # n_replacements = 1
+        
+        feature_stats = tree_replace(
+            feature_stats,
+            replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
+        )
+        
+        # TODO: Add optimization that doesn't do this if n_replacements is 0
+        # TODO: Step through manually to make sure weights are reset as expected
+        
+        # Reset stats for those features
+        feature_stats = self._reset_feature_stats(feature_stats, prune_mask)
+        
+        # Reinit input and output weights for given features
+        in_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
+        out_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
+        
+        # # Reinit optimizer input and output weight states for given features
+        # in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
+        # out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
+        
+        return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask
         
     def prune_features(
         self,
