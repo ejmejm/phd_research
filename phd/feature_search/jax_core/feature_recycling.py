@@ -1,4 +1,6 @@
+from functools import partial
 import logging
+import math
 import random
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -18,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 class FeatureStats(eqx.Module):
+    max_possible_replacements: int = eqx.field(static=True)
+    
     age: Int[Array, 'n_features']
     utility: Float[Array, 'n_features']
     replacement_accumulator: Float[Array, '']
@@ -31,9 +35,9 @@ class CBPTracker(eqx.Module):
     outgoing_weight_init: str = eqx.field(static=True)
     utility_reset_mode: str = eqx.field(static=True)
     initial_step_size_method: str = eqx.field(static=True)
+    replace_rate: Float[Array, ''] = eqx.field(static=True)
     
     # Non-static
-    replace_rate: Float[Array, '']
     decay_rate: Float[Array, '']
     maturity_threshold: Int[Array, '']
     all_feature_stats: PyTree # Pytree with FeatureStats for leaves
@@ -83,9 +87,18 @@ class CBPTracker(eqx.Module):
                 age = jnp.zeros(weights.shape[1], dtype=jnp.int32),
                 utility = jnp.zeros(weights.shape[1], dtype=jnp.float32),
                 replacement_accumulator = jnp.array(0.0, dtype=jnp.float32),
+                max_possible_replacements = math.ceil(replace_rate * weights.shape[1]),
             )
             for weights in jax.tree.leaves(model)[1:]
         ]
+        
+        for stats in self.all_feature_stats:
+            n_features = stats.utility.shape[0]
+            assert stats.max_possible_replacements < n_features, (
+                f"The replacement rate is too high! The maximum possible replacements is "
+                f"{stats.max_possible_replacements}, but there are {n_features} features. "
+                f"This algorithm does not support replacing all features at once."
+            )
         
         # jax.tree.map(
         #     lambda weights: FeatureStats(
@@ -134,7 +147,30 @@ class CBPTracker(eqx.Module):
             age = age,
             utility = utility,
             replacement_accumulator = replacement_accumulator,
+            max_possible_replacements = feature_stats.max_possible_replacements,
         )
+    
+    @partial(jax.jit, static_argnames=('n_replacements',))
+    def _make_k_prune_mask(
+        self, 
+        filtered_utility: Float[Array, 'n_features'],
+        eligibility_mask: Bool[Array, 'n_features'],
+        n_replacements: int,
+    ) -> Bool[Array, 'n_features']:
+        """Returns a boolean mask of with approximately n_replacements features to prune.
+        
+        This is potentially slightly faster than sorting, but it requires knowing exactly
+        how many features to prune in advance.
+        """
+        # lowest to highest utility
+        values, _ = jax.lax.top_k(-filtered_utility, n_replacements + 1)
+        utility_threshold = -values[-1]
+        
+        # Construct the prune mask
+        prune_mask = jnp.where(filtered_utility < utility_threshold, True, False)
+        prune_mask = prune_mask & eligibility_mask
+        
+        return prune_mask
 
     @jax.named_call
     def _make_prune_mask(
@@ -155,10 +191,10 @@ class CBPTracker(eqx.Module):
             jax.random.normal(rng, feature_stats.utility.shape) * 1e-12
         filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
         utility_ranking = jnp.argsort(filtered_utility)
-        utility_threshold = filtered_utility[utility_ranking[n_replacements - 1]]
+        utility_threshold = filtered_utility[utility_ranking[n_replacements]]
         
         # Construct the prune mask
-        prune_mask = jnp.where(filtered_utility <= utility_threshold, True, False)
+        prune_mask = jnp.where(filtered_utility < utility_threshold, True, False)
         prune_mask = prune_mask & eligibility_mask
         
         return prune_mask, n_replacements
