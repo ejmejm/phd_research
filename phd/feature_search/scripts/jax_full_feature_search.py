@@ -386,6 +386,7 @@ def run_experiment(
     train_fn(train_state, task, sequence_length)
     
     start_time = time.time()
+    pbar = tqdm(total=cfg.train.total_steps, desc='Training')
     
     # Training loop
     for _ in range(train_cycles):
@@ -396,11 +397,13 @@ def run_experiment(
         # Metrics
         metrics_buffer, metrics = compute_metrics(metrics_buffer, step_stats, cfg, step=train_state.step)
         log_metrics(metrics, cfg, step=train_state.step)
-        print(step_stats.loss.mean().item())
+        pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
+        pbar.update(sequence_length)
+        
+    pbar.close()
     
     # Print time taken
     time_taken = time.time() - start_time
-    print(f"Time taken: {time_taken:.2f}s | Iters/s: {cfg.train.total_steps / time_taken:.2f}")
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search')

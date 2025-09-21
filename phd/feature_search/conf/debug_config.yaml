@@ -2,7 +2,7 @@ defaults:
 - full_feature_search
 - _self_
 
-wandb: true
+wandb: false
 comet_ml: false
 
 device: cuda
