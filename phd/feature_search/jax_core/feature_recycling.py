@@ -302,7 +302,6 @@ class CBPTracker(eqx.Module):
         if optim_layer_state is None:
             return None
         
-        
         # Get mean and median beta per output unit
         # Use mean/median per output unit because different units may be moving
         # at different rates.
@@ -418,7 +417,6 @@ class CBPTracker(eqx.Module):
     ) -> Tuple[FeatureStats, Optional[EqxOptimizer], Array]:
         assert in_weights.ndim == 2, "Weights must be 2D"
         assert out_weights.ndim == 2, "Weights must be 2D"
-        n_features = out_weights.shape[1]
         
         in_weight_key, out_weight_key, prune_mask_key = jax.random.split(rng, 3)
         
@@ -428,20 +426,13 @@ class CBPTracker(eqx.Module):
         # Get indices to reinitialize (prune mask)
         prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
         
-        # # Create a dummy prune mask with one random non-zero value
-        # n_features = feature_stats.utility.shape[0]
-        # random_idx = jax.random.randint(prune_mask_key, shape=(), minval=0, maxval=n_features)
-        # prune_mask = jnp.zeros(n_features, dtype=jnp.bool_).at[random_idx].set(True)
-        # n_replacements = 1
-        
         feature_stats = tree_replace(
             feature_stats,
             replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
         )
         
-        # TODO: Add optimization that doesn't do this if n_replacements is 0
         # TODO: Step through manually to make sure weights are reset as expected
-        
+    
         # Reset stats for those features
         feature_stats = self._reset_feature_stats(feature_stats, prune_mask)
         
@@ -449,9 +440,9 @@ class CBPTracker(eqx.Module):
         in_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
         out_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
         
-        # # Reinit optimizer input and output weight states for given features
-        # in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
-        # out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
+        # Reinit optimizer input and output weight states for given features
+        in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
+        out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
         
         return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask
         
