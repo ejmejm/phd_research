@@ -2,7 +2,7 @@ defaults:
 - full_feature_search
 - _self_
 
-wandb: false
+wandb: true
 comet_ml: false
 
 device: cuda
@@ -20,10 +20,11 @@ feature_recycling:
   recycle_rate: 0.005
   use_signed_utility: False
   initial_step_size_method: mean
+  prune_frequency: 1
 
 train:
-  total_steps: 50_000
-  log_freq: 5_000
+  total_steps: 200_000
+  log_freq: 2_000
   standardize_cumulants: true
 
 optimizer:

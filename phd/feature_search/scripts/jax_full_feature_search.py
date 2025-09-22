@@ -1,7 +1,6 @@
 from functools import partial
 import logging
-import time
-from typing import Iterator, Tuple, Callable, List, Optional
+from typing import Tuple, Callable, Optional
 
 import equinox as eqx
 import hydra
@@ -14,7 +13,6 @@ import optax
 from tqdm import tqdm
 
 from phd.feature_search.jax_core.experiment_helpers import (
-    # get_model_statistics,
     prepare_task,
     prepare_optimizer,
     seed_from_string,
@@ -30,22 +28,11 @@ from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
 from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
 
-# TODO:
-# - [x] Add full train loop
-# - [x] Add logging
-# - [x] Add bias
-# - [x] Add compute CBP
-# - [ ] Optimize train loop
-# - [ ] Add distractors?
 
 TRAIN_LOOP_UNROLL = 2
-PRUNE_FREQUENCY = 2
 
 
 logger = logging.getLogger(__name__)
-
-
-# TODO: Implement distractors
 
 
 def prepare_components(cfg: DictConfig):
@@ -99,7 +86,6 @@ def prepare_components(cfg: DictConfig):
         optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
         logger.info(f"Using single optimizer: {cfg.optimizer.name}")
     
-    # # TODO: Implement CBP tracker in JAX
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:
         cbp_tracker = CBPTracker(
@@ -138,6 +124,8 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
     assert cbp_tracker.incoming_weight_init == 'binary', \
         "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
+    assert cfg.train.log_freq % cfg.feature_recycling.get('prune_frequency', 1) == 0, \
+        "Log frequency must be a multiple of prune frequency!"
     
     # Init target output weights to kaiming uniform and predictor output weights to zero
     task_init_key = rng_from_string(rng, 'task_init_key')
@@ -287,12 +275,13 @@ def train_multi_step(
     n_steps: int,
 ) -> Tuple[TrainState, StepStats]:
     train_step_fn = jax.jit(train_step, static_argnums=(2,))
+    prune_frequency = train_state.cfg.feature_recycling.get('prune_frequency', 1)
 
     def _inner_step(state, _):
         train_state, task = state
         
         all_step_stats = []
-        for _ in range(PRUNE_FREQUENCY - 1):
+        for _ in range(prune_frequency - 1):
             task, data = task.generate_batch(1)
             train_state, step_stats = train_step_fn(train_state, data, False)
             all_step_stats.append(step_stats)
@@ -309,7 +298,7 @@ def train_multi_step(
         _inner_step,
         init = (train_state, task),
         xs = None,
-        length = n_steps // PRUNE_FREQUENCY,
+        length = n_steps // prune_frequency,
         unroll = TRAIN_LOOP_UNROLL,
     )
     
@@ -322,8 +311,6 @@ def compute_metrics(
         cfg: DictConfig,
         step: int,
     ) -> Tuple[MetricsBuffer, Dict[str, Any]]:
-    
-    # TODO: Should I transfer to CPU here?
     cycle_loss = step_stats.loss.sum()
     steps_since_log = step - metrics_buffer.prior_log_step
     
@@ -369,12 +356,6 @@ def run_experiment(
         distractor_tracker, # : DistractorTracker,
         rng: PRNGKeyArray,
     ):
-    
-    # TODO: Implement distractor
-    # # Distractor setup
-    # n_hidden_units = model.layers[-1].in_features
-    # first_feature_idx = 1 if use_bias else 0 # First feature is bias if enabled
-    # distractor_tracker.process_new_features(list(range(first_feature_idx, n_hidden_units)))
     
     train_state = TrainState(
         model = model,
@@ -425,17 +406,7 @@ def main(cfg: DictConfig) -> None:
 
     task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng = \
         prepare_ltu_geoff_experiment(cfg)
-        
-    # TODO: Implement distractor tracking
-    # model.forward = model_distractor_forward_pass.__get__(model)
     
-    # distractor_tracker = DistractorTracker(
-    #     model,
-    #     cfg.task.distractor_chance,
-    #     tuple(cfg.task.distractor_mean_range),
-    #     tuple(cfg.task.distractor_std_range),
-    #     seed = seed_from_string(cfg.seed, 'distractor_tracker'),
-    # )
     distractor_tracker = None
     
     run_experiment(
