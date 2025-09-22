@@ -1,0 +1,22 @@
+name: target_hidden_dim
+project: feature_recycling-nlg_ablation_v5_jax_test
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v5/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  device: cuda
+  jax_jit_cache_dir: "$HOME/scratch/jax_cache"
+  feature_recycling.prune_frequency: 4
+  train.log_freq: 4000
+  train.log_utility_stats: false
+  train.log_pruning_stats: false
+  train.log_model_stats: false
+
+  model.hidden_dim: [320, 1280, 5120, 20480]
+  task.hidden_dim: [10, 20, 40, 80, 160]
+  seed: [501, 502, 503, 504, 505]

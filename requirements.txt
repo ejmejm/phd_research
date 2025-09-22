@@ -4,3 +4,10 @@ torch==2.6.0
 tqdm==4.67.1
 wandb==0.19.8
 comet_ml==3.49.10
+
+# JAX reqs
+jax==0.6.2
+jaxlib==0.6.2
+jaxtyping==0.3.2
+equinox==0.13.0
+etils==1.12.2
