@@ -453,7 +453,7 @@ class CBPTracker(eqx.Module):
         optimizer: Optional[EqxOptimizer] = None,
         *,
         rng: PRNGKeyArray,
-    ) -> Tuple[eqx.Module, EqxOptimizer, List[Bool[Array, 'n_features']]]:
+    ) -> Tuple['CBPTracker', eqx.Module, EqxOptimizer, List[Bool[Array, 'n_features']]]:
         """Prune features based on CBP utility and return a mask over the features reset.
         
         Args:
@@ -510,6 +510,48 @@ class CBPTracker(eqx.Module):
         )
         
         return new_tracker, model, optimizer, prune_masks
+    
+    def update_feature_stats(
+        self,
+        model: eqx.Module,
+        input_values: eqx.Module,
+    ) -> 'CBPTracker':
+        """Updates the feature stats based on activation values and returns an updated tracker.
+        
+        Args:
+            model: The full model to update the feature stats for
+            input_values: Pytree matching the structure of model with the input values for each layer
+            
+        Returns:
+            The updated tracker
+        """
+        weights = jax.tree.leaves(model)
+        new_feature_stats = []
+        
+        # Update from the back to the front
+        for i in reversed(range(1, len(weights))):
+            
+            # Extract values needed for the current layer
+            in_weights = weights[i-1] # Shape: (n_features, in_features)
+            out_weights = weights[i] # Shape: (out_features, n_features)
+            activation_values = input_values[i] # Shape: (batch_size, n_features)
+            feature_stats = self.all_feature_stats[i-1]
+            
+            assert in_weights.ndim == 2, "Weights must be 2D"
+            assert out_weights.ndim == 2, "Weights must be 2D"
+            
+            # Update feature stats
+            feature_stats = self._compute_new_feature_stats(feature_stats, out_weights, activation_values)
+            new_feature_stats.append(feature_stats)
+            
+            # Apply the updates to the model and optimizer
+            weights[i-1] = in_weights
+            weights[i] = out_weights
+        
+        new_tracker = tree_replace(
+            self, all_feature_stats=new_feature_stats)
+        
+        return new_tracker
     
     
     def get_statistics(self, layer: eqx.Module):

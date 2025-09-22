@@ -32,12 +32,14 @@ from phd.research_utils.logging import *
 
 # TODO:
 # - [x] Add full train loop
-# - [ ] Add logging
+# - [x] Add logging
 # - [x] Add bias
 # - [x] Add compute CBP
+# - [ ] Optimize train loop
 # - [ ] Add distractors?
 
-TRAIN_LOOP_UNROLL = 5
+TRAIN_LOOP_UNROLL = 2
+PRUNE_FREQUENCY = 2
 
 
 logger = logging.getLogger(__name__)
@@ -154,14 +156,6 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
     return task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng
 
 
-
-# General structure for training loop:
-# 1. Do setup (setup function and holder class)
-# 2. Scan over training steps for a set number of steps (individual step, and multiple steps via scan functions)
-# 3. Log (log function)
-# 4. Repeat from step 2
-
-
 class TrainState(eqx.Module):
     # Static
     cfg: DictConfig = eqx.field(static=True)
@@ -216,6 +210,7 @@ class MetricsBuffer(eqx.Module):
 def train_step(
     train_state: TrainState,
     data: Tuple[Float[Array, 'batch_size n_inputs'], Float[Array, 'batch_size n_outputs']],
+    do_prune: bool = False,
 ) -> Tuple[TrainState, StepStats]:
     inputs, targets = data
     cfg, model, optimizer, repr_optimizer = \
@@ -262,8 +257,11 @@ def train_step(
     
     # CBP resets
     if train_state.cbp_tracker is not None:
-        cbp_tracker, model, optimizer, prune_masks = train_state.cbp_tracker.prune_features(
-            model, param_inputs, optimizer, rng=cbp_key)
+        if do_prune:
+            cbp_tracker, model, optimizer, prune_masks = train_state.cbp_tracker.prune_features(
+                model, param_inputs, optimizer, rng=cbp_key)
+        else:
+            cbp_tracker = train_state.cbp_tracker.update_feature_stats(model, param_inputs)
     
     # Update state
     train_state_updates = dict(
@@ -288,18 +286,30 @@ def train_multi_step(
     task: NonlinearGEOFFTask,
     n_steps: int,
 ) -> Tuple[TrainState, StepStats]:
+    train_step_fn = jax.jit(train_step, static_argnums=(2,))
 
-    def _step(state, _):
+    def _inner_step(state, _):
         train_state, task = state
+        
+        all_step_stats = []
+        for _ in range(PRUNE_FREQUENCY - 1):
+            task, data = task.generate_batch(1)
+            train_state, step_stats = train_step_fn(train_state, data, False)
+            all_step_stats.append(step_stats)
+        
         task, data = task.generate_batch(1)
-        train_state, step_stats = train_step(train_state, data)
+        train_state, step_stats = train_step_fn(train_state, data, True)
+        all_step_stats.append(step_stats)
+        
+        step_stats = jax.tree.map(lambda *args: jnp.stack(args), *all_step_stats)
+        
         return (train_state, task), step_stats
     
     (train_state, task), step_stats = jax.lax.scan(
-        _step,
+        _inner_step,
         init = (train_state, task),
         xs = None,
-        length = n_steps,
+        length = n_steps // PRUNE_FREQUENCY,
         unroll = TRAIN_LOOP_UNROLL,
     )
     
@@ -385,8 +395,7 @@ def run_experiment(
     
     # Warmup
     train_fn(train_state, task, sequence_length)
-    
-    start_time = time.time()
+
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
     
     # Training loop
@@ -402,9 +411,6 @@ def run_experiment(
         pbar.update(sequence_length)
         
     pbar.close()
-    
-    # Print time taken
-    time_taken = time.time() - start_time
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search')
@@ -437,7 +443,7 @@ def main(cfg: DictConfig) -> None:
         cbp_tracker, distractor_tracker, rng,
     )
     
-    # finish_experiment(cfg)
+    finish_experiment(cfg)
 
 
 if __name__ == '__main__':
