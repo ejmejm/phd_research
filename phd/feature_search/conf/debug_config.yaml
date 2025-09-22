@@ -2,14 +2,14 @@ defaults:
 - full_feature_search
 - _self_
 
-wandb: true
+wandb: false
 comet_ml: false
 
 device: cuda
 
 model:
   hidden_dim: 20_000
-  n_frozen_layers: 0
+  n_frozen_layers: 1
 
 task:
   distractor_chance: 0.0
@@ -20,7 +20,7 @@ feature_recycling:
   recycle_rate: 0.005
   use_signed_utility: False
   initial_step_size_method: mean
-  prune_frequency: 1
+  prune_frequency: 4
 
 train:
   total_steps: 200_000

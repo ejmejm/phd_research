@@ -7,13 +7,14 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 
 from .models import lecun_uniform
 from .optimizers import EqxOptimizer
 from .optimizers.adam import AdamState
 from .optimizers.idbd import IDBDState
-from .utils import tree_replace, tree_unzip
+from .utils import get_val_at_key_path, tree_replace, tree_unzip
 
 
 logger = logging.getLogger(__name__)
@@ -337,7 +338,7 @@ class CBPTracker(eqx.Module):
     
     # TODO: Make sure the logic here still works when the number of layers is not the same as
     #       the number of trainable layers.
-    def _extract_layer_optim_states(self, optimizer_state: PyTree, n_layers: int) -> List[NamedTuple]:
+    def _extract_layer_optim_states(self, optimizer_state: PyTree, key_paths: List[KeyPath]) -> List[NamedTuple]:
         """Extract the optimizer states for each layer.
         
         The optimizer state is typically given as a named tuple of PyTrees, each PyTree individually
@@ -347,7 +348,7 @@ class CBPTracker(eqx.Module):
         
         Args:
             optimizer_state: The optax optimizer state to extract the states from.
-            n_layers: The number of layers in the model.
+            key_paths: The key paths to the optimizer states.
             
         Returns:
             A list of named tuples, each containing the state of each parameter for the given layer
@@ -357,6 +358,8 @@ class CBPTracker(eqx.Module):
         if type(optimizer_state) == tuple:
             optimizer_state = optimizer_state[0]
         
+        n_layers = len(key_paths)
+        
         # Apply a tree map to the very top level of the optimizer state (each of the different components of the optimizer state).
         # For each of these, if the value is a scalar, then you can just take the scalar.
         # If it is a PyTree, then unzip each layer.
@@ -365,25 +368,37 @@ class CBPTracker(eqx.Module):
         optim_states = jax.tree.map_with_path(
             lambda _, x: (
                 [x for _ in range(n_layers)] if jnp.isscalar(x)
-                else jax.tree.leaves(x)
+                else [get_val_at_key_path(x, path) for path in key_paths]
             ),
             optimizer_state,
-            is_leaf = lambda path, _: len(path) == 1, # Over each comnponent of the optimizer state
+            is_leaf = lambda path, _: len(path) == 1, # Over each component of the optimizer state
             is_leaf_takes_path = True,
         )
-        optim_states = [optimizer_state.__class__(*layer_state) for layer_state in zip(*optim_states)]
+        
+        # If any of the layers have a None, then the whole state for that layer is None
+        optim_states = [
+            None if None in layer_state else optimizer_state.__class__(*layer_state)
+            for layer_state in zip(*optim_states)
+        ]
         return optim_states
     
-    def _recombine_layer_optim_states(self, original_optim_state: PyTree, optim_layer_states: List[NamedTuple], ) -> PyTree:
+    def _recombine_layer_optim_states(self, original_optim_state: PyTree, optim_layer_states: List[NamedTuple]) -> PyTree:
         """Recombine the optimizer states for each layer into a single optimizer state for optax."""
         is_chained = type(original_optim_state) == tuple
         core_optim_state: NamedTuple = original_optim_state[0] if is_chained else original_optim_state
         
         new_optim_state = []
+        
+        # Loop through each component of the optimizer state (e.g. `beta`, `h`)
         for i in range(len(core_optim_state)):
-            # For scalars, take the value of the scalar in the first layer
-            if jnp.isscalar(core_optim_state[i]):
-                new_optim_state.append(optim_layer_states[0][i])
+            
+            # I don't think this will ever be the case, but just to be safe
+            if core_optim_state[i] is None:
+                new_optim_state.append(None)
+            
+            # For scalars, take the value of the scalar in the first non-None layer
+            elif jnp.isscalar(core_optim_state[i]):
+                new_optim_state.append(next(state[i] for state in optim_layer_states if state is not None))
             
             # For PyTrees, combine the values from each layer
             else:
@@ -391,9 +406,10 @@ class CBPTracker(eqx.Module):
                 new_optim_state.append(
                     jax.tree.map(
                         lambda *args: jax.tree.unflatten(tree_structure, [*args]),
-                        *[layer_state[i] for layer_state in optim_layer_states],
+                        *[layer_state[i] for layer_state in optim_layer_states if layer_state is not None],
                     )
                 )
+        
         new_optim_state = core_optim_state.__class__(*new_optim_state)
 
         if is_chained:
@@ -465,8 +481,10 @@ class CBPTracker(eqx.Module):
         Returns:
             The pruned model, optimizer, and a mask over the features reset
         """
-        weights, model_structure = jax.tree.flatten(model)
-        optim_layer_states = self._extract_layer_optim_states(optimizer.state, len(weights))
+        leaves, model_structure = jax.tree.flatten_with_path(model)
+        weight_paths, weights = zip(*leaves)
+        weights = list(weights)
+        optim_layer_states = self._extract_layer_optim_states(optimizer.state, weight_paths)
         prune_masks = []
         new_feature_stats = []
         

@@ -3,6 +3,7 @@ from typing import Any, Sequence, Tuple
 
 import equinox as eqx
 import jax
+from jax.tree_util import DictKey, GetAttrKey, KeyPath, SequenceKey
 from jaxtyping import Array
 
 
@@ -38,3 +39,16 @@ def tree_auto_unzip(tree: eqx.Module) -> Tuple[eqx.Module]:
         raise ValueError(f"Mismatched leaf lengths: {lengths}!")
 
     return tree_unzip(tree, n)
+
+
+def get_val_at_key_path(tree: eqx.Module, key_path: KeyPath) -> Any:
+    for key in key_path:
+        if isinstance(key, DictKey):
+            tree = tree[key.key]
+        elif isinstance(key, GetAttrKey):
+            tree = getattr(tree, key.name)
+        elif isinstance(key, SequenceKey):
+            tree = tree[key.idx]
+        else:
+            raise ValueError(f"Invalid key: {key}")
+    return tree
