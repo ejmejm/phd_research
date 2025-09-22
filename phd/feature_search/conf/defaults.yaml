@@ -7,6 +7,7 @@ comet_ml: false
 comet_ml_workspace: phd-research
 project: feature-search # Will appear in logging under this project
 device: cpu # {cpu, cuda}
+jax_jit_cache_dir: /tmp/jax_cache # Directory to cache JIT compiled functions (JAX ONLY)
 
 # Task parameters
 task:

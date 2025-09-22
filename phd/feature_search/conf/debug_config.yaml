@@ -24,7 +24,7 @@ feature_recycling:
 
 train:
   total_steps: 200_000
-  log_freq: 2_000
+  log_freq: 4_000
   standardize_cumulants: true
 
 optimizer:
