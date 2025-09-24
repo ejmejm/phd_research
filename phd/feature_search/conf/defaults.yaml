@@ -69,3 +69,7 @@ model:
   output_dim: 1
   activation: relu # Only used when there is more than 1 layer
   n_frozen_layers: 0 # Number of layers to freeze starting from the input layer
+
+
+# This is working far too well
+# python scripts/jax_full_feature_search.py --config-name=comet_sweeps/nonlinear_geoff_ablation_v5/base_config.yaml device=cuda feature_recycling.prune_frequency=4 train.log_freq=4000 train.log_pruning_stats=false model.hidden_dim=300 seed=501 comet_ml=false feature_recycling.recycle_rate=0.0
