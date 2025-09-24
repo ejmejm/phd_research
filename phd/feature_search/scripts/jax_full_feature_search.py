@@ -180,12 +180,13 @@ class TrainState(eqx.Module):
         self.log_pruning_stats = self.cfg.train.get('log_pruning_stats', False)
         self.log_model_stats = self.cfg.train.get('log_model_stats', False)
         self.log_optimizer_stats = self.cfg.train.get('log_optimizer_stats', False)
-    
+
 
 class StepStats(eqx.Module):
     """Stats for a single step."""
     loss: Float[Array, '']
     targets: Float[Array, 'batch_size n_outputs']
+    baseline_loss: Float[Array, '']
 
 
 class MetricsBuffer(eqx.Module):
@@ -228,6 +229,9 @@ def train_step(
     (loss, (outputs, param_inputs)), grads = jax.value_and_grad(
         compute_loss, has_aux=True)(model, inputs, targets)
     
+    # Compute loss for a naive baseline prediction
+    baseline_loss = compute_baseline_loss(cfg, train_state, targets)
+    
     # If using IDBD we also need the prediction gradients
     if cfg.optimizer.name == 'idbd':
         output_grads = jax.grad(
@@ -264,7 +268,7 @@ def train_step(
     )
     train_state_updates = {k: v for k, v in train_state_updates.items() if v is not None}
     train_state = tree_replace(train_state, **train_state_updates)
-    step_stats = StepStats(loss, targets)
+    step_stats = StepStats(loss, targets, baseline_loss)
     
     return train_state, step_stats
 
@@ -315,7 +319,7 @@ def compute_metrics(
     steps_since_log = step - metrics_buffer.prior_log_step
     
     # Update metrics buffer
-    tree_replace(
+    metrics_buffer = tree_replace(
         metrics_buffer,
         cumulative_loss = metrics_buffer.cumulative_loss + cycle_loss,
         total_samples = metrics_buffer.total_samples + step_stats.loss.shape[0],
@@ -329,6 +333,7 @@ def compute_metrics(
         'loss': cycle_loss / steps_since_log,
         'cumulative_loss': metrics_buffer.cumulative_loss,
         'squared_targets': jnp.square(step_stats.targets).mean(),
+        'baseline_loss': step_stats.baseline_loss.sum() / steps_since_log,
     }
     
     if cfg.train.get('log_pruning_stats', False):
@@ -343,6 +348,20 @@ def compute_metrics(
     metrics = {k: np.asarray(v) for k, v in metrics.items()}
     
     return metrics_buffer, metrics
+
+
+def compute_baseline_loss(
+    cfg: DictConfig,
+    train_state: TrainState,
+    targets: Float[Array, 'batch_size n_outputs'],
+) -> Float[Array, '']:
+    """Loss for a naive baseline prediction that always predicts the mean of the targets."""
+    if cfg.train.standardize_cumulants:
+        baseline_preds = jnp.zeros_like(targets)
+    else:
+        baseline_preds = jnp.ones_like(targets) * train_state.cumulant_stats.running_mean  
+    loss = train_state.criterion(baseline_preds, targets)
+    return loss
 
 
 def run_experiment(
