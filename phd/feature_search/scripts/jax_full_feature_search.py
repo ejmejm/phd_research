@@ -55,7 +55,7 @@ def prepare_components(cfg: DictConfig):
     )
     
     criterion = (optax.softmax_cross_entropy if cfg.task.type == 'classification'
-                else lambda x, y: optax.l2_loss(x, y).mean())
+                else lambda x, y: jnp.square(y - x).mean())
     optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
     
     # Determine if we need separate optimizers for the intermediate and output layers
@@ -280,17 +280,18 @@ def train_multi_step(
 ) -> Tuple[TrainState, StepStats]:
     train_step_fn = jax.jit(train_step, static_argnums=(2,))
     prune_frequency = train_state.cfg.feature_recycling.get('prune_frequency', 1)
+    batch_size = train_state.cfg.train.batch_size
 
     def _inner_step(state, _):
         train_state, task = state
         
         all_step_stats = []
         for _ in range(prune_frequency - 1):
-            task, data = task.generate_batch(1)
+            task, data = task.generate_batch(batch_size)
             train_state, step_stats = train_step_fn(train_state, data, False)
             all_step_stats.append(step_stats)
         
-        task, data = task.generate_batch(1)
+        task, data = task.generate_batch(batch_size)
         train_state, step_stats = train_step_fn(train_state, data, True)
         all_step_stats.append(step_stats)
         
