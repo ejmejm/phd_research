@@ -17,6 +17,6 @@ parameters:
   train.log_pruning_stats: false
   train.log_model_stats: false
 
-  model.hidden_dim: [320, 1280, 5120, 20480]
-  task.hidden_dim: [10, 20, 40, 80, 160]
+  model.hidden_dim: [1280, 20480]
+  task.hidden_dim: [10, 40, 160]
   seed: [501, 502, 503, 504, 505]
