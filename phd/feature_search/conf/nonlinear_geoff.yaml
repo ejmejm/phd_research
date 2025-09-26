@@ -19,3 +19,4 @@ task:
   activation: tanh
   sparsity: 0.00
   weight_init: binary
+  noise_std: 0.0

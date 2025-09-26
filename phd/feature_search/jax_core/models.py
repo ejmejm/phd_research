@@ -1,4 +1,5 @@
 from functools import partial
+import logging
 from typing import Callable, List, Optional, Tuple, Any
 
 import jax
@@ -7,6 +8,9 @@ import equinox as eqx
 import equinox.nn as nn
 from jax import Array
 from jaxtyping import PRNGKeyArray
+
+
+logger = logging.getLogger(__name__)
 
 
 @partial(jax.jit, static_argnums=(1, 2))
@@ -100,6 +104,15 @@ class MLP(eqx.Module):
             n_frozen_layers: Number of frozen layers (note: freezing is handled differently in JAX)
             key: PRNG key for weight initialization
         """
+        assert weight_init_method in ['zeros', 'kaiming_uniform', 'lecun_uniform', 'binary'], \
+            f"Invalid weight initialization method: {weight_init_method}"
+        if weight_init_method == 'kaiming_uniform':
+            weight_init_method = 'lecun_uniform'
+            logger.warning(
+                "Kaiming uniform weight initialization will be replaced "
+                "with LeCun uniform weight initialization."
+            )
+        
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.n_layers = n_layers
@@ -140,7 +153,7 @@ class MLP(eqx.Module):
             key: PRNGKeyArray,
             in_features: int,
             out_features: int,
-            init_method: str = 'kaiming_uniform',
+            init_method: str = 'lecun_uniform',
     ) -> nn.Linear:
         """Create a linear layer with specified initialization."""
         if init_method == 'zeros':
@@ -148,7 +161,7 @@ class MLP(eqx.Module):
             layer = nn.Linear(in_features, out_features, use_bias=False, key=key)
             layer = eqx.tree_at(lambda l: l.weight, layer, jnp.zeros_like(layer.weight))
             return layer
-        elif init_method == 'kaiming_uniform':
+        elif init_method == 'lecun_uniform':
             # Use default Equinox initialization (which is similar to Kaiming)
             return nn.Linear(in_features, out_features, use_bias=False, key=key)
         elif init_method == 'binary':

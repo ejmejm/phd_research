@@ -233,6 +233,7 @@ class NonlinearGEOFFTask(eqx.Module):
         
         return x @ self.weights[-1]
     
+    # TODO: Change this to account for sparsity
     def _flip_signs(
         self,
         weights: Float[Array, 'in_features out_features'],
