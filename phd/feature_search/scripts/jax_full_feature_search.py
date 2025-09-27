@@ -376,6 +376,7 @@ def run_experiment(
         cbp_tracker, # : Optional[CBPTracker],
         distractor_tracker, # : DistractorTracker,
         rng: PRNGKeyArray,
+        show_progress: bool = True,
     ) -> Tuple[TrainState, NonlinearGEOFFTask, Dict[str, Array]]:
     
     train_state = TrainState(
@@ -399,7 +400,10 @@ def run_experiment(
     # Warmup
     train_fn(train_state, task, sequence_length)
 
-    pbar = tqdm(total=cfg.train.total_steps, desc='Training')
+    if show_progress:
+        pbar = tqdm(total=cfg.train.total_steps, desc='Training')
+    else:
+        pbar = None
     
     # Training loop
     for _ in range(train_cycles):
@@ -411,10 +415,13 @@ def run_experiment(
         metrics_buffer, metrics = compute_metrics(metrics_buffer, step_stats, cfg, step=train_state.step)
         all_metrics.append(metrics)
         log_metrics(metrics, cfg, step=train_state.step)
-        pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
-        pbar.update(sequence_length)
         
-    pbar.close()
+        if pbar is not None:
+            pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
+            pbar.update(sequence_length)
+        
+    if pbar is not None:
+        pbar.close()
     
     all_metrics = jax.tree.map(lambda *args: jnp.stack(args), *all_metrics)
     return train_state, task, all_metrics
