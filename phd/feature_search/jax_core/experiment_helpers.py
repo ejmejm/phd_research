@@ -1,5 +1,6 @@
 from ctypes import c_int32
 import hashlib
+import logging
 import random
 from typing import Optional, Tuple
 
@@ -18,6 +19,9 @@ from .models import MLP
 from .optimizers import EqxOptimizer, optax_idbd, custom_optax_adam
 from .tasks.geoff import NonlinearGEOFFTask
 from .utils import tree_replace
+
+
+logger = logging.getLogger(__name__)
 
 
 # Only register resolver if it hasn't been registered yet
@@ -299,29 +303,56 @@ def standardize_targets(
     )
 
 
-def prepare_components(cfg: DictConfig, model: Optional[eqx.Module] = None):
+def prepare_components(cfg: DictConfig):
     """Prepare the components based on configuration."""
     base_seed = cfg.seed if cfg.seed is not None else random.randint(0, 2**31)
     rng = jax.random.key(base_seed)
-    
-    task = prepare_task(cfg, seed=seed_from_string(rng, 'task'))
+    task = prepare_task(cfg, seed=seed_from_string(base_seed, 'task'))
+    use_bias = cfg.model.get('use_bias', True)
     
     # Initialize model and optimizer
-    if model is None:
-        model = MLP(
-            input_dim = cfg.task.n_features,
-            output_dim = cfg.model.output_dim,
-            n_layers = cfg.model.n_layers,
-            hidden_dim = cfg.model.hidden_dim,
-            weight_init_method = cfg.model.weight_init_method,
-            activation = cfg.model.activation,
-            n_frozen_layers = cfg.model.n_frozen_layers,
-            key = rng_from_string(rng, 'model'),
-        )
+    model = MLP(
+        input_dim = cfg.task.n_features,
+        output_dim = cfg.model.output_dim,
+        n_layers = cfg.model.n_layers,
+        hidden_dim = cfg.model.hidden_dim + int(use_bias),
+        weight_init_method = cfg.model.weight_init_method,
+        activation = cfg.model.activation,
+        n_frozen_layers = cfg.model.n_frozen_layers,
+        key = rng_from_string(rng, 'model'),
+    )
     
     criterion = (optax.softmax_cross_entropy if cfg.task.type == 'classification'
-                else optax.l2_loss)
+                else lambda x, y: jnp.square(y - x).mean())
     optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
+    
+    # Determine if we need separate optimizers for the intermediate and output layers
+    repr_optimizer_name = cfg.get('representation_optimizer', {}).get('name')
+    assert repr_optimizer_name != 'idbd', "IDBD is not supported for the representation optimizer!"
+    n_repr_trainable_layers = max(0, len(model.layers) - 1 - model.n_frozen_layers)
+    
+    if repr_optimizer_name is not None and n_repr_trainable_layers > 0:
+        base_filter_spec = jax.tree.map(lambda _: False, model)
+        repr_filter_spec = eqx.tree_at(
+            lambda x: x.layers[model.n_frozen_layers:len(model.layers) - 1],
+            base_filter_spec,
+            jax.tree.map(lambda _: True, model.layers[model.n_frozen_layers:len(model.layers) - 1]),
+        )
+        output_filter_spec = eqx.tree_at(
+            lambda x: x.layers[-1],
+            base_filter_spec,
+            jax.tree.map(lambda _: True, model.layers[-1]),
+        )
+        
+        # Use separate optimizers for the intermediate and output layers
+        repr_optimizer = prepare_optimizer(model, repr_optimizer_name, cfg.representation_optimizer, filter_spec=repr_filter_spec)
+        optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer, filter_spec=output_filter_spec)
+        logger.info(f"Using separate optimizers for the intermediate and output layers: {repr_optimizer_name} and {cfg.optimizer.name}")
+    else:
+        # Only use one optimizer
+        repr_optimizer = None
+        optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
+        logger.info(f"Using single optimizer: {cfg.optimizer.name}")
     
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:
@@ -331,10 +362,11 @@ def prepare_components(cfg: DictConfig, model: Optional[eqx.Module] = None):
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
+            incoming_weight_init = 'binary',
             filter_spec = None, # Don't forget to add if doing more than 2 layers
             rng = rng_from_string(rng, 'cbp_tracker'),
         )
     else:
         cbp_tracker = None
-    
-    return task, model, criterion, optimizer, cbp_tracker
+        
+    return task, model, criterion, optimizer, repr_optimizer, cbp_tracker
