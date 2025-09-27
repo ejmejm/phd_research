@@ -292,7 +292,8 @@ def train_multi_step(
             all_step_stats.append(step_stats)
         
         task, data = task.generate_batch(batch_size)
-        train_state, step_stats = train_step_fn(train_state, data, True)
+        do_prune = train_state.cfg.feature_recycling.recycle_rate > 0
+        train_state, step_stats = train_step_fn(train_state, data, do_prune)
         all_step_stats.append(step_stats)
         
         step_stats = jax.tree.map(lambda *args: jnp.stack(args), *all_step_stats)
@@ -375,7 +376,7 @@ def run_experiment(
         cbp_tracker, # : Optional[CBPTracker],
         distractor_tracker, # : DistractorTracker,
         rng: PRNGKeyArray,
-    ):
+    ) -> Tuple[TrainState, NonlinearGEOFFTask, Dict[str, Array]]:
     
     train_state = TrainState(
         model = model,
@@ -388,6 +389,7 @@ def run_experiment(
         rng = rng,
     )
     metrics_buffer = MetricsBuffer()
+    all_metrics = []
     
     train_fn = jax.jit(train_multi_step, static_argnums=(2,))
     
@@ -407,11 +409,15 @@ def run_experiment(
         
         # Metrics
         metrics_buffer, metrics = compute_metrics(metrics_buffer, step_stats, cfg, step=train_state.step)
+        all_metrics.append(metrics)
         log_metrics(metrics, cfg, step=train_state.step)
         pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
         pbar.update(sequence_length)
         
     pbar.close()
+    
+    all_metrics = jax.tree.map(lambda *args: jnp.stack(args), *all_metrics)
+    return train_state, task, all_metrics
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search')
