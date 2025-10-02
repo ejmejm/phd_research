@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from phd.feature_search.analysis.plotting_utils import *
 
 
-def param_sensitivity_plot(
+def plot_param_sensitivity(
         run_df: pd.DataFrame,
         config_df: Optional[pd.DataFrame],
         x_col: str,
@@ -113,3 +113,142 @@ def param_sensitivity_plot(
             x_vals = [float(x.get_text()) for x in ax.get_xticklabels()]
             ax.set_xticklabels([f'{"0" if x == 0 else f"$2^{{{int(np.log2(x))}}}$"}' for x in x_vals])
 
+
+def plot_learning_curves(
+        run_df: pd.DataFrame,
+        config_df: Optional[pd.DataFrame] = None,
+        subplot_col = None,
+        subplot_values = None,
+        n_bins = 200,
+        figsize = (12, 10),
+        max_cols = 2,
+        subplot_col_label = None,
+        same_y_axis = True,
+        x_col = 'step',
+        y_col = 'loss',
+        y_label = None,
+        hue_col = None,
+        legend_title = None,
+    ):
+    """Creates subplots of learning curves for different values of a variable.
+    
+    Args:
+        run_df: DataFrame containing run data
+        config_df: DataFrame containing config data
+        subplot_col: Column name to split subplots by. If None, creates single plot.
+        subplot_values: List of values to plot. If None, uses all unique values
+        n_bins: Number of bins for the learning curves
+        figsize: Figure size as (width, height) tuple
+        max_cols: Maximum number of columns in subplot grid
+        subplot_col_label: Label for the subplot column
+        same_y_axis: Whether all subplots should share the same y-axis scale
+        x_col: Column to plot on x-axis (default: 'step')
+        y_col: Column to plot on y-axis (default: 'loss')
+        y_label: Label for y-axis (default: same as y_col)
+        hue_col: Column to use for line colors
+        legend_title: Title for the legend
+    """
+    # Get full dataset
+    plot_df = run_df
+    if config_df:
+        plot_df = plot_df.merge(config_df, on='run_id', how='left')
+        
+    # Remove runs that contain any NaN or inf values
+    nan_inf_runs = plot_df.groupby('run_id')[y_col].apply(lambda x: x.isna().any() | np.isinf(x).any())
+    valid_runs = nan_inf_runs[~nan_inf_runs].index
+    plot_df = plot_df[plot_df['run_id'].isin(valid_runs)]
+    
+    # Get subplot values if not provided
+    if subplot_col is not None and subplot_values is None:
+        subplot_values = sorted(plot_df[subplot_col].unique())
+    elif subplot_col is None:
+        subplot_values = [None]
+    
+    # Calculate number of rows/cols for subplots
+    n_plots = len(subplot_values)
+    n_cols = min(max_cols, n_plots)
+    n_rows = (n_plots + n_cols - 1) // n_cols
+    
+    # Create figure
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    if n_rows == 1 and n_cols == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+    
+    # Calculate mid 98% percentile for consistent y-axis if requested
+    if same_y_axis:
+        filtered_df = plot_df[
+            (plot_df[y_col] >= np.percentile(plot_df[y_col], 1)) &
+            (plot_df[y_col] <= np.percentile(plot_df[y_col], 99))
+        ]
+        y_range = filtered_df[y_col].max() - filtered_df[y_col].min()
+        y_pad = y_range * 0.1
+        y_min = filtered_df[y_col].min() - y_pad
+        y_max = filtered_df[y_col].max() + y_pad
+
+    # Get max step value for x-axis limit
+    max_step = plot_df[x_col].max()
+
+    for i, val in enumerate(subplot_values):
+        # Filter for current value if subplot_col exists
+        curr_df = plot_df.copy()
+        if subplot_col is not None:
+            curr_df = plot_df[plot_df[subplot_col] == val].copy()
+        
+        # Bin data
+        curr_df = bin_df(curr_df, n_bins=n_bins)
+        curr_df = curr_df[curr_df[hue_col].notna()]  # Remove NaN values
+        curr_df[hue_col] = curr_df[hue_col].astype(int)
+        
+        # return curr_df
+        
+        # Create subplot
+        sns.lineplot(
+            data = curr_df,
+            x = x_col,
+            y = y_col,
+            hue = hue_col,
+            palette = 'deep',
+            errorbar = None,
+            ax = axes[i]
+        )
+        
+        # Customize subplot
+        axes[i].grid(True, alpha=0.4)
+        axes[i].set_xlim(0, max_step)
+        if same_y_axis:
+            axes[i].set_ylim(y_min, y_max)
+        else:
+            # Calculate y limits for this subplot
+            filtered_curr_df = curr_df[
+                (curr_df[y_col] >= np.percentile(curr_df[y_col], 1)) &
+                (curr_df[y_col] <= np.percentile(curr_df[y_col], 99))
+            ]
+            y_range = filtered_curr_df[y_col].max() - filtered_curr_df[y_col].min()
+            y_pad = y_range * 0.1
+            axes[i].set_ylim(
+                filtered_curr_df[y_col].min() - y_pad,
+                filtered_curr_df[y_col].max() + y_pad
+            )
+        
+        if subplot_col is not None:
+            axes[i].set_title(f'{subplot_col_label if subplot_col_label else subplot_col} = {val}')
+        axes[i].set_xlabel('step (binned)')
+        axes[i].ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+        axes[i].set_ylabel(y_label if y_label else y_col)
+        
+        # Only show legend on first subplot
+        if i > 0:
+            axes[i].get_legend().remove()
+        elif legend_title is not None:
+            axes[i].legend(title=legend_title)
+    
+    # Remove any extra subplots
+    for i in range(len(subplot_values), len(axes)):
+        fig.delaxes(axes[i])
+    
+    # Add overall title if provided
+    if subplot_col_label and subplot_col is not None:
+        plt.suptitle(f'Learning Curves for {subplot_col_label}')
+    
+    plt.tight_layout()
