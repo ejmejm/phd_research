@@ -396,10 +396,9 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         self.step = jnp.array(0, dtype=jnp.int32)
     
     def _compute_updated_input_subspace_centers(self, rng: random.PRNGKey) -> Float[Array, 'n_features']:
-        center_changes = jax.random.uniform(
-            rng, (self.n_features,), jnp.float32, -self.max_input_center_change, self.max_input_center_change)
-        new_centers = self.input_subspace_centers + center_changes
-        new_centers = jnp.clip(new_centers, self.input_bounds[0], self.input_bounds[1])
+        min_bounds = jnp.maximum(self.input_subspace_centers - self.max_input_center_change, self.input_bounds[0])
+        max_bounds = jnp.minimum(self.input_subspace_centers + self.max_input_center_change, self.input_bounds[1])
+        new_centers = jax.random.uniform(rng, (self.n_features,), jnp.float32, min_bounds, max_bounds)
         return new_centers
     
     def _sample_inputs(self, rng: random.PRNGKey, batch_size: int = 1) -> Tuple[Float[Array, 'batch_size n_features']]:
