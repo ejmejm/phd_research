@@ -117,6 +117,34 @@ class NonlinearGEOFFTask(eqx.Module):
                 maxval = input_std_range[1],
             )
         
+        key, network_key = random.split(key)
+        self._initialize_network(
+            n_layers = n_layers,
+            n_features = n_features,
+            hidden_dim = hidden_dim,
+            flip_rate = flip_rate,
+            sparsity = sparsity,
+            key = network_key,
+        )
+        
+        n_flippable = []
+        for i in range(len(self.flip_accumulators)):
+            if self.n_layers == 1:
+                n_flippable = self.n_features
+            elif i == 0:
+                n_flippable = self.n_features * self.hidden_dim
+            elif i == len(self.weights) - 1:
+                n_flippable = self.hidden_dim
+            else:
+                n_flippable = self.hidden_dim * self.hidden_dim
+        self._n_flippable = jnp.array(n_flippable, dtype=jnp.int32)
+
+        self.rng = key
+        
+    def _initialize_network(
+        self, n_layers: int, n_features: int, hidden_dim: int,
+        flip_rate: float, sparsity: float, key: random.PRNGKey,
+    ):
         # Initialize network weights and accumulators based on layers configuration
         if n_layers == 1:
             # Single linear layer
@@ -161,20 +189,6 @@ class NonlinearGEOFFTask(eqx.Module):
             flip_accumulators = all_accumulators
             
         self.flip_accumulators = jnp.array(flip_accumulators, dtype=jnp.float32)
-        
-        n_flippable = []
-        for i in range(len(self.flip_accumulators)):
-            if self.n_layers == 1:
-                n_flippable = self.n_features
-            elif i == 0:
-                n_flippable = self.n_features * self.hidden_dim
-            elif i == len(self.weights) - 1:
-                n_flippable = self.hidden_dim
-            else:
-                n_flippable = self.hidden_dim * self.hidden_dim
-        self._n_flippable = jnp.array(n_flippable, dtype=jnp.int32)
-
-        self.rng = key
     
     def _initialize_weights(self, key: random.PRNGKey, in_features: int, out_features: int) -> jax.Array:
         """Initialize weights based on specified initialization method."""
@@ -304,6 +318,145 @@ class NonlinearGEOFFTask(eqx.Module):
             flip_accumulators = new_accumulators,
             rng = new_rng
         )
+        
+        # Forward pass through target network
+        y = jax.vmap(new_task_state._forward)(x)
+        
+        # Return updated state and the batch
+        return new_task_state, (x, y)
+
+
+class InputChangingGEOFFTask(NonlinearGEOFFTask):
+    """Input changing version of GEOFF task with configurable depth and activation.
+    
+    This implements the JAX version of the GEOFF task for use with Equinox.
+    Model is structured as an Equinox module with separate static and non-static
+    parameters as needed.
+    """
+    # Input distribution parameters
+    input_bounds: Tuple[float, float] = eqx.field(static=True) # Overall bounds of the input space
+    input_change_freq: Optional[int] = eqx.field(static=True) # Number of steps between input changes
+    input_subspace_range: float = eqx.field(static=True) # Range of the uniform distributions for sampling input values
+    max_input_center_change: float = eqx.field(static=True) # Maximum change of a subspace center per change step
+    
+    input_subspace_centers: Float[Array, 'n_features'] # Centers of the uniform distributions for sampling input values
+    step: Int[Array, ''] # Current step
+
+    def __init__(
+        self,
+        n_features: int,
+        flip_rate: float, # Percentage of weights to flip per step
+        n_layers: int = 2,
+        n_stationary_layers: int = 0,
+        hidden_dim: int = 64,
+        weight_scale: float = 1.0,
+        activation: str = 'relu',
+        sparsity: float = 0.0,
+        weight_init: str = 'binary',
+        input_bounds: Tuple[float, float] = (-1.0, 1.0),
+        input_subspace_range: float = 0.1,
+        input_change_freq: Optional[int] = None, # Int unless inf
+        max_input_center_change: float = 0.1,
+        seed: Optional[int] = None,
+    ):
+        """
+        Args:
+            n_features: Number of input features
+            flip_rate: Percentage of weights to flip per step (accumulates if < 1 weight)
+            n_layers: Number of layers in the target network (1 = linear)
+            n_stationary_layers: Number of layers that do not flip
+            hidden_dim: Hidden dimension size for intermediate layers
+            weight_scale: Scale factor for weights (weights will be ±scale)
+            activation: Activation function ('relu', 'tanh', or 'sigmoid')
+            sparsity: Percentage of weights (other than the last layer) to set to zero
+            weight_init: Weight initialization method ('binary' or 'kaiming_uniform')
+            input_bounds: Overall bounds of the input space
+            input_subspace_range: Range of the uniform distributions for sampling input values
+            input_change_freq: Number of steps between input changes (None if it doesn't change)
+            max_input_center_change: Maximum change of a subspace center per change step
+            seed: Random seed for reproducibility
+        """
+        super().__init__(
+            n_features, flip_rate, n_layers, n_stationary_layers, hidden_dim,
+            weight_scale, activation, sparsity, weight_init, (0, 0), (1, 1), seed,
+        )
+        self.rng, input_distrib_key = random.split(self.rng, 2)
+        
+        self.standard_input = False
+        self.input_mean = None
+        self.input_std = None
+        
+        # Initialize input distribution params
+        self.input_change_freq = input_change_freq
+        self.input_bounds = input_bounds
+        self.input_subspace_range = input_subspace_range
+        self.max_input_center_change = max_input_center_change
+        self.input_subspace_centers = jax.random.uniform(
+            input_distrib_key, (n_features,), jnp.float32, self.input_bounds[0], self.input_bounds[1])
+        self.step = jnp.array(0, dtype=jnp.int32)
+    
+    def _compute_updated_input_subspace_centers(self, rng: random.PRNGKey) -> Float[Array, 'n_features']:
+        center_changes = jax.random.uniform(
+            rng, (self.n_features,), jnp.float32, -self.max_input_center_change, self.max_input_center_change)
+        new_centers = self.input_subspace_centers + center_changes
+        new_centers = jnp.clip(new_centers, self.input_bounds[0], self.input_bounds[1])
+        return new_centers
+    
+    def _sample_inputs(self, rng: random.PRNGKey, batch_size: int = 1) -> Tuple[Float[Array, 'batch_size n_features']]:
+        bound = self.input_subspace_range / 2.0
+        inputs = jax.random.uniform(rng, (batch_size, self.n_features), jnp.float32, -bound, bound)
+        inputs += jnp.expand_dims(self.input_subspace_centers, 0)
+        inputs = jnp.clip(inputs, self.input_bounds[0], self.input_bounds[1])
+        return inputs
+    
+    def generate_batch(self, batch_size: int = 1) -> Tuple[eqx.Module, Tuple]:
+        """Generates a single batch of data.
+        
+        Args:
+            batch_size: Size of batch to generate
+            
+        Returns:
+            Tuple containing:
+            - New task state
+            - Batch data (x, y)
+        """
+        accumulators = self.flip_accumulators + self.flip_rate * self._n_flippable
+        
+        new_rng, flip_key, x_key = random.split(self.rng, 3)
+
+        # Flip weights according to accumulators
+        new_weights = [self.weights[i] for i in range(self.n_stationary_layers)]
+        new_accumulators = [0.0 for _ in range(self.n_stationary_layers)]
+        flip_keys = random.split(flip_key, len(self.weights))
+        for layer_idx in range(self.n_stationary_layers, len(self.weights)):
+            new_weight, accumulator = self._flip_signs(
+                weights = self.weights[layer_idx],
+                flip_accumulator = accumulators[layer_idx],
+                key = flip_keys[layer_idx],
+            )
+            new_weights.append(new_weight)
+            new_accumulators.append(accumulator)
+        new_accumulators = jnp.array(new_accumulators, dtype=jnp.float32)
+        
+        input_subspace_centers = self.input_subspace_centers
+        if self.input_change_freq is not None:
+            updated_input_subspace_centers = self._compute_updated_input_subspace_centers(x_key)
+            update_mask = jnp.ones_like(input_subspace_centers)
+            update_mask = update_mask * (self.step % self.input_change_freq == 0)
+            input_subspace_centers = jnp.where(update_mask, updated_input_subspace_centers, input_subspace_centers)
+        
+        # Create a temporary task with the updated weights and input distribution
+        new_task_state: InputChangingGEOFFTask = tree_replace(
+            self,
+            weights = new_weights,
+            flip_accumulators = new_accumulators,
+            input_subspace_centers = input_subspace_centers,
+            step = self.step + 1,
+            rng = new_rng,
+        )
+        
+        # Generate random input features
+        x = new_task_state._sample_inputs(x_key, batch_size)
         
         # Forward pass through target network
         y = jax.vmap(new_task_state._forward)(x)

@@ -17,7 +17,7 @@ import optax
 from .feature_recycling import CBPTracker
 from .models import MLP
 from .optimizers import EqxOptimizer, optax_idbd, custom_optax_adam
-from .tasks.geoff import NonlinearGEOFFTask
+from .tasks.geoff import InputChangingGEOFFTask, NonlinearGEOFFTask
 from .utils import tree_replace
 
 
@@ -47,6 +47,25 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
             activation = cfg.task.activation,
             sparsity = cfg.task.sparsity,
             weight_init = cfg.task.weight_init,
+            seed = seed,
+        )
+    elif cfg.task.name.lower() == 'input_changing_geoff':
+        cfg.model.output_dim = 1
+        cfg.task.type = 'regression'
+        return InputChangingGEOFFTask(
+            n_features = cfg.task.n_real_features,
+            flip_rate = cfg.task.flip_rate,
+            n_layers = cfg.task.n_layers,
+            n_stationary_layers = cfg.task.n_stationary_layers,
+            hidden_dim = cfg.task.hidden_dim if cfg.task.n_layers > 1 else 0,
+            weight_scale = cfg.task.weight_scale,
+            activation = cfg.task.activation,
+            sparsity = cfg.task.sparsity,
+            weight_init = cfg.task.weight_init,
+            input_bounds = cfg.task.input_bounds,
+            input_subspace_range = cfg.task.input_subspace_range,
+            input_change_freq = cfg.task.input_change_freq,
+            max_input_center_change = cfg.task.max_input_center_change,
             seed = seed,
         )
     else:
