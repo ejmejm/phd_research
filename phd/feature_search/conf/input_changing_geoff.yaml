@@ -1,0 +1,28 @@
+defaults:
+  - defaults
+
+model:
+  activation: tanh
+  use_bias: true
+
+# Task parameters
+task:
+  name: input_changing_geoff
+  type: regression
+  n_features: 20
+  n_real_features: 20
+  flip_rate: 0.0
+  n_layers: 2
+  n_stationary_layers: 0 # Starts from the first layer
+  hidden_dim: 20
+  weight_scale: 1.0
+  activation: tanh
+  sparsity: 0.00
+  weight_init: binary
+  noise_std: 0.0
+
+  # Input distribution parameters
+  input_change_freq: null
+  input_bounds: [-1.0, 1.0]
+  input_subspace_range: 0.1
+  max_input_center_change: 0.1
