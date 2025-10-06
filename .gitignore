@@ -27,3 +27,4 @@ discovery.egg-info/
 *.pth
 *.pkl
 *.pbz2
+*.png
