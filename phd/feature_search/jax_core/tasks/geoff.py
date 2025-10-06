@@ -339,6 +339,7 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
     input_subspace_range: float = eqx.field(static=True) # Range of the uniform distributions for sampling input values
     max_input_center_change: float = eqx.field(static=True) # Maximum change of a subspace center per change step
     
+    bias: Float[Array, ''] # Bias unit that is not used by default
     input_subspace_centers: Float[Array, 'n_features'] # Centers of the uniform distributions for sampling input values
     step: Int[Array, ''] # Current step
 
@@ -385,6 +386,7 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         self.standard_input = False
         self.input_mean = None
         self.input_std = None
+        self.bias = jnp.array(0.0, dtype=jnp.float32)
         
         # Initialize input distribution params
         self.input_change_freq = input_change_freq
@@ -407,6 +409,11 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         inputs += jnp.expand_dims(self.input_subspace_centers, 0)
         inputs = jnp.clip(inputs, self.input_bounds[0], self.input_bounds[1])
         return inputs
+    
+    def _forward(self, x: jax.Array) -> jax.Array:
+        # Call parent forward implementation then add bias
+        y = super()._forward(x)
+        return y + self.bias
     
     def generate_batch(self, batch_size: int = 1) -> Tuple[eqx.Module, Tuple]:
         """Generates a single batch of data.
