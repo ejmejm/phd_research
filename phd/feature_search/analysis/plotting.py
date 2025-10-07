@@ -129,6 +129,7 @@ def plot_learning_curves(
         y_label = None,
         hue_col = None,
         legend_title = None,
+        pow_2_legend = False,
     ):
     """Creates subplots of learning curves for different values of a variable.
     
@@ -147,6 +148,7 @@ def plot_learning_curves(
         y_label: Label for y-axis (default: same as y_col)
         hue_col: Column to use for line colors
         legend_title: Title for the legend
+        pow_2_legend: Whether to display legend values as powers of 2
     """
     # Get full dataset
     plot_df = run_df
@@ -188,6 +190,12 @@ def plot_learning_curves(
 
     # Get max step value for x-axis limit
     max_step = plot_df[x_col].max()
+    
+    # Create color mapping for consistent colors across subplots
+    if hue_col is not None:
+        hue_values = sorted(plot_df[hue_col].unique())
+        palette = sns.color_palette('deep', n_colors=len(hue_values))
+        color_map = dict(zip(hue_values, palette))
 
     for i, val in enumerate(subplot_values):
         # Filter for current value if subplot_col exists
@@ -197,10 +205,6 @@ def plot_learning_curves(
         
         # Bin data
         curr_df = bin_df(curr_df, n_bins=n_bins)
-        curr_df = curr_df[curr_df[hue_col].notna()]  # Remove NaN values
-        curr_df[hue_col] = curr_df[hue_col].astype(int)
-        
-        # return curr_df
         
         # Create subplot
         sns.lineplot(
@@ -208,9 +212,10 @@ def plot_learning_curves(
             x = x_col,
             y = y_col,
             hue = hue_col,
-            palette = 'deep',
+            palette = color_map if hue_col is not None else None,
             errorbar = None,
-            ax = axes[i]
+            ax = axes[i],
+            legend = False  # Don't show legend for any subplot
         )
         
         # Customize subplot
@@ -236,12 +241,22 @@ def plot_learning_curves(
         axes[i].set_xlabel('step (binned)')
         axes[i].ticklabel_format(style='sci', axis='x', scilimits=(0,0))
         axes[i].set_ylabel(y_label if y_label else y_col)
+    
+    # Add a single legend to the figure
+    if hue_col is not None:
+        # Create custom legend handles
+        legend_elements = [plt.Line2D([0], [0], color=color_map[val], label=val) 
+                         for val in hue_values]
         
-        # Only show legend on first subplot
-        if i > 0:
-            axes[i].get_legend().remove()
-        elif legend_title is not None:
-            axes[i].legend(title=legend_title)
+        # Add the legend to the figure
+        if pow_2_legend:
+            labels = [f'{"0" if val == 0 else f"$2^{{{int(np.log2(float(val)))}}}$"}' 
+                     for val in hue_values]
+            fig.legend(legend_elements, labels, title=legend_title,
+                      bbox_to_anchor=(1.05, 0.5), loc='center left')
+        else:
+            fig.legend(legend_elements, hue_values, title=legend_title,
+                      bbox_to_anchor=(1.05, 0.5), loc='center left')
     
     # Remove any extra subplots
     for i in range(len(subplot_values), len(axes)):
