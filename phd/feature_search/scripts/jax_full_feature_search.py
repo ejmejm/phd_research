@@ -191,9 +191,9 @@ class StepStats(eqx.Module):
 
 class MetricsBuffer(eqx.Module):
     """Buffer for accumulating metrics over a set of steps."""
-    cumulative_loss: Float[Array, ''] = eqx.field(default=jnp.array(0.0))
-    total_samples: Int[Array, ''] = eqx.field(default=jnp.array(0, dtype=jnp.int32))
-    prior_log_step: Int[Array, ''] = eqx.field(default=jnp.array(0, dtype=jnp.int32))
+    cumulative_loss: Float[Array, ''] = eqx.field(default=0.0, converter=jnp.asarray)
+    total_samples: Int[Array, ''] = eqx.field(default=0, converter=jnp.asarray)
+    prior_log_step: Int[Array, ''] = eqx.field(default=0, converter=jnp.asarray)
 
 
 def train_step(

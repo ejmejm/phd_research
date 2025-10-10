@@ -252,9 +252,9 @@ def rng_from_string(rng: Optional[PRNGKeyArray], string: str) -> PRNGKeyArray:
 
 class StandardizationStats(eqx.Module):
     """Holds running statistics for standardization."""
-    running_mean: Float[Array, ''] = eqx.field(default=jnp.zeros(1))
-    running_var: Float[Array, ''] = eqx.field(default=jnp.ones(1))
-    step: Int[Array, ''] = eqx.field(default=jnp.zeros(1))
+    running_mean: Float[Array, ''] = eqx.field(default=1, converter=jnp.asarray)
+    running_var: Float[Array, ''] = eqx.field(default=1, converter=jnp.asarray)
+    step: Int[Array, ''] = eqx.field(default=0, converter=jnp.asarray)
     gamma: float = eqx.field(default=0.99)
 
 
