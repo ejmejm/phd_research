@@ -21,6 +21,26 @@ def compute_best_feature_match_counts(
     return best_feature_match_counts
 
 
+def compute_feature_match_distances(
+    learning_net_weights: Float[Array, 'hidden_dim in_features'],
+    target_net_weights: Float[Array, 'true_hidden in_features'],
+) -> Float[Array, 'true_hidden']:
+    """Get, for each target feature, how closely the closest learning network hidden unit matches it."""
+    # (hidden_dim, 1, in_features) vs (1, true_hidden, in_features)
+    weight_diffs = jnp.abs(jnp.expand_dims(learning_net_weights, axis=1) - jnp.expand_dims(target_net_weights, axis=0))
+    feature_diffs = weight_diffs.sum(axis=2)
+    return
+    
+    
+    
+    # feature_matches = jnp.expand_dims(learning_net_weights, axis=1) == jnp.expand_dims(target_net_weights, axis=0)
+    # positive_feature_match_counts = feature_matches.sum(axis=2) # Num matches between each learning net and true feature
+    # negative_feature_match_counts = (~feature_matches).sum(axis=2)
+    # feature_match_counts = jnp.maximum(positive_feature_match_counts, negative_feature_match_counts)
+    # best_feature_match_counts = feature_match_counts.max(axis=0)
+    # return best_feature_match_counts
+
+
 def compute_feature_match_stats(
     model: MLP,
     task: NonlinearGEOFFTask,
