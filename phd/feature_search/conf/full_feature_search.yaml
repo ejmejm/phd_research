@@ -13,6 +13,7 @@ train:
   log_pruning_stats: false
   log_model_stats: false
   log_optimizer_stats: false
+  log_feature_match_stats: false
 
 # Optimizer used for all but the last layer, if name is null, then this is the same as the primary optimizer
 # and the learning rate is the same as the primary optimizer

@@ -21,9 +21,10 @@ from phd.feature_search.jax_core.experiment_helpers import (
     StandardizationStats,
     rng_from_string,
 )
+from phd.feature_search.jax_core.feature_recycling import CBPTracker
+from phd.feature_search.jax_core.logging import compute_feature_match_stats
 from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizers import EqxOptimizer
-from phd.feature_search.jax_core.feature_recycling import CBPTracker
 from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
 from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
@@ -152,6 +153,7 @@ class TrainState(eqx.Module):
     log_pruning_stats: bool = eqx.field(static=True)
     log_model_stats: bool = eqx.field(static=True)
     log_optimizer_stats: bool = eqx.field(static=True)
+    log_feature_match_stats: bool = eqx.field(static=True)
     
     # Non-static
     model: MLP
@@ -180,6 +182,7 @@ class TrainState(eqx.Module):
         self.log_pruning_stats = self.cfg.train.get('log_pruning_stats', False)
         self.log_model_stats = self.cfg.train.get('log_model_stats', False)
         self.log_optimizer_stats = self.cfg.train.get('log_optimizer_stats', False)
+        self.log_feature_match_stats = self.cfg.train.get('log_feature_match_stats', False)
 
 
 class StepStats(eqx.Module):
@@ -312,11 +315,13 @@ def train_multi_step(
 
 
 def compute_metrics(
+        train_state: TrainState,
+        task: NonlinearGEOFFTask,
         metrics_buffer: MetricsBuffer,
         step_stats: StepStats,
         cfg: DictConfig,
-        step: int,
     ) -> Tuple[MetricsBuffer, Dict[str, Any]]:
+    step = train_state.step
     cycle_loss = step_stats.loss.sum()
     steps_since_log = step - metrics_buffer.prior_log_step
     
@@ -346,8 +351,8 @@ def compute_metrics(
         raise NotImplementedError("Model stats are not implemented yet!")
     if cfg.train.get('log_optimizer_stats', False):
         raise NotImplementedError("Optimizer stats are not implemented yet!")
-    
-    metrics = {k: np.asarray(v) for k, v in metrics.items()}
+    if cfg.train.get('log_feature_match_stats', False):
+        metrics.update(compute_feature_match_stats(train_state.model, task))
     
     return metrics_buffer, metrics
 
@@ -393,6 +398,7 @@ def run_experiment(
     all_metrics = []
     
     train_fn = jax.jit(train_multi_step, static_argnums=(2,))
+    metrics_fn = jax.jit(compute_metrics, static_argnums=(4,))
     
     sequence_length = cfg.train.log_freq
     train_cycles = cfg.train.total_steps // sequence_length
@@ -412,9 +418,10 @@ def run_experiment(
         train_state, task, step_stats = train_fn(train_state, task, sequence_length)
         
         # Metrics
-        metrics_buffer, metrics = compute_metrics(metrics_buffer, step_stats, cfg, step=train_state.step)
+        metrics_buffer, metrics = metrics_fn(train_state, task, metrics_buffer, step_stats, cfg)
+        metrics = {k: np.asarray(v) for k, v in metrics.items()}
         all_metrics.append(metrics)
-        log_metrics(metrics, cfg, step=train_state.step)
+        log_metrics(metrics, cfg, step=train_state.step) # Consider making logging async
         
         if pbar is not None:
             pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
