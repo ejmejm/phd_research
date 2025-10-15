@@ -329,7 +329,7 @@ def compute_metrics(
     metrics_buffer = tree_replace(
         metrics_buffer,
         cumulative_loss = metrics_buffer.cumulative_loss + cycle_loss,
-        total_samples = metrics_buffer.total_samples + step_stats.loss.shape[0],
+        total_samples = metrics_buffer.total_samples + step_stats.targets.shape[0],
         prior_log_step = step,
     )
     
@@ -422,6 +422,11 @@ def run_experiment(
         metrics = {k: np.asarray(v) for k, v in metrics.items()}
         all_metrics.append(metrics)
         log_metrics(metrics, cfg, step=train_state.step) # Consider making logging async
+        
+        # # Print all metrics
+        # print("\n\n=======================")
+        # for key, value in metrics.items():
+        #     print(f"{key}: {value}")
         
         if pbar is not None:
             pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
