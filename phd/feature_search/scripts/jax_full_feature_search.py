@@ -238,7 +238,9 @@ def train_step(
     # If using IDBD we also need the prediction gradients
     if cfg.optimizer.name == 'idbd':
         output_grads = jax.grad(
-            lambda m, x: jax.vmap(partial(m, key=model_key))(x)[0].sum())(model, inputs)
+            lambda m, x: jax.vmap(partial(
+                m, set_first_element_to_one=use_bias, key=model_key
+            ))(x)[0].sum())(model, inputs)
         updates, optimizer = optimizer.with_update((grads, output_grads), model)
     else:
         updates, optimizer = optimizer.with_update(grads, model)
@@ -352,7 +354,9 @@ def compute_metrics(
     if cfg.train.get('log_optimizer_stats', False):
         raise NotImplementedError("Optimizer stats are not implemented yet!")
     if cfg.train.get('log_feature_match_stats', False):
-        metrics.update(compute_feature_match_stats(train_state.model, task))
+        log_perfect_matches = cfg.model.get('n_frozen_layers', 0) > 0
+        metrics.update(compute_feature_match_stats(
+            train_state.model, task, log_perfect_matches))
     
     return metrics_buffer, metrics
 

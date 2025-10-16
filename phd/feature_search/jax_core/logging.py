@@ -1,12 +1,12 @@
 import jax.numpy as jnp
 from jaxtyping import Array, Float
+from omegaconf import DictConfig
 
 from .models import MLP
 from .tasks.geoff import NonlinearGEOFFTask
 
 
-# target_net_weights = task.weights[0].T # (true_hidden, in_features)
-# learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
+# Only works if doing feature search where feature matches can be exact
 def compute_best_feature_match_counts(
     learning_net_weights: Float[Array, 'hidden_dim in_features'],
     target_net_weights: Float[Array, 'true_hidden in_features'],
@@ -48,22 +48,25 @@ def compute_best_feature_match_distances(
 def compute_feature_match_stats(
     model: MLP,
     task: NonlinearGEOFFTask,
+    perfect_matches: bool,
 ) -> Float[Array, 'true_hidden']:
     """Get, for each target feature, how closely the closest learning network hidden unit matches it."""
     learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
     target_net_weights = task.weights[0].T # (true_hidden, in_features)
-    best_feature_match_counts = compute_best_feature_match_counts(learning_net_weights, target_net_weights)
+    
+    metrics = {}
+    
     best_feature_match_diffs = compute_best_feature_match_distances(learning_net_weights, target_net_weights)
+    metrics['feature_match/average_best_match_normalized_distance'] = best_feature_match_diffs.mean()
     
-    n_inputs = learning_net_weights.shape[1]
-    perfect_match_count = jnp.sum(best_feature_match_counts == n_inputs)
-    average_match_count = best_feature_match_counts.mean()
-    average_match_distance = best_feature_match_diffs.mean()
+    if perfect_matches:
+        best_feature_match_counts = compute_best_feature_match_counts(learning_net_weights, target_net_weights)
+        n_inputs = learning_net_weights.shape[1]
+        perfect_match_count = jnp.sum(best_feature_match_counts == n_inputs)
+        average_match_count = best_feature_match_counts.mean()
+        metrics['feature_match/perfect_match_count'] = perfect_match_count
+        metrics['feature_match/average_best_match_count'] = average_match_count
     
-    return {
-        'feature_match/perfect_match_count': perfect_match_count,
-        'feature_match/average_best_match_count': average_match_count, # For best match, not over all features
-        'feature_match/average_best_match_normalized_distance': average_match_distance,
-    }
+    return metrics
     
     

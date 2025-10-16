@@ -8,24 +8,26 @@ comet_ml: false
 device: cuda
 
 model:
-  hidden_dim: 20_000
-  n_frozen_layers: 1
+  hidden_dim: 2000
+  n_frozen_layers: 0
 
 task:
   distractor_chance: 0.0
   noise_std: 0.0
   distractor_mean_range: [ 0.0, 0.0 ]
+  flip_rate: 0.0002
 
 feature_recycling:
   recycle_rate: 0.005
   use_signed_utility: False
-  initial_step_size_method: mean
+  initial_step_size_method: constant
   prune_frequency: 4
 
 train:
-  total_steps: 200_000
+  total_steps: 5_000_000
   log_freq: 4_000
   standardize_cumulants: true
+  log_feature_match_stats: true
 
 optimizer:
   name: idbd
@@ -34,6 +36,11 @@ optimizer:
   weight_decay: 0.0
   autostep: true
   step_size_decay: 0.0
+
+representation_optimizer:
+  name: sgd # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  weight_decay: 0
+  learning_rate: 0.1
 
 
 seed: 20250827
