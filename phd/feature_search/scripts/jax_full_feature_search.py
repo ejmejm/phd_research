@@ -256,7 +256,7 @@ def train_step(
     if train_state.cbp_tracker is not None:
         if do_prune:
             cbp_tracker, model, optimizer, prune_masks = train_state.cbp_tracker.prune_features(
-                model, param_inputs, optimizer, rng=cbp_key)
+                model, param_inputs, (optimizer, repr_optimizer), rng=cbp_key)
         else:
             cbp_tracker = train_state.cbp_tracker.update_feature_stats(model, param_inputs)
     

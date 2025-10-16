@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
+from optax import EmptyState
 
 from .models import lecun_uniform
 from .optimizers import EqxOptimizer
@@ -360,6 +361,9 @@ class CBPTracker(eqx.Module):
         
         n_layers = len(key_paths)
         
+        if isinstance(optimizer_state, EmptyState):
+            return [None for _ in range(n_layers)]
+        
         # Apply a tree map to the very top level of the optimizer state (each of the different components of the optimizer state).
         # For each of these, if the value is a scalar, then you can just take the scalar.
         # If it is a PyTree, then unzip each layer.
@@ -466,7 +470,7 @@ class CBPTracker(eqx.Module):
         self,
         model: eqx.Module,
         input_values: eqx.Module,
-        optimizer: Optional[EqxOptimizer] = None,
+        optimizers: EqxOptimizer | Tuple[EqxOptimizer, ...] | None = None,
         *,
         rng: PRNGKeyArray,
     ) -> Tuple['CBPTracker', eqx.Module, EqxOptimizer, List[Bool[Array, 'n_features']]]:
@@ -481,10 +485,68 @@ class CBPTracker(eqx.Module):
         Returns:
             The pruned model, optimizer, and a mask over the features reset
         """
+        if isinstance(optimizers, EqxOptimizer):
+            optimizers = (optimizers,)
+        
         leaves, model_structure = jax.tree.flatten_with_path(model)
         weight_paths, weights = zip(*leaves)
         weights = list(weights)
-        optim_layer_states = self._extract_layer_optim_states(optimizer.state, weight_paths)
+        n_layers = len(weights)
+        
+        
+        
+        
+        
+        # Extract the optimizer state per layer for each optimizer, then merge them,
+        # but keep track of which layer has which state so they can be separated again later
+        if optimizers is not None:
+            # Get a 2D list of optim states with optimizers in the outer dim, and layers in the inner dim
+            per_optim_layer_states = [
+                self._extract_layer_optim_states(o.state, weight_paths)
+                for o in optimizers
+            ]
+            
+            # All optimizers should have states for the same number of layers, even if some are None
+            for i in range(1, len(per_optim_layer_states)):
+                assert len(per_optim_layer_states[i]) == n_layers, (
+                    f"There should be one optimizer state per weight layer, but got "
+                    f"{len(per_optim_layer_states[i])} optimizer states and {n_layers} sets of weights!"
+                )
+
+            # Create a list that maps the layer index to the index of the optimizer that updates that layer,
+            # and combine the per optimizer states into a single list with one state per layer
+            layer_optim_mapping = []
+            optim_layer_states = []
+            for layer_idx in range(n_layers):
+                
+                optim_idx = -1
+                for i, layer_states in enumerate(per_optim_layer_states):
+                
+                    if layer_states[layer_idx] is not None:
+                        if optim_idx == -1: # Good, found the optimizer for this layer  
+                            optim_idx = i 
+                        else: # Bad, multiple optimizers targeting this layer
+                            raise Exception(f"Multiple optimizers targeting layer {layer_idx}!")
+                
+                if optim_idx == -1: # Bad, no optimizer for this layer
+                    logger.warning(
+                        f"No optimizer state found for layer {layer_idx}. "
+                        "This should only happen if you intend for some layer(s) to be frozen, "
+                        "or when you are using a stateless optimizer."
+                    )
+                    layer_optim_mapping.append(-1)
+                    optim_layer_states.append(None)
+                else: # Good, found a single optimizer for this layer
+                    layer_optim_mapping.append(optim_idx)
+                    optim_layer_states.append(per_optim_layer_states[optim_idx][layer_idx])
+        
+        else:
+            optim_layer_states = [None for _ in range(len(weights))]
+        
+        
+        
+        
+        
         prune_masks = []
         new_feature_stats = []
         
