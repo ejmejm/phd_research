@@ -1,0 +1,22 @@
+name: ns_no_autostep_sweep
+project: generalization_paper_draft_v2_part_1_hyper_search
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.hidden_dim: 5120
+  task.n_stationary_layers: 1
+  optimizer.name: sgd
+  
+  task.flip_rate: ["${eval:0.0}", "${eval:2**-20}", "${eval:2**-18}", "${eval:2**-16}", "${eval:2**-14}", "${eval:2**-12}"]
+
+  optimizer.learning_rate: ["${eval:2**-1}", "${eval:2**-3}", "${eval:2**-5}", "${eval:2**-7}", "${eval:2**-9}", "${eval:2**-11}", "${eval:2**-13}", "${eval:2**-15}"]
+  feature_recycling.recycle_rate: [0.0, 0.01, 0.005, 0.001, 0.0005, 0.0001]
+  feature_recycling.utility_decay: [0.9, 0.95, 0.99, 0.999]
+
+  seed: [701, 702, 703, 704, 705]

@@ -18,13 +18,13 @@ task:
   flip_rate: 0.0002
 
 feature_recycling:
-  recycle_rate: 0.005
+  recycle_rate: 0.0
   use_signed_utility: False
   initial_step_size_method: constant
   prune_frequency: 4
 
 train:
-  total_steps: 5_000_000
+  total_steps: 2_000_000
   log_freq: 4_000
   standardize_cumulants: true
   log_feature_match_stats: true
@@ -38,7 +38,7 @@ optimizer:
   step_size_decay: 0.0
 
 representation_optimizer:
-  name: adam # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  name: sgd # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
   weight_decay: 0
   learning_rate: 0.1
 
