@@ -386,7 +386,10 @@ class CBPTracker(eqx.Module):
         ]
         return optim_states
     
-    def _recombine_layer_optim_states(self, original_optim_state: PyTree, optim_layer_states: List[NamedTuple]) -> PyTree:
+    def _recombine_layer_optim_states(
+        self, original_optim_state: PyTree,
+        optim_layer_states: List[NamedTuple],
+    ) -> PyTree:
         """Recombine the optimizer states for each layer into a single optimizer state for optax."""
         is_chained = type(original_optim_state) == tuple
         core_optim_state: NamedTuple = original_optim_state[0] if is_chained else original_optim_state
@@ -485,8 +488,12 @@ class CBPTracker(eqx.Module):
         Returns:
             The pruned model, optimizer, and a mask over the features reset
         """
+        
         if isinstance(optimizers, EqxOptimizer):
             optimizers = (optimizers,)
+            single_optimizer = True
+        else:
+            single_optimizer = False
         
         leaves, model_structure = jax.tree.flatten_with_path(model)
         weight_paths, weights = zip(*leaves)
@@ -579,8 +586,19 @@ class CBPTracker(eqx.Module):
 
         # Recombine the weights and optimizer states
         model = jax.tree.unflatten(model_structure, weights)
-        new_optim_state = self._recombine_layer_optim_states(optimizer.state, optim_layer_states)
-        optimizer = tree_replace(optimizer, state=new_optim_state)
+        
+        new_optimizers = []
+        for optim_idx, optimizer in enumerate(optimizers):
+            # Filter to only get the optimizer states for the layers this optimizer targets
+            filtered_optim_layer_states = [
+                state if layer_optim_mapping[i] == optim_idx else None
+                for i, state in enumerate(optim_layer_states)
+            ]
+            new_optim_state = self._recombine_layer_optim_states(optimizer.state, filtered_optim_layer_states)
+            optimizer = tree_replace(optimizer, state=new_optim_state)
+            new_optimizers.append(optimizer)
+        new_optimizers = tuple(new_optimizers)
+        
         prune_masks = prune_masks[::-1]
         
         new_tracker = tree_replace(
@@ -589,7 +607,10 @@ class CBPTracker(eqx.Module):
             rng = rng,
         )
         
-        return new_tracker, model, optimizer, prune_masks
+        if single_optimizer:
+            optimizers = optimizers[0]
+        
+        return new_tracker, model, optimizers, prune_masks
     
     def update_feature_stats(
         self,
