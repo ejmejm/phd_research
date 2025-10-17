@@ -1,3 +1,4 @@
+from typing import Optional
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 from omegaconf import DictConfig
@@ -24,6 +25,7 @@ def compute_best_feature_match_counts(
 def compute_best_feature_match_distances(
     learning_net_weights: Float[Array, 'hidden_dim in_features'],
     target_net_weights: Float[Array, 'true_hidden in_features'],
+    target_net_output_weights: Optional[Float[Array, 'true_hidden out_features']] = None,
 ) -> Float[Array, 'true_hidden']:
     """Get, for each target feature, how closely the closest learning network hidden unit matches it."""
     # (hidden_dim, 1, in_features) vs (1, true_hidden, in_features)    
@@ -36,13 +38,21 @@ def compute_best_feature_match_distances(
     feature_diffs = weight_diffs.sum(axis=2)
     negative_feature_diffs = negative_feature_diffs.sum(axis=2)
     
-    feature_diffs = jnp.minimum(feature_diffs, negative_feature_diffs)
+    feature_diffs = jnp.minimum(feature_diffs, negative_feature_diffs) # (hidden_dim, true_hidden)
     
-    best_feature_match_diffs = feature_diffs.min(axis=0)
+    # Normalize so each diff can be a maximum of 1 with binary weights
+    best_feature_match_diffs = feature_diffs.min(axis=0) # (true_hidden,)
     baseline_feature_l1_vals = jnp.abs(target_net_weights).sum(axis=1)
     normalized_diffs = best_feature_match_diffs / baseline_feature_l1_vals
     
-    return normalized_diffs
+    # Also normalize by output weights so that the sum of diffs will at most equal 1
+    output_weighted_diffs = None
+    if target_net_output_weights is not None:
+        output_weight_magnitudes = jnp.abs(target_net_output_weights).sum(axis=1)
+        output_weighting = output_weight_magnitudes / output_weight_magnitudes.sum()
+        output_weighted_diffs = normalized_diffs * output_weighting
+    
+    return normalized_diffs, output_weighted_diffs
 
 
 def compute_feature_match_stats(
@@ -53,10 +63,17 @@ def compute_feature_match_stats(
     """Get, for each target feature, how closely the closest learning network hidden unit matches it."""
     learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
     target_net_weights = task.weights[0].T # (true_hidden, in_features)
+    if len(task.weights) == 2:
+        target_net_output_weights = task.weights[1] # (true_hidden, out_features)
     
     metrics = {}
     
-    best_feature_match_diffs = compute_best_feature_match_distances(learning_net_weights, target_net_weights)
+    if len(task.weights) == 2:
+        best_feature_match_diffs, output_weighted_diffs = compute_best_feature_match_distances(
+            learning_net_weights, target_net_weights, target_net_output_weights)
+        metrics['feature_match/best_match_output_weighted_normalized_distance'] = output_weighted_diffs.sum()
+    else:
+        best_feature_match_diffs, _ = compute_best_feature_match_distances(learning_net_weights, target_net_weights)
     metrics['feature_match/average_best_match_normalized_distance'] = best_feature_match_diffs.mean()
     
     if perfect_matches:
