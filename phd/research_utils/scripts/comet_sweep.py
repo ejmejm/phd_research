@@ -151,7 +151,9 @@ def create_sweep(config_path):
     combinations = []
     for config in final_configs:
         opt = Optimizer(config)
-        n_combinations = str(opt.status().get('configSpaceSize', '?'))
+        n_combinations = opt.status().get('configSpaceSize', '?')
+        n_trials = opt.status().get('spec', {}).get('trials', 1)
+        n_combinations = n_combinations * n_trials
         opts.append(opt.id)
         combinations.append(n_combinations)
         print('Created sweep with id:\n', opt.id, f'({n_combinations} combinations)')
