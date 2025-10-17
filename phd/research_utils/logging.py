@@ -147,6 +147,12 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
             # Combine new sweep-sepecific overrides with base config
             config = omegaconf.OmegaConf.unsafe_merge(config, sweep_overrides)
             
+            # Increment the seed for each trial
+            n_trials = opt.status().get('trials', 1)
+            seed = config.get('seed', None)
+            if seed is not None and n_trials > 1:
+                config.seed = seed + n_trials - 1
+            
             # Log the parameters to the experiment
             raw_dict_config = omegaconf.OmegaConf.to_container(
                 config, resolve=True, throw_on_missing=True)
