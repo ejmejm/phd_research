@@ -38,7 +38,7 @@ optimizer:
   step_size_decay: 0.0
 
 representation_optimizer:
-  name: sgd # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  name: adam # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
   weight_decay: 0
   learning_rate: 0.1
 

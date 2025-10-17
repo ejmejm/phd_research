@@ -386,6 +386,74 @@ class CBPTracker(eqx.Module):
         ]
         return optim_states
     
+    
+    def _extract_layer_multi_optim_states(
+        self, optimizers: Optional[Tuple[EqxOptimizer, ...]], key_paths: List[KeyPath]) -> Tuple[List[NamedTuple], Int[Array, 'n_layers']]:
+        """Performs the same as `_extract_layer_optim_states`, but for multiple optimizers.
+        
+        Extracts separate list of per-layer optimizer states for each optimizer.
+        The function combines the these lists into a single list where each layer can only have one corresponding optimizer state.
+        The function will error if there are multiple optimizers targeting the same layer.
+        
+        Args:
+            optimizers: The optimizers to extract the states from.
+            key_paths: The key paths to the optimizer states.
+            
+        Returns:
+            - A list of named tuples, each containing the optimizer state of the given layer
+            - A list of integers mapping the layer index to the index of the optimizer that updates that layer.
+              If a layer has no optimizer state, then the value is -1.
+        """
+        # Extract the optimizer state per layer for each optimizer, then merge them,
+        # but keep track of which layer has which state so they can be separated again later
+        if optimizers is not None:
+            # Get a 2D list of optim states with optimizers in the outer dim, and layers in the inner dim
+            per_optim_layer_states = [
+                self._extract_layer_optim_states(o.state, key_paths)
+                for o in optimizers
+            ]
+            n_layers = len(per_optim_layer_states[0])
+            
+            # All optimizers should have states for the same number of layers, even if some are None
+            for i in range(1, len(per_optim_layer_states)):
+                assert len(per_optim_layer_states[i]) == n_layers, (
+                    f"There should be one optimizer state per weight layer, but got "
+                    f"{len(per_optim_layer_states[i])} optimizer states and {n_layers} sets of weights!"
+                )
+
+            # Create a list that maps the layer index to the index of the optimizer that updates that layer,
+            # and combine the per optimizer states into a single list with one state per layer
+            layer_optim_mapping = []
+            optim_layer_states = []
+            for layer_idx in range(n_layers):
+                
+                optim_idx = -1
+                for i, layer_states in enumerate(per_optim_layer_states):
+                
+                    if layer_states[layer_idx] is not None:
+                        if optim_idx == -1: # Good, found the optimizer for this layer  
+                            optim_idx = i 
+                        else: # Bad, multiple optimizers targeting this layer
+                            raise Exception(f"Multiple optimizers targeting layer {layer_idx}!")
+                
+                if optim_idx == -1: # Bad, no optimizer for this layer
+                    logger.warning(
+                        f"No optimizer state found for layer {layer_idx}. "
+                        "This should only happen if you intend for some layer(s) to be frozen, "
+                        "or when you are using a stateless optimizer."
+                    )
+                    layer_optim_mapping.append(-1)
+                    optim_layer_states.append(None)
+                else: # Good, found a single optimizer for this layer
+                    layer_optim_mapping.append(optim_idx)
+                    optim_layer_states.append(per_optim_layer_states[optim_idx][layer_idx])
+        
+        else:
+            optim_layer_states = [None for _ in range(n_layers)]
+            layer_optim_mapping = [-1 for _ in range(n_layers)]
+        
+        return optim_layer_states, layer_optim_mapping
+    
     def _recombine_layer_optim_states(
         self, original_optim_state: PyTree,
         optim_layer_states: List[NamedTuple],
@@ -425,6 +493,28 @@ class CBPTracker(eqx.Module):
             full_optim_state = new_optim_state
         
         return full_optim_state
+    
+    def _recombine_layer_multi_optim_states(
+        self,
+        optimizers: Optional[Tuple[EqxOptimizer, ...]],
+        optim_layer_states: List[NamedTuple],
+        layer_optim_mapping: Int[Array, 'n_layers'],
+    ) -> Optional[Tuple[EqxOptimizer, ...]]:
+        """Recombines the optimizer states for each layer into a single optimizer state for each optimizer."""
+        if optimizers is None:
+            return None
+    
+        new_optimizers = []
+        for optim_idx, optimizer in enumerate(optimizers):
+            # Filter to only get the optimizer states for the layers this optimizer targets
+            filtered_optim_layer_states = [
+                state if layer_optim_mapping[i] == optim_idx else None
+                for i, state in enumerate(optim_layer_states)
+            ]
+            new_optim_state = self._recombine_layer_optim_states(optimizer.state, filtered_optim_layer_states)
+            optimizer = tree_replace(optimizer, state=new_optim_state)
+            new_optimizers.append(optimizer)
+        return tuple(new_optimizers)
 
     @jax.named_call
     def prune_layer_features(
@@ -498,61 +588,8 @@ class CBPTracker(eqx.Module):
         leaves, model_structure = jax.tree.flatten_with_path(model)
         weight_paths, weights = zip(*leaves)
         weights = list(weights)
-        n_layers = len(weights)
         
-        
-        
-        
-        
-        # Extract the optimizer state per layer for each optimizer, then merge them,
-        # but keep track of which layer has which state so they can be separated again later
-        if optimizers is not None:
-            # Get a 2D list of optim states with optimizers in the outer dim, and layers in the inner dim
-            per_optim_layer_states = [
-                self._extract_layer_optim_states(o.state, weight_paths)
-                for o in optimizers
-            ]
-            
-            # All optimizers should have states for the same number of layers, even if some are None
-            for i in range(1, len(per_optim_layer_states)):
-                assert len(per_optim_layer_states[i]) == n_layers, (
-                    f"There should be one optimizer state per weight layer, but got "
-                    f"{len(per_optim_layer_states[i])} optimizer states and {n_layers} sets of weights!"
-                )
-
-            # Create a list that maps the layer index to the index of the optimizer that updates that layer,
-            # and combine the per optimizer states into a single list with one state per layer
-            layer_optim_mapping = []
-            optim_layer_states = []
-            for layer_idx in range(n_layers):
-                
-                optim_idx = -1
-                for i, layer_states in enumerate(per_optim_layer_states):
-                
-                    if layer_states[layer_idx] is not None:
-                        if optim_idx == -1: # Good, found the optimizer for this layer  
-                            optim_idx = i 
-                        else: # Bad, multiple optimizers targeting this layer
-                            raise Exception(f"Multiple optimizers targeting layer {layer_idx}!")
-                
-                if optim_idx == -1: # Bad, no optimizer for this layer
-                    logger.warning(
-                        f"No optimizer state found for layer {layer_idx}. "
-                        "This should only happen if you intend for some layer(s) to be frozen, "
-                        "or when you are using a stateless optimizer."
-                    )
-                    layer_optim_mapping.append(-1)
-                    optim_layer_states.append(None)
-                else: # Good, found a single optimizer for this layer
-                    layer_optim_mapping.append(optim_idx)
-                    optim_layer_states.append(per_optim_layer_states[optim_idx][layer_idx])
-        
-        else:
-            optim_layer_states = [None for _ in range(len(weights))]
-        
-        
-        
-        
+        optim_layer_states, layer_optim_mapping = self._extract_layer_multi_optim_states(optimizers, weight_paths)
         
         prune_masks = []
         new_feature_stats = []
@@ -586,18 +623,8 @@ class CBPTracker(eqx.Module):
 
         # Recombine the weights and optimizer states
         model = jax.tree.unflatten(model_structure, weights)
-        
-        new_optimizers = []
-        for optim_idx, optimizer in enumerate(optimizers):
-            # Filter to only get the optimizer states for the layers this optimizer targets
-            filtered_optim_layer_states = [
-                state if layer_optim_mapping[i] == optim_idx else None
-                for i, state in enumerate(optim_layer_states)
-            ]
-            new_optim_state = self._recombine_layer_optim_states(optimizer.state, filtered_optim_layer_states)
-            optimizer = tree_replace(optimizer, state=new_optim_state)
-            new_optimizers.append(optimizer)
-        new_optimizers = tuple(new_optimizers)
+        optimizers = self._recombine_layer_multi_optim_states(
+            optimizers, optim_layer_states, layer_optim_mapping)
         
         prune_masks = prune_masks[::-1]
         
