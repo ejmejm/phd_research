@@ -130,6 +130,8 @@ def plot_learning_curves(
         hue_col = None,
         legend_title = None,
         pow_2_legend = False,
+        xlim = None,
+        ylim = None,
     ):
     """Creates subplots of learning curves for different values of a variable.
     
@@ -149,10 +151,12 @@ def plot_learning_curves(
         hue_col: Column to use for line colors
         legend_title: Title for the legend
         pow_2_legend: Whether to display legend values as powers of 2
+        xlim: Optional tuple of (min, max) for x-axis limits
+        ylim: Optional tuple of (min, max) for y-axis limits
     """
     # Get full dataset
     plot_df = run_df
-    if config_df:
+    if config_df is not None:
         plot_df = plot_df.merge(config_df, on='run_id', how='left')
         
     # Remove runs that contain any NaN or inf values
@@ -178,7 +182,7 @@ def plot_learning_curves(
     axes = axes.flatten()
     
     # Calculate mid 98% percentile for consistent y-axis if requested
-    if same_y_axis:
+    if same_y_axis and ylim is None:
         filtered_df = plot_df[
             (plot_df[y_col] >= np.percentile(plot_df[y_col], 1)) &
             (plot_df[y_col] <= np.percentile(plot_df[y_col], 99))
@@ -220,8 +224,15 @@ def plot_learning_curves(
         
         # Customize subplot
         axes[i].grid(True, alpha=0.4)
-        axes[i].set_xlim(0, max_step)
-        if same_y_axis:
+        
+        if xlim is not None:
+            axes[i].set_xlim(*xlim)
+        else:
+            axes[i].set_xlim(0, max_step)
+            
+        if ylim is not None:
+            axes[i].set_ylim(*ylim)
+        elif same_y_axis:
             axes[i].set_ylim(y_min, y_max)
         else:
             # Calculate y limits for this subplot

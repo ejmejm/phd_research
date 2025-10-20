@@ -1,5 +1,6 @@
 from io import BytesIO
 import os
+from typing import Optional, Tuple
 import warnings
 
 import matplotlib.pyplot as plt
@@ -238,3 +239,42 @@ def flatten_config_df(df):
                 flat_row[col] = val
         flattened_rows.append(flat_row)
     return pd.DataFrame(flattened_rows)
+
+
+def select_experiment_runs(
+    run_df: pd.DataFrame,
+    config_df: Optional[pd.DataFrame],
+    chosen_values: dict,
+    id_col: str = 'run_id',
+) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+    """Select runs from a run and config dataframe based on chosen values.
+    
+    Args:
+        run_df: DataFrame containing run data.
+        config_df: DataFrame containing config data. Not needed if only selecting from values
+            column values that are in the run dataframe.
+        chosen_values: Map of column names to values to select runs by.
+        id_col: Column name to use for matching runs in run and config dataframes.
+        
+    Returns:
+        Tuple of selected run and config dataframes. If no config df is provided, the second
+        dataframe will be None.
+    """
+    
+    if config_df is not None:
+        # Build mask for config df based on chosen values
+        mask = pd.Series(True, index=config_df.index)
+        for col, val in chosen_values.items():
+            mask = mask & (config_df[col] == val)
+        chosen_config_df = config_df[mask]
+        
+        # Select matching runs
+        chosen_run_df = run_df[run_df[id_col].isin(chosen_config_df[id_col])]
+        return chosen_run_df, chosen_config_df
+    else:
+        # If no config df, just filter run_df directly
+        mask = pd.Series(True, index=run_df.index)
+        for col, val in chosen_values.items():
+            mask = mask & (run_df[col] == val)
+        chosen_run_df = run_df[mask]
+        return chosen_run_df, None
