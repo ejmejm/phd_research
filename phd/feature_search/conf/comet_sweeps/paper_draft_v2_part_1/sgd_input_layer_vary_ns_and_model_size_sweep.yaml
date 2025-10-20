@@ -1,5 +1,5 @@
 name: sgd_input_layer_vary_ns_and_model_size
-project: generalization_paper_draft_v2_part_1_hyper_search
+project: generalization_paper_draft_v2_part_1_hyper_search_v2
 command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
 algorithm: grid
 
@@ -11,16 +11,18 @@ spec:
 parameters:
   task.n_stationary_layers: 0
 
+  feature_recycling.recycle_rate: 0.0
+  model.hidden_dim: 5120
+
   representation_optimizer.name: sgd
-  representation_optimizer.learning_rate: ["${eval:2**-1}", "${eval:2**-3}", "${eval:2**-5}", "${eval:2**-7}"]
+  representation_optimizer.learning_rate: ["${eval:2**0}", "${eval:2**-1}", "${eval:2**-2}", "${eval:2**-3}", "${eval:2**-4}", "${eval:2**-5}", "${eval:2**-6}"]
 
   optimizer.name: idbd
-  optimizer.learning_rate: 
+  optimizer.learning_rate:
+    - "${eval:0.3 / ${model.hidden_dim} ** 0.75}"
     - "${eval:0.03 / ${model.hidden_dim} ** 0.75}"
     - "${eval:0.003 / ${model.hidden_dim} ** 0.75}"
-    - "${eval:0.0003 / ${model.hidden_dim} ** 0.75}"
   optimizer.meta_learning_rate: [0.01, 0.005, 0.001]
 
-  model.hidden_dim: [320, 1280, 5120, 20480]
-  task.flip_rate: ["${eval:0.0}", "${eval:2**-18}", "${eval:2**-14}"]
+  task.flip_rate: ["${eval:0.0}", "${eval:2**-20}", "${eval:2**-18}", "${eval:2**-16}", "${eval:2**-14}", "${eval:2**-12}"]
   seed: [701, 702, 703, 704, 705]

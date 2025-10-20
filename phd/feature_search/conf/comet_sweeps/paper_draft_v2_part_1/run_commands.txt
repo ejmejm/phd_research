@@ -1,0 +1,39 @@
+===== Created sweeps with ids =====
+fixed_features_vary_ns.yaml (180): aa033fb65cdb4ef8a67cb7413dc72c5c
+ns_no_autostep_sweep.yaml (5760): 5b6fc5e60684410ca6e7085c5818d4e5
+sgd_input_layer_vary_ns_and_model_size_sweep.yaml (2160): 520fb5c335da42b7be51f74bbed6b68a
+vary_ns_and_model_size.yaml (720): 2fac18f9f67d43f39f829f0f913fba12
+
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s aa033fb65cdb4ef8a67cb7413dc72c5c
+sbatch --array=1-32 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 5b6fc5e60684410ca6e7085c5818d4e5
+sbatch --array=1-12 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 520fb5c335da42b7be51f74bbed6b68a
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 2fac18f9f67d43f39f829f0f913fba12
+
+
+#################### V2 SWEEPS ####################
+
+
+===== Created sweeps with ids =====
+fixed_features_vary_ns.yaml (180): d4fe3e271a1448fba2e0eb2373aea4b7
+ns_no_autostep_sweep.yaml (4500): 58cef765be474a81b771e7e49f5e7f60
+sgd_input_layer_vary_ns_and_model_size_sweep.yaml (1890): cdd7ce1cf68f4743bb0017eb85110dc1
+vary_ns_and_model_size.yaml (720): f49fb3d7031d4bd280bf71b3e4fc7c13
+
+
+
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s d4fe3e271a1448fba2e0eb2373aea4b7
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 58cef765be474a81b771e7e49f5e7f60
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s cdd7ce1cf68f4743bb0017eb85110dc1
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s f49fb3d7031d4bd280bf71b3e4fc7c13
+
+
+sbatch --array=2-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s d4fe3e271a1448fba2e0eb2373aea4b7
+sbatch --array=2-38 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 58cef765be474a81b771e7e49f5e7f60
+sbatch --array=2-17 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s cdd7ce1cf68f4743bb0017eb85110dc1
+sbatch --array=2-7 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s f49fb3d7031d4bd280bf71b3e4fc7c13
+
+
+sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s d4fe3e271a1448fba2e0eb2373aea4b7
+sbatch --array=1-38 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 58cef765be474a81b771e7e49f5e7f60
+sbatch --array=1-17 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s cdd7ce1cf68f4743bb0017eb85110dc1
+sbatch --array=1-7 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s f49fb3d7031d4bd280bf71b3e4fc7c13

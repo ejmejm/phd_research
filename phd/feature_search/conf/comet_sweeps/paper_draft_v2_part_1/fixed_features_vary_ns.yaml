@@ -1,5 +1,5 @@
 name: fixed_features_vary_ns
-project: generalization_paper_draft_v2_part_1
+project: generalization_paper_draft_v2_part_1_v2
 command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
 algorithm: grid
 

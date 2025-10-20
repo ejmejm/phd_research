@@ -24,11 +24,11 @@ feature_recycling:
   prune_frequency: 4
 
 train:
-  total_steps: 1_000_000
+  total_steps: 3_000_000
   standardize_cumulants: true
 
   # Logging parameters
-  log_freq: 3000
+  log_freq: 6000
   log_utility_stats: false
   log_pruning_stats: false
   log_model_stats: false
