@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 
 from phd.feature_search.analysis.plotting_utils import *
 
-
 def plot_param_sensitivity(
         run_df: pd.DataFrame,
         config_df: Optional[pd.DataFrame],
@@ -24,6 +23,7 @@ def plot_param_sensitivity(
         show_ci: bool = False,
         baseline_col: Optional[str] = None,
         pow_2_x_axis: bool = False,
+        pow_2_legend: bool = False,
     ):
     if metric_type.lower() == 'cumulative':
         final_step_df = run_df.groupby(id_col).agg({
@@ -112,6 +112,15 @@ def plot_param_sensitivity(
         for ax in plt.gcf().axes:
             x_vals = [float(x.get_text()) for x in ax.get_xticklabels()]
             ax.set_xticklabels([f'{"0" if x == 0 else f"$2^{{{int(np.log2(x))}}}$"}' for x in x_vals])
+            
+    if pow_2_legend and hue_col is not None:
+        legend = plt.gca().get_legend()
+        if legend is not None:
+            legend_texts = [t.get_text() for t in legend.get_texts()]
+            for t in legend.get_texts():
+                val = float(t.get_text())
+                if val != 0:
+                    t.set_text(f'$2^{{{int(np.log2(val))}}}$')
 
 
 def plot_learning_curves(
