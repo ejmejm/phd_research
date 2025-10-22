@@ -28,7 +28,7 @@ train:
   standardize_cumulants: true
 
   # Logging parameters
-  log_freq: 6000
+  log_freq: 10000
   log_utility_stats: false
   log_pruning_stats: false
   log_model_stats: false
