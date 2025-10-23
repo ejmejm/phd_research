@@ -9,7 +9,7 @@ spec:
   retryAssignLimit: 4
 
 parameters:
-  task.n_stationary_layers: 0
+  model.n_frozen_layers: 0
 
   feature_recycling.recycle_rate: 0.0
   model.hidden_dim: 5120
