@@ -10,11 +10,12 @@ jax_jit_cache_dir: "$HOME/scratch/jax_cache"
 
 model:
   use_bias: true
+  n_frozen_layers: 1
 
 task:
   distractor_chance: 0.0
   noise_std: 0.0
-  n_stationary_layers: 0
+  n_stationary_layers: 1
 
 feature_recycling:
   use_cbp_utility: true
@@ -28,7 +29,7 @@ train:
   standardize_cumulants: true
 
   # Logging parameters
-  log_freq: 6000
+  log_freq: 10000
   log_utility_stats: false
   log_pruning_stats: false
   log_model_stats: false
