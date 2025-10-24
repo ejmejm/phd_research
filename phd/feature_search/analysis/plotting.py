@@ -167,11 +167,6 @@ def plot_learning_curves(
     plot_df = run_df
     if config_df is not None:
         plot_df = plot_df.merge(config_df, on='run_id', how='left')
-        
-    # Remove runs that contain any NaN or inf values
-    nan_inf_runs = plot_df.groupby('run_id')[y_col].apply(lambda x: x.isna().any() | np.isinf(x).any())
-    valid_runs = nan_inf_runs[~nan_inf_runs].index
-    plot_df = plot_df[plot_df['run_id'].isin(valid_runs)]
     
     # Get subplot values if not provided
     if subplot_col is not None and subplot_values is None:
@@ -192,14 +187,19 @@ def plot_learning_curves(
     
     # Calculate mid 98% percentile for consistent y-axis if requested
     if same_y_axis and ylim is None:
-        filtered_df = plot_df[
-            (plot_df[y_col] >= np.percentile(plot_df[y_col], 1)) &
-            (plot_df[y_col] <= np.percentile(plot_df[y_col], 99))
-        ]
-        y_range = filtered_df[y_col].max() - filtered_df[y_col].min()
-        y_pad = y_range * 0.1
-        y_min = filtered_df[y_col].min() - y_pad
-        y_max = filtered_df[y_col].max() + y_pad
+        # Remove NaN and inf values for percentile calculation
+        valid_y = plot_df[y_col].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(valid_y) > 0:
+            filtered_df = plot_df[
+                (plot_df[y_col] >= np.percentile(valid_y, 1)) &
+                (plot_df[y_col] <= np.percentile(valid_y, 99))
+            ]
+            y_range = filtered_df[y_col].max() - filtered_df[y_col].min()
+            y_pad = y_range * 0.1
+            y_min = filtered_df[y_col].min() - y_pad
+            y_max = filtered_df[y_col].max() + y_pad
+        else:
+            y_min, y_max = 0, 1  # Default if no valid data
 
     # Get max step value for x-axis limit
     max_step = plot_df[x_col].max()
@@ -245,16 +245,18 @@ def plot_learning_curves(
             axes[i].set_ylim(y_min, y_max)
         else:
             # Calculate y limits for this subplot
-            filtered_curr_df = curr_df[
-                (curr_df[y_col] >= np.percentile(curr_df[y_col], 1)) &
-                (curr_df[y_col] <= np.percentile(curr_df[y_col], 99))
-            ]
-            y_range = filtered_curr_df[y_col].max() - filtered_curr_df[y_col].min()
-            y_pad = y_range * 0.1
-            axes[i].set_ylim(
-                filtered_curr_df[y_col].min() - y_pad,
-                filtered_curr_df[y_col].max() + y_pad
-            )
+            valid_y = curr_df[y_col].replace([np.inf, -np.inf], np.nan).dropna()
+            if len(valid_y) > 0:
+                filtered_curr_df = curr_df[
+                    (curr_df[y_col] >= np.percentile(valid_y, 1)) &
+                    (curr_df[y_col] <= np.percentile(valid_y, 99))
+                ]
+                y_range = filtered_curr_df[y_col].max() - filtered_curr_df[y_col].min()
+                y_pad = y_range * 0.1
+                axes[i].set_ylim(
+                    filtered_curr_df[y_col].min() - y_pad,
+                    filtered_curr_df[y_col].max() + y_pad
+                )
         
         if subplot_col is not None:
             axes[i].set_title(f'{subplot_col_label if subplot_col_label else subplot_col} = {val}')
