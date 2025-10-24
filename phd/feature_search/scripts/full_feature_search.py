@@ -242,6 +242,7 @@ def prepare_components(cfg: DictConfig):
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
             utility_reset_mode = cfg.feature_recycling.utility_reset_mode,
+            incoming_weight_init = cfg.feature_recycling.incoming_weight_init,
             seed = seed_from_string(base_seed, 'cbp_tracker'),
         )
         cbp_tracker.track_sequential(model.layers)

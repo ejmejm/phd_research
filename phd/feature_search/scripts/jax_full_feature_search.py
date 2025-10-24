@@ -95,7 +95,7 @@ def prepare_components(cfg: DictConfig):
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
-            incoming_weight_init = 'binary',
+            incoming_weight_init = cfg.feature_recycling.incoming_weight_init,
             filter_spec = None, # Don't forget to add if doing more than 2 layers
             rng = rng_from_string(rng, 'cbp_tracker'),
         )
@@ -123,8 +123,11 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
     assert cfg.task.activation == 'ltu', \
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
-    assert cbp_tracker.incoming_weight_init == 'binary', \
-        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
+    if cbp_tracker.incoming_weight_init != 'binary':
+        logger.warning(
+            "Non-binary weight initialization used in feature search weight init, which is not what is "
+            "used in the Mahmood and Sutton (2013) paper.",
+        )
     assert cfg.train.log_freq % cfg.feature_recycling.get('prune_frequency', 1) == 0, \
         "Log frequency must be a multiple of prune frequency!"
     
