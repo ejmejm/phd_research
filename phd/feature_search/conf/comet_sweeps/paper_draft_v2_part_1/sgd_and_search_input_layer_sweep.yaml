@@ -11,18 +11,17 @@ spec:
 parameters:
   model.n_frozen_layers: 0
 
-  feature_recycling.recycle_rate: 0.0
   model.hidden_dim: 5120
 
   representation_optimizer.name: sgd
-  representation_optimizer.learning_rate: ["${eval:2**0}", "${eval:2**-1}", "${eval:2**-2}", "${eval:2**-3}", "${eval:2**-4}", "${eval:2**-5}", "${eval:2**-6}"]
+  representation_optimizer.learning_rate: ["${eval:2**3}", "${eval:2**2}", "${eval:2**1}", "${eval:2**0}", "${eval:2**-1}", "${eval:2**-2}", "${eval:2**-3}"]
 
   optimizer.name: idbd
-  optimizer.learning_rate:
-    - "${eval:0.3 / ${model.hidden_dim} ** 0.75}"
-    - "${eval:0.03 / ${model.hidden_dim} ** 0.75}"
-    - "${eval:0.003 / ${model.hidden_dim} ** 0.75}"
+  optimizer.learning_rate: "${eval:0.03 / ${model.hidden_dim} ** 0.75}"
   optimizer.meta_learning_rate: [0.01, 0.005, 0.001]
+  
+  feature_recycling.incoming_weight_init: lecun_uniform
+  feature_recycling.recycle_rate: [0.0, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]
 
-  task.flip_rate: ["${eval:0.0}", "${eval:2**-20}", "${eval:2**-18}", "${eval:2**-16}", "${eval:2**-14}", "${eval:2**-12}"]
+  task.flip_rate: 0.0
   seed: [701, 702, 703, 704, 705]
