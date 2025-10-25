@@ -1,0 +1,26 @@
+name: sgd_input_layer_vary_ns_long_run
+project: generalization_paper_draft_v2_part_1_hyper_search_v2
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.n_frozen_layers: 0
+
+  train.total_steps: 30_000_000
+  feature_recycling.recycle_rate: 0.0
+  model.hidden_dim: 5120
+
+  representation_optimizer.name: sgd
+  representation_optimizer.learning_rate: ["${eval:2**3}", "${eval:2**2}", "${eval:2**1}", "${eval:2**0}", "${eval:2**-1}", "${eval:2**-2}", "${eval:2**-3}"]
+
+  optimizer.name: idbd
+  optimizer.learning_rate: "${eval:0.03 / ${model.hidden_dim} ** 0.75}"
+  optimizer.meta_learning_rate: [0.01, 0.005, 0.001]
+
+  task.flip_rate: 0.0
+  seed: [701, 702, 703, 704, 705]

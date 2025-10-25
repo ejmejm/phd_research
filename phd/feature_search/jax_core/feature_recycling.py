@@ -18,6 +18,11 @@ from .optimizers.idbd import IDBDState
 from .utils import get_val_at_key_path, tree_replace, tree_unzip
 
 
+# TODO: Fix:
+# - [ ] The prune mask does not always have the right number of replacments when the recycle rate is large
+# - [ ] All layers are always pruned, even though the output layer should not be pruned
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,11 +42,11 @@ class CBPTracker(eqx.Module):
     outgoing_weight_init: str = eqx.field(static=True)
     utility_reset_mode: str = eqx.field(static=True)
     initial_step_size_method: str = eqx.field(static=True)
-    replace_rate: Float[Array, ''] = eqx.field(static=True)
+    replace_rate: float = eqx.field(static=True)
+    maturity_threshold: int = eqx.field(static=True)
+    decay_rate: float = eqx.field(static=True)
     
     # Non-static
-    decay_rate: Float[Array, '']
-    maturity_threshold: Int[Array, '']
     all_feature_stats: PyTree # Pytree with FeatureStats for leaves
     rng: PRNGKeyArray
     
@@ -50,7 +55,7 @@ class CBPTracker(eqx.Module):
         model: eqx.Module,
         replace_rate: float = 1e-4,
         decay_rate: float = 0.99,
-        maturity_threshold: int = 100,
+        maturity_threshold: int = -1, # -1 means no maturity threshold
         incoming_weight_init: str = 'lecun_uniform', # {'lecun_uniform', 'kaiming_uniform', 'binary'}
         outgoing_weight_init: str = 'zeros', # {'zeros', 'lecun_uniform', 'kaiming_uniform'}
         utility_reset_mode: str = 'median', # {'median', 'zero'}
@@ -115,10 +120,9 @@ class CBPTracker(eqx.Module):
         self.outgoing_weight_init = outgoing_weight_init
         self.utility_reset_mode = utility_reset_mode
         self.initial_step_size_method = initial_step_size_method
-        
-        self.replace_rate = jnp.array(replace_rate, dtype=jnp.float32)
-        self.decay_rate = jnp.array(decay_rate, dtype=jnp.float32)
-        self.maturity_threshold = jnp.array(maturity_threshold, dtype=jnp.int32)
+        self.maturity_threshold = maturity_threshold
+        self.replace_rate = replace_rate
+        self.decay_rate = decay_rate
         
         if rng is None:
             rng = jax.random.PRNGKey(random.randint(0, 2**31))
@@ -183,7 +187,10 @@ class CBPTracker(eqx.Module):
         # Determine which features are eligible for replacement, and which to replace
         n_available_replacements = feature_stats.replacement_accumulator.astype(jnp.int32)
         
-        eligibility_mask = feature_stats.age > self.maturity_threshold
+        if self.maturity_threshold > 0:
+            eligibility_mask = feature_stats.age > self.maturity_threshold
+        else:
+            eligibility_mask = jnp.ones(feature_stats.age.shape, dtype=jnp.bool_)
         n_eligible_replacements = jnp.sum(eligibility_mask)
         n_replacements = jnp.minimum(n_available_replacements, n_eligible_replacements)
         
@@ -539,6 +546,11 @@ class CBPTracker(eqx.Module):
         # Get indices to reinitialize (prune mask)
         prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
         
+        
+        # Print replacement accumulator and number of replacements
+        jax.debug.print("Replacement accumulator: {x}", x=feature_stats.replacement_accumulator)
+        jax.debug.print("Number of replacements: {x} | {y}", x=n_replacements, y=prune_mask.sum())
+        
         feature_stats = tree_replace(
             feature_stats,
             replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
@@ -620,6 +632,24 @@ class CBPTracker(eqx.Module):
             weights[i] = out_weights
             optim_layer_states[i-1] = in_optim_state
             optim_layer_states[i] = out_optim_state
+
+        orig_weights = jax.tree.leaves(model)
+        # Compare original and new weights for each layer
+        for i in range(len(weights)):
+            # Do an approximate check allowing for small differences
+            epsilon = 1e-7
+            n_close = jnp.sum(jnp.abs(weights[i] - orig_weights[i]) < epsilon)
+            total = weights[i].size
+            jax.debug.print(
+                "Layer {}: {}/{} weights approximately unchanged ({:.2f}%)",
+                i, n_close, total, n_close / total * 100
+            )
+
+        # Print first weights for comparison
+        jax.debug.print(
+            "First weight original vs new:\n{}\n{}",
+            orig_weights[0][0, :4], weights[0][0, :4]
+        )
 
         # Recombine the weights and optimizer states
         model = jax.tree.unflatten(model_structure, weights)

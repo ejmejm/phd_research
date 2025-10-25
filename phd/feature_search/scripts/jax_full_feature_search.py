@@ -30,7 +30,7 @@ from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
 
 
-TRAIN_LOOP_UNROLL = 2
+TRAIN_LOOP_UNROLL = 1
 
 
 logger = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ def prepare_components(cfg: DictConfig):
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
-            incoming_weight_init = 'binary',
+            incoming_weight_init = cfg.feature_recycling.incoming_weight_init,
             filter_spec = None, # Don't forget to add if doing more than 2 layers
             rng = rng_from_string(rng, 'cbp_tracker'),
         )
@@ -123,8 +123,11 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
     assert cfg.task.activation == 'ltu', \
         "LTU activations are required for reproducing Mahmood and Sutton (2013)"
-    assert cbp_tracker.incoming_weight_init == 'binary', \
-        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
+    if cbp_tracker.incoming_weight_init != 'binary':
+        logger.warning(
+            "Non-binary weight initialization used in feature search weight init, which is not what is "
+            "used in the Mahmood and Sutton (2013) paper.",
+        )
     assert cfg.train.log_freq % cfg.feature_recycling.get('prune_frequency', 1) == 0, \
         "Log frequency must be a multiple of prune frequency!"
     
@@ -287,7 +290,7 @@ def train_multi_step(
     task: NonlinearGEOFFTask,
     n_steps: int,
 ) -> Tuple[TrainState, StepStats]:
-    train_step_fn = jax.jit(train_step, static_argnums=(2,))
+    train_step_fn = train_step # jax.jit(train_step, static_argnums=(2,))
     prune_frequency = train_state.cfg.feature_recycling.get('prune_frequency', 1)
     batch_size = train_state.cfg.train.batch_size
 
@@ -405,7 +408,7 @@ def run_experiment(
     metrics_buffer = MetricsBuffer()
     all_metrics = []
     
-    train_fn = jax.jit(train_multi_step, static_argnums=(2,))
+    train_fn = train_multi_step # jax.jit(train_multi_step, static_argnums=(2,))
     metrics_fn = jax.jit(compute_metrics, static_argnums=(4,))
     
     sequence_length = cfg.train.log_freq

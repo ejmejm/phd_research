@@ -381,7 +381,7 @@ def prepare_components(cfg: DictConfig):
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
-            incoming_weight_init = 'binary',
+            incoming_weight_init = cfg.feature_recycling.incoming_weight_init,
             filter_spec = None, # Don't forget to add if doing more than 2 layers
             rng = rng_from_string(rng, 'cbp_tracker'),
         )

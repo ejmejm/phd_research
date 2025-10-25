@@ -25,7 +25,7 @@ input_recycling:
   distractor_chance: 0.0 # Chance newly introduced features will be distractors
   recycle_rate: 0.0 # Fraction of input features that are replaced each step
   utility_decay: 0.99 # Parameter used in utility computation
-  feature_protection_steps: 100 # Number of steps a new feature is immune to pruning
+  feature_protection_steps: 0 # Number of steps a new feature is immune to pruning
   n_start_real_features: -1 # Force the model to start with this many real features
 
 # Feature recycling parameters
@@ -41,6 +41,7 @@ feature_recycling:
   initial_step_size_method: constant # {constant, mean, median} method used to set the step size of new features
                                      # constant will be the value set by the optimizer, and mean/median will take
                                      # the mean/median of the step sizes of other features in the same layer
+  incoming_weight_init: lecun_uniform # {lecun_uniform, binary}
 
 # Train parameters
 train:
