@@ -1,4 +1,4 @@
-name: sgd_input_layer_vary_ns_and_model_size
+name: sgd_and_search_input_layer
 project: generalization_paper_draft_v2_part_1_hyper_search_v2
 command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
 algorithm: grid

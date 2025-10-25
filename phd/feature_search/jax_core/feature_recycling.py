@@ -662,7 +662,7 @@ class CBPTracker(eqx.Module):
         
         # Update from the back to the front
         for i in reversed(range(1, len(weights))):
-            
+
             # Extract values needed for the current layer
             in_weights = weights[i-1] # Shape: (n_features, in_features)
             out_weights = weights[i] # Shape: (out_features, n_features)
