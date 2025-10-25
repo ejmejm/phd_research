@@ -23,6 +23,7 @@ feature_recycling:
   initial_step_size_method: constant
   prune_frequency: 1
   incoming_weight_init: lecun_uniform
+  feature_protection_steps: 0
 
 train:
   total_steps: 2_000_000

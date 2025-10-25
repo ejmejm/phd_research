@@ -30,7 +30,7 @@ from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
 
 
-TRAIN_LOOP_UNROLL = 2
+TRAIN_LOOP_UNROLL = 1
 
 
 logger = logging.getLogger(__name__)
@@ -290,7 +290,7 @@ def train_multi_step(
     task: NonlinearGEOFFTask,
     n_steps: int,
 ) -> Tuple[TrainState, StepStats]:
-    train_step_fn = jax.jit(train_step, static_argnums=(2,))
+    train_step_fn = train_step # jax.jit(train_step, static_argnums=(2,))
     prune_frequency = train_state.cfg.feature_recycling.get('prune_frequency', 1)
     batch_size = train_state.cfg.train.batch_size
 
@@ -408,7 +408,7 @@ def run_experiment(
     metrics_buffer = MetricsBuffer()
     all_metrics = []
     
-    train_fn = jax.jit(train_multi_step, static_argnums=(2,))
+    train_fn = train_multi_step # jax.jit(train_multi_step, static_argnums=(2,))
     metrics_fn = jax.jit(compute_metrics, static_argnums=(4,))
     
     sequence_length = cfg.train.log_freq
