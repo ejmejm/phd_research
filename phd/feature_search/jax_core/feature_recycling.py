@@ -19,8 +19,10 @@ from .utils import get_val_at_key_path, tree_replace, tree_unzip
 
 
 # TODO: Fix:
-# - [ ] The prune mask does not always have the right number of replacments when the recycle rate is large
+# - [x] The prune mask does not always have the right number of replacments when the recycle rate is large
 # - [ ] All layers are always pruned, even though the output layer should not be pruned
+
+EPSILON = 1e-8
 
 
 logger = logging.getLogger(__name__)
@@ -197,7 +199,7 @@ class CBPTracker(eqx.Module):
         # Compute the threshold for pruning
         # Perturb the utility to avoid ties
         perturbed_utility = feature_stats.utility + \
-            jax.random.normal(rng, feature_stats.utility.shape) * 1e-12
+            jax.random.uniform(rng, feature_stats.utility.shape, minval=-EPSILON, maxval=EPSILON)
         filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
         utility_ranking = jnp.argsort(filtered_utility)
         utility_threshold = filtered_utility[utility_ranking[n_replacements]]
@@ -205,6 +207,11 @@ class CBPTracker(eqx.Module):
         # Construct the prune mask
         prune_mask = jnp.where(filtered_utility < utility_threshold, True, False)
         prune_mask = prune_mask & eligibility_mask
+        
+        # Debug prints for replacement counts
+        jax.debug.print("n_available_replacements: {}", n_available_replacements)
+        jax.debug.print("n_eligible_replacements: {}", n_eligible_replacements)
+        jax.debug.print("n_replacements: {}", n_replacements)
         
         return prune_mask, n_replacements
     
@@ -590,6 +597,7 @@ class CBPTracker(eqx.Module):
         Returns:
             The pruned model, optimizer, and a mask over the features reset
         """
+        jax.debug.print("\n\n========================================")
         
         if isinstance(optimizers, EqxOptimizer):
             optimizers = (optimizers,)
