@@ -18,11 +18,11 @@ task:
   flip_rate: 0.0002
 
 feature_recycling:
-  recycle_rate: 0.5
+  recycle_rate: 0.0
   use_signed_utility: False
   initial_step_size_method: constant
   prune_frequency: 1
-  incoming_weight_init: lecun_uniform
+  incoming_weight_init: binary
   feature_protection_steps: 0
 
 train:

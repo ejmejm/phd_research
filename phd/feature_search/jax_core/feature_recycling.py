@@ -18,12 +18,7 @@ from .optimizers.idbd import IDBDState
 from .utils import get_val_at_key_path, tree_replace, tree_unzip
 
 
-# TODO: Fix:
-# - [x] The prune mask does not always have the right number of replacments when the recycle rate is large
-# - [ ] All layers are always pruned, even though the output layer should not be pruned
-
 EPSILON = 1e-8
-
 
 logger = logging.getLogger(__name__)
 
@@ -207,11 +202,6 @@ class CBPTracker(eqx.Module):
         # Construct the prune mask
         prune_mask = jnp.where(filtered_utility < utility_threshold, True, False)
         prune_mask = prune_mask & eligibility_mask
-        
-        # Debug prints for replacement counts
-        jax.debug.print("n_available_replacements: {}", n_available_replacements)
-        jax.debug.print("n_eligible_replacements: {}", n_eligible_replacements)
-        jax.debug.print("n_replacements: {}", n_replacements)
         
         return prune_mask, n_replacements
     
@@ -553,11 +543,6 @@ class CBPTracker(eqx.Module):
         # Get indices to reinitialize (prune mask)
         prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
         
-        
-        # Print replacement accumulator and number of replacements
-        jax.debug.print("Replacement accumulator: {x}", x=feature_stats.replacement_accumulator)
-        jax.debug.print("Number of replacements: {x} | {y}", x=n_replacements, y=prune_mask.sum())
-        
         feature_stats = tree_replace(
             feature_stats,
             replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
@@ -597,7 +582,6 @@ class CBPTracker(eqx.Module):
         Returns:
             The pruned model, optimizer, and a mask over the features reset
         """
-        jax.debug.print("\n\n========================================")
         
         if isinstance(optimizers, EqxOptimizer):
             optimizers = (optimizers,)
@@ -640,24 +624,6 @@ class CBPTracker(eqx.Module):
             weights[i] = out_weights
             optim_layer_states[i-1] = in_optim_state
             optim_layer_states[i] = out_optim_state
-
-        orig_weights = jax.tree.leaves(model)
-        # Compare original and new weights for each layer
-        for i in range(len(weights)):
-            # Do an approximate check allowing for small differences
-            epsilon = 1e-7
-            n_close = jnp.sum(jnp.abs(weights[i] - orig_weights[i]) < epsilon)
-            total = weights[i].size
-            jax.debug.print(
-                "Layer {}: {}/{} weights approximately unchanged ({:.2f}%)",
-                i, n_close, total, n_close / total * 100
-            )
-
-        # Print first weights for comparison
-        jax.debug.print(
-            "First weight original vs new:\n{}\n{}",
-            orig_weights[0][0, :4], weights[0][0, :4]
-        )
 
         # Recombine the weights and optimizer states
         model = jax.tree.unflatten(model_structure, weights)
