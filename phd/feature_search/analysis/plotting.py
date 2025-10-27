@@ -141,6 +141,7 @@ def plot_learning_curves(
         pow_2_legend = False,
         xlim = None,
         ylim = None,
+        show_ci = False,
     ):
     """Creates subplots of learning curves for different values of a variable.
     
@@ -162,6 +163,7 @@ def plot_learning_curves(
         pow_2_legend: Whether to display legend values as powers of 2
         xlim: Optional tuple of (min, max) for x-axis limits
         ylim: Optional tuple of (min, max) for y-axis limits
+        show_ci: Whether to show 95% confidence intervals
     """
     # Get full dataset
     plot_df = run_df
@@ -226,7 +228,7 @@ def plot_learning_curves(
             y = y_col,
             hue = hue_col,
             palette = color_map if hue_col is not None else None,
-            errorbar = None,
+            errorbar = ('ci', 95) if show_ci else None,
             ax = axes[i],
             legend = False  # Don't show legend for any subplot
         )
