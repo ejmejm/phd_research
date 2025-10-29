@@ -70,3 +70,4 @@ model:
   output_dim: 1
   activation: relu # Only used when there is more than 1 layer
   n_frozen_layers: 0 # Number of layers to freeze starting from the input layer
+  use_normalize_and_project: false # Method from https://arxiv.org/abs/2407.01800

@@ -52,6 +52,7 @@ def prepare_components(cfg: DictConfig):
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
+        use_normalize_and_project = cfg.model.get('use_normalize_and_project', False),
         key = rng_from_string(rng, 'model'),
     )
     
@@ -115,8 +116,11 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
 
     assert isinstance(task, NonlinearGEOFFTask)
     
-    assert cfg.model.weight_init_method == 'binary', \
-        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
+    if cfg.model.weight_init_method != 'binary':
+        logger.warning(
+            "Non-binary weight initialization for learner input weights, which is not what is "
+            "used in the Mahmood and Sutton (2013) paper.",
+        )
     assert cfg.task.weight_init == 'binary', \
         "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
     assert cfg.model.activation == 'ltu', \
@@ -254,6 +258,8 @@ def train_step(
         updates = eqx.combine(updates, repr_updates)
     
     model = eqx.apply_updates(model, updates)
+    if cfg.model.get('use_normalize_and_project', False):
+        model = model.with_projected_weights()
     
     # CBP resets
     if train_state.cbp_tracker is not None:

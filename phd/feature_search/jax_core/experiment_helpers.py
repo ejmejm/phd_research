@@ -338,6 +338,7 @@ def prepare_components(cfg: DictConfig):
         weight_init_method = cfg.model.weight_init_method,
         activation = cfg.model.activation,
         n_frozen_layers = cfg.model.n_frozen_layers,
+        use_normalize_and_project = cfg.model.get('use_normalize_and_project', False),
         key = rng_from_string(rng, 'model'),
     )
     

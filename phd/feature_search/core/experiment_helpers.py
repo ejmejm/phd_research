@@ -305,6 +305,9 @@ def prepare_components(cfg: DictConfig, model: Optional[nn.Module] = None):
     
     # Initialize model and optimizer
     if model is None:
+        if cfg.model.get('use_normalize_and_project', False):
+            raise NotImplementedError("Normalize and project is not implemented in PyTorch!")
+        
         model = MLP(
             input_dim = cfg.task.n_features,
             output_dim = cfg.model.output_dim,

@@ -185,6 +185,9 @@ def prepare_components(cfg: DictConfig):
     
     use_bias = cfg.model.get('use_bias', True)
     
+    if cfg.model.get('use_normalize_and_project', False):
+        raise NotImplementedError("Normalize and project is not implemented in PyTorch!")
+    
     # Initialize model and optimizer
     model = MLP(
         input_dim = cfg.task.n_features,

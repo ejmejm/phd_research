@@ -78,8 +78,11 @@ class MLP(eqx.Module):
     weight_init_method: str = eqx.field(static=True)
     n_frozen_layers: int = eqx.field(static=True)
     activation_fn: Callable = eqx.field(static=True)
+    use_normalize_and_project: bool = eqx.field(static=True)
+    initial_layer_norms: List[float] = eqx.field(static=True) # Norm of each layer, only used for normalize and project
     
     layers: List[Any]
+    normalizaton_layers: List[Any] # Normalization layers, only used for normalize and project
 
     def __init__(
         self,
@@ -90,6 +93,7 @@ class MLP(eqx.Module):
         weight_init_method: str,
         activation: str = 'tanh',
         n_frozen_layers: int = 0,
+        use_normalize_and_project: bool = False,
         *,
         key: PRNGKeyArray,
     ):
@@ -102,6 +106,7 @@ class MLP(eqx.Module):
             weight_init_method: How to initialize weights ('zeros', 'kaiming', or 'binary')
             activation: Activation function ('relu', 'tanh', 'sigmoid', or 'ltu')
             n_frozen_layers: Number of frozen layers (note: freezing is handled differently in JAX)
+            use_normalize_and_project: Whether to use the normalize and project method from https://arxiv.org/abs/2407.01800
             key: PRNG key for weight initialization
         """
         assert weight_init_method in ['zeros', 'kaiming_uniform', 'lecun_uniform', 'binary'], \
@@ -119,6 +124,7 @@ class MLP(eqx.Module):
         self.hidden_dim = hidden_dim
         self.weight_init_method = weight_init_method
         self.n_frozen_layers = n_frozen_layers
+        self.use_normalize_and_project = use_normalize_and_project
         
         # Get activation function
         self.activation_fn = ACTIVATION_MAP[activation]
@@ -131,6 +137,8 @@ class MLP(eqx.Module):
         
         # Build layers
         self.layers = []
+        self.normalizaton_layers = []
+        self.initial_layer_norms = []
         if n_layers == 1:
             layer = self._create_linear_layer(keys[0], input_dim, output_dim, weight_init_method)
             self.layers.append(layer)
@@ -138,11 +146,17 @@ class MLP(eqx.Module):
             # First layer
             layer = self._create_linear_layer(keys[0], input_dim, hidden_dim, weight_init_method)
             self.layers.append(layer)
+            if use_normalize_and_project:
+                self.normalizaton_layers.append(nn.LayerNorm(hidden_dim, use_weight=False, use_bias=False))
+                self.initial_layer_norms.append(jnp.linalg.norm(layer.weight))
             
             # Hidden layers
             for i in range(1, n_layers - 1):
                 layer = self._create_linear_layer(keys[i], hidden_dim, hidden_dim)
                 self.layers.append(layer)
+                if use_normalize_and_project:
+                    self.normalizaton_layers.append(nn.LayerNorm(hidden_dim, use_weight=False, use_bias=False))
+                    self.initial_layer_norms.append(jnp.linalg.norm(layer.weight))
             
             # Output layer
             layer = self._create_linear_layer(keys[-1], hidden_dim, output_dim)
@@ -198,6 +212,8 @@ class MLP(eqx.Module):
         for i, layer in enumerate(self.layers[:-1]):
             param_inputs.append(x)
             x = layer(x)
+            if self.use_normalize_and_project:
+                x = self.normalizaton_layers[i](x)
             x = self.activation_fn(x)
             
             if set_first_element_to_one:
@@ -211,6 +227,24 @@ class MLP(eqx.Module):
         # param_inputs = jax.tree.unflatten(jax.tree.structure(self), param_inputs)
         
         return output, param_inputs
+    
+    def with_projected_weights(self) -> 'MLP':
+        """Project the weights of the model to their initial norms."""
+        assert self.use_normalize_and_project, "Normalize and project must be enabled to project weights"
+        projected_weights = []
+    
+        # Project weights to their initial norms
+        for i, layer in enumerate(self.layers[:-1]):
+            projected_weights.append(
+                layer.weight / jnp.linalg.norm(layer.weight) * self.initial_layer_norms[i])
+            
+        # Update weights in the model
+        model = eqx.tree_at(
+            lambda m: [m.layers[i].weight for i in range(len(self.layers) - 1)],
+            self,
+            projected_weights,
+        )
+        return model
     
     def get_first_layer_weights(self) -> Array:
         """Returns the weights of the first layer for utility calculation."""

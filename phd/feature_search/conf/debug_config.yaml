@@ -9,13 +9,15 @@ device: cuda
 
 model:
   hidden_dim: 2000
-  n_frozen_layers: 1
+  n_frozen_layers: 0
+  use_normalize_and_project: true
+  weight_init_method: lecun_uniform
 
 task:
   distractor_chance: 0.0
   noise_std: 0.0
   distractor_mean_range: [ 0.0, 0.0 ]
-  flip_rate: 0.0002
+  flip_rate: 0.0
 
 feature_recycling:
   recycle_rate: 0.0
@@ -33,7 +35,7 @@ train:
 
 optimizer:
   name: idbd
-  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
+  learning_rate: 0.0001 # ${eval:0.0003 / ${model.hidden_dim} ** 0.75}
   version: squared_grads
   weight_decay: 0.0
   autostep: true
@@ -42,7 +44,7 @@ optimizer:
 # representation_optimizer:
 #   name: sgd # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
 #   weight_decay: 0
-#   learning_rate: 0.1
+#   learning_rate: 1.0
 
 
 seed: 20250827
