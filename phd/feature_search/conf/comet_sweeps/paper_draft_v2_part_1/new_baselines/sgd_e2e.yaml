@@ -1,0 +1,31 @@
+name: sgd_e2e
+project: generalization_paper_draft_v2_sgd_baselines
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.n_frozen_layers: 0
+
+  model.hidden_dim: 5120
+  model.weight_init_method: lecun_uniform
+
+  optimizer.name: sgd
+  optimizer.learning_rate: 
+    - "${eval:2**-10}"
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
+    - "${eval:2**0}"
+    - "${eval:2**2}"
+  
+  feature_recycling.incoming_weight_init: lecun_uniform
+  feature_recycling.recycle_rate: 0.0
+
+  task.flip_rate: 0.0
+  seed: [701, 702, 703, 704, 705]
