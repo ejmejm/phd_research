@@ -15,8 +15,8 @@ parameters:
   model.weight_init_method: lecun_uniform
   model.use_normalize_and_project: true
 
-  representation_optimizer.name: sgd
-  representation_optimizer.learning_rate:
+  optimizer.name: sgd
+  optimizer.learning_rate:
     - "${eval:2**-10}"
     - "${eval:2**-8}"
     - "${eval:2**-6}"
@@ -25,9 +25,9 @@ parameters:
     - "${eval:2**0}"
     - "${eval:2**2}"
 
-  optimizer.name: idbd
-  optimizer.learning_rate: "${eval:0.03 / ${model.hidden_dim} ** 0.75}"
-  optimizer.meta_learning_rate: [0.01, 0.005, 0.001]
+  # optimizer.name: idbd
+  # optimizer.learning_rate: "${eval:0.03 / ${model.hidden_dim} ** 0.75}"
+  # optimizer.meta_learning_rate: [0.01, 0.005, 0.001]
   
   feature_recycling.incoming_weight_init: lecun_uniform
   feature_recycling.recycle_rate: 0.0
