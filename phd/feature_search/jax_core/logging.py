@@ -28,7 +28,11 @@ def compute_best_feature_match_distances(
     target_net_output_weights: Optional[Float[Array, 'true_hidden out_features']] = None,
 ) -> Float[Array, 'true_hidden']:
     """Get, for each target feature, how closely the closest learning network hidden unit matches it."""
-    # (hidden_dim, 1, in_features) vs (1, true_hidden, in_features)    
+    # Normalize weights
+    learning_net_weights = learning_net_weights / jnp.linalg.norm(learning_net_weights, axis=1, keepdims=True)
+    target_net_weights = target_net_weights / jnp.linalg.norm(target_net_weights, axis=1, keepdims=True)
+    
+    # (hidden_dim, 1, in_features) vs (1, true_hidden, in_features)
     learning_expanded = learning_net_weights[:, None, :]
     target_expanded = target_net_weights[None, :, :]
     
