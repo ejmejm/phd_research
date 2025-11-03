@@ -140,8 +140,8 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
     task.weights[-1] = jax.random.uniform(
         task_init_key,
         task.weights[-1].shape,
-        minval = -jnp.sqrt(6 / task.weights[-1].shape[0]),
-        maxval = jnp.sqrt(6 / task.weights[-1].shape[0]),
+        minval = -jnp.sqrt(3 / task.weights[-1].shape[0]),
+        maxval = jnp.sqrt(3 / task.weights[-1].shape[0]),
     )
     model = eqx.tree_at(lambda m: m.layers[-1].weight, model, jnp.zeros_like(model.layers[-1].weight))
     

@@ -119,7 +119,7 @@ class NonlinearGEOFFTask:
         n_stationary_layers: int = 0,
         hidden_dim: int = 64,
         weight_scale: float = 1.0,
-        activation: str = 'relu',
+        activation: str = 'ltu',
         sparsity: float = 0.0,
         weight_init: str = 'binary',
         input_mean_range: Tuple[float, float] = (0, 0),
@@ -129,17 +129,17 @@ class NonlinearGEOFFTask:
         """
         Args:
             n_features: Number of input features
-            flip_rate: Percentage of weights to flip per step (accumulates if < 1 weight)
+            flip_rate: Percentage of weights to flip per step (accumulates if less than 1 weight)
             n_layers: Number of layers in the target network (1 = linear)
-            n_stationary_layers: Number of layers that do not flip
+            n_stationary_layers: Number of layers that do not flip (stationary layers start from the first layer)
             hidden_dim: Hidden dimension size for intermediate layers
             weight_scale: Scale factor for weights (weights will be ±scale)
-            activation: Activation function ('relu', 'tanh', or 'sigmoid')
-            sparsity: Percentage of weights (other than the last layer) to set to zero
-            weight_init: Weight initialization method ('binary' or 'kaiming_uniform')
+            activation: Activation function ('ltu', 'relu', 'tanh', or 'sigmoid')
+            sparsity: Percentage of weights (other than in the last layer) to set to zero
+            weight_init: Weight initialization method ('binary', 'lecun_uniform', or 'kaiming_uniform')
             seed: Random seed for reproducibility
         """
-        assert weight_init in ['binary', 'kaiming_uniform'], f"Unsupported weight initialization: {weight_init}"
+        assert weight_init in ['binary', 'lecun_uniform', 'kaiming_uniform'], f"Unsupported weight initialization: {weight_init}"
         
         self.n_features = n_features
         self.n_layers = n_layers
@@ -228,7 +228,13 @@ class NonlinearGEOFFTask:
         """
         if self.weight_init == 'binary':
             weights = (torch.randint(0, 2, (in_features, out_features), generator=self.generator) * 2 - 1).float()
-        else:  # kaiming_uniform
+        elif self.weight_init == 'lecun_uniform':
+            weights = torch.nn.init.kaiming_uniform_(
+                torch.empty(in_features, out_features),
+                mode = 'fan_in',
+                nonlinearity = 'linear',
+            )
+        else: # kaiming_uniform
             weights = torch.nn.init.kaiming_uniform_(
                 torch.empty(in_features, out_features),
                 mode = 'fan_in',
