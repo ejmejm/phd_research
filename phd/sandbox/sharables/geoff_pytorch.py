@@ -301,7 +301,8 @@ if __name__ == '__main__':
     # Create the GEOFF task
     task = NonlinearGEOFFTask(
         n_features = 20,
-        flip_rate = 0.0,
+        flip_rate = 0.0, # This is the fraction of features per layer to flip (make negative) every step (1.0 = change all features every step)
+                         # It applies to all layers unless n_stationary_layers is set to a value greater than 0
         n_layers = 2,
         n_stationary_layers = 0, # Set to 1 if you want to freeze features to test feature search
         hidden_dim = 20,
