@@ -1,22 +1,23 @@
 defaults:
-- nonlinear_geoff
+- defaults
 - _self_
 
-wandb: false
 seed: null
 device: cpu
 
 task:
+  name: nonlinear_geoff
+  type: regression
   activation: ltu
   flip_rate: 0.0
   hidden_dim: 20
   n_features: 20
   n_layers: 2
-  n_real_features: 20
   sparsity: 0.0
   weight_init: binary
   weight_scale: 1.0
   n_stationary_layers: 1
+  noise_std: 0.0
 
 input_recycling:
   use_cbp_utility: false

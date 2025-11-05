@@ -10,7 +10,7 @@ device: cuda
 model:
   hidden_dim: 2000
   n_frozen_layers: 0
-  use_normalize_and_project: true
+  use_normalize_and_project: false
   weight_init_method: lecun_uniform
 
 task:
@@ -23,7 +23,7 @@ feature_recycling:
   recycle_rate: 0.0
   use_signed_utility: False
   initial_step_size_method: constant
-  prune_frequency: 1
+  prune_frequency: 4
   incoming_weight_init: binary
   feature_protection_steps: 0
 
@@ -41,10 +41,10 @@ optimizer:
   autostep: true
   step_size_decay: 0.0
 
-# representation_optimizer:
-#   name: sgd # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
-#   weight_decay: 0
-#   learning_rate: 1.0
+representation_optimizer:
+  name: sgd # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  weight_decay: 0
+  learning_rate: 1.0
 
 
 seed: [1, 2, 3] # 20250827

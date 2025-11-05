@@ -1,23 +1,57 @@
 defaults:
-- rupam_task
+- defaults
 - _self_
 
+seed: null
+device: cuda
+
 task:
-  distractor_chance: 0.5
-  distractor_mean_range: [ -0.5, 0.5 ]
-  distractor_std_range: [ 0.1, 1.0 ]
+  name: nonlinear_geoff
+  activation: ltu
+  flip_rate: 0.0
+  hidden_dim: 20
+  n_features: 20
+  n_layers: 2
+  sparsity: 0.0
+  weight_init: binary
+  weight_scale: 1.0
+  n_stationary_layers: 1
   noise_std: 0.0
 
+feature_recycling:
+  use_cbp_utility: true
+  utility_decay: 0.99
+  recycle_rate: 0.005
+  feature_protection_steps: 0
+  incoming_weight_init: binary
+  prune_frequency: 4
+
 train:
-  log_utility_stats: false
-  log_pruning_stats: false
-  log_model_stats: false
-  log_optimizer_stats: false
+  total_steps: 1_000_000
+  log_freq: 2000
+  batch_size: 1
+  standardize_cumulants: true
   log_feature_match_stats: false
+
+model:
+  n_layers: 2
+  weight_init_method: binary # Only affects the first layer
+  hidden_dim: 1024
+  n_frozen_layers: 1 # The first layer is frozen (no backprop)
+  output_dim: 1
+  activation: ltu
+  use_bias: true
+
+optimizer:
+  name: idbd # {idbd, adam, rmsprop, sgd}
+  learning_rate: 0.0001 # Initial step-size for idbd
+
+  autostep: true # Only used when optimizer is idbd
+  meta_learning_rate: 0.005 # Only used when optimizer is idbd
 
 # Optimizer used for all but the last layer, if name is null, then this is the same as the primary optimizer
 # and the learning rate is the same as the primary optimizer
 representation_optimizer:
-  name: null # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  name: null # {null, sgd, sgd_momentum, rmsprop, adam}
   weight_decay: 0
   learning_rate: 0.001
