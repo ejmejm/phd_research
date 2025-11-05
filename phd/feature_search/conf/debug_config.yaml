@@ -47,4 +47,4 @@ optimizer:
 #   learning_rate: 1.0
 
 
-seed: 20250827
+seed: [1, 2, 3] # 20250827

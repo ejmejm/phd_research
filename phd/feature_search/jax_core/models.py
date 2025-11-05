@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import equinox.nn as nn
 from jax import Array
-from jaxtyping import PRNGKeyArray
+from jaxtyping import Float, PRNGKeyArray
 
 
 logger = logging.getLogger(__name__)
@@ -79,10 +79,10 @@ class MLP(eqx.Module):
     n_frozen_layers: int = eqx.field(static=True)
     activation_fn: Callable = eqx.field(static=True)
     use_normalize_and_project: bool = eqx.field(static=True)
-    initial_layer_norms: List[float] = eqx.field(static=True) # Norm of each layer, only used for normalize and project
     
     layers: List[Any]
     normalizaton_layers: List[Any] # Normalization layers, only used for normalize and project
+    initial_layer_norms: List[float] # Norm of each layer, only used for normalize and project
 
     def __init__(
         self,
@@ -148,7 +148,7 @@ class MLP(eqx.Module):
             self.layers.append(layer)
             if use_normalize_and_project:
                 self.normalizaton_layers.append(nn.LayerNorm(hidden_dim, use_weight=False, use_bias=False))
-                self.initial_layer_norms.append(jnp.linalg.norm(layer.weight))
+                self.initial_layer_norms.append(jnp.linalg.norm(layer.weight).item())
             
             # Hidden layers
             for i in range(1, n_layers - 1):
@@ -156,7 +156,7 @@ class MLP(eqx.Module):
                 self.layers.append(layer)
                 if use_normalize_and_project:
                     self.normalizaton_layers.append(nn.LayerNorm(hidden_dim, use_weight=False, use_bias=False))
-                    self.initial_layer_norms.append(jnp.linalg.norm(layer.weight))
+                    self.initial_layer_norms.append(jnp.linalg.norm(layer.weight).item())
             
             # Output layer
             layer = self._create_linear_layer(keys[-1], hidden_dim, output_dim)

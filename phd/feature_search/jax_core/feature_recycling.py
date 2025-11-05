@@ -82,18 +82,27 @@ class CBPTracker(eqx.Module):
         if filter_spec is not None:
             model = eqx.filter(model, filter_spec)
         
-        is_linear_weights = lambda x: isinstance(x, Array) and x.ndim == 2 
-        assert jnp.all(jnp.array(jax.tree.leaves(jax.tree.map(lambda x: is_linear_weights(x), model)))), \
-            "All layers must be 2D weight matrices"
+        # is_linear_weights = lambda x: isinstance(x, Array) and x.ndim == 2 
+        assert jnp.all(
+            jnp.array(
+                jax.tree.leaves(
+                    jax.tree.map(
+                        lambda x: x.ndim == 2, # Should capture linear weights only
+                        eqx.filter(model, lambda x: isinstance(x, Array))
+                    )
+                )
+            )
+        ), "All layers must be 2D weight matrices"
         
+        weights = jax.tree.leaves(eqx.filter(model, lambda x: isinstance(x, Array)))[1:]
         self.all_feature_stats = [
             FeatureStats(
-                age = jnp.zeros(weights.shape[1], dtype=jnp.int32),
-                utility = jnp.zeros(weights.shape[1], dtype=jnp.float32),
+                age = jnp.zeros(weight_arr.shape[1], dtype=jnp.int32),
+                utility = jnp.zeros(weight_arr.shape[1], dtype=jnp.float32),
                 replacement_accumulator = jnp.array(0.0, dtype=jnp.float32),
-                max_possible_replacements = math.ceil(replace_rate * weights.shape[1]),
+                max_possible_replacements = math.ceil(replace_rate * weight_arr.shape[1]),
             )
-            for weights in jax.tree.leaves(model)[1:]
+            for weight_arr in weights
         ]
         
         for stats in self.all_feature_stats:
