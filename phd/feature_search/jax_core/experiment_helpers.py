@@ -38,7 +38,7 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
         cfg.model.output_dim = 1
         cfg.task.type = 'regression'
         return NonlinearGEOFFTask(
-            n_features = cfg.task.n_real_features,
+            n_features = cfg.task.n_features,
             flip_rate = cfg.task.flip_rate,
             n_layers = cfg.task.n_layers,
             n_stationary_layers = cfg.task.n_stationary_layers,
@@ -53,7 +53,7 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
         cfg.model.output_dim = 1
         cfg.task.type = 'regression'
         return InputChangingGEOFFTask(
-            n_features = cfg.task.n_real_features,
+            n_features = cfg.task.n_features,
             flip_rate = cfg.task.flip_rate,
             n_layers = cfg.task.n_layers,
             n_stationary_layers = cfg.task.n_stationary_layers,
