@@ -1,0 +1,21 @@
+name: sgd_output_layer_vary_ns
+project: generalization_paper_draft_v2_part_1_v2
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.hidden_dim: 5120
+  
+  optimizer.name: sgd
+  optimizer.learning_rate: "${eval:2**-13}"
+
+  feature_recycling.recycle_rate: 0.005
+  feature_recycling.utility_decay: 0.9999
+
+  task.flip_rate: ["${eval:0.0}", "${eval:2**-20}", "${eval:2**-18}", "${eval:2**-16}", "${eval:2**-14}", "${eval:2**-12}"]
+  seed: [601, 602, 603, 604, 605, 606, 607, 608, 609, 610, 611, 612, 613, 614, 615, 616, 617, 618, 619, 620, 621, 622, 623, 624, 625, 626, 627, 628, 629, 630]

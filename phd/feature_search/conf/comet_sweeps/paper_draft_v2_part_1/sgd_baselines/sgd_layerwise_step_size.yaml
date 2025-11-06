@@ -1,4 +1,4 @@
-name: autostep_e2e
+name: sgd_layerwise_step_size
 project: generalization_paper_draft_v2_sgd_baselines_v2
 command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
 algorithm: grid
@@ -14,31 +14,25 @@ parameters:
   model.hidden_dim: 5120
   model.weight_init_method: lecun_uniform
 
-  optimizer.name: idbd
-  optimizer.autostep: true
-  optimizer.version: [squared_grads, squared_inputs]
+  optimizer.name: sgd
   optimizer.learning_rate:
-    # - "${eval:2**-18}"
-    # - "${eval:2**-16}"
-    # - "${eval:2**-14}"
-    # - "${eval:2**-12}"
-    # - "${eval:2**-10}"
-    # - "${eval:2**-8}"
-    - "${eval:2**-6}"
+    - "${eval:2**-19}"
+    - "${eval:2**-17}"
+    - "${eval:2**-15}"
+    - "${eval:2**-13}"
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+
+  representation_optimizer.name: sgd
+  representation_optimizer.learning_rate:
     - "${eval:2**-4}"
     - "${eval:2**-2}"
-    - "${eval:2**-0}"
+    - "${eval:2**0}"
     - "${eval:2**2}"
     - "${eval:2**4}"
     - "${eval:2**6}"
-  optimizer.meta_learning_rate:
-    - "${eval:2**-10}"
-    - "${eval:2**-9}"
-    - "${eval:2**-8}"
-    - "${eval:2**-7}"
-    - "${eval:2**-6}"
-    - "${eval:2**-5}"
-    - "${eval:2**-4}"
+    - "${eval:2**8}"
   
   feature_recycling.incoming_weight_init: lecun_uniform
   feature_recycling.recycle_rate: 0.0
