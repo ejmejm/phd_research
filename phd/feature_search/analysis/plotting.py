@@ -5,7 +5,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from phd.feature_search.analysis.plotting_utils import *
+from phd.feature_search.analysis.analysis_utils import *
 
 def plot_param_sensitivity(
         run_df: pd.DataFrame,
