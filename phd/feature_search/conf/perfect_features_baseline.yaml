@@ -1,0 +1,18 @@
+defaults:
+  - full_feature_search
+  - _self_
+
+model:
+  hidden_dim: ${task.hidden_dim}
+  use_bias: false
+
+feature_recycling:
+  recycle_rate: 0.0
+
+train.standardize_cumulants: false
+
+optimizer:
+  name: idbd # {idbd, adam, rmsprop, sgd}
+  learning_rate: 0.00001 # Initial step-size for idbd
+
+seed: 20251107
