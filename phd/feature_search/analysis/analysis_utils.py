@@ -1,6 +1,7 @@
 from io import BytesIO
+import itertools
 import os
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import warnings
 
 import matplotlib.pyplot as plt
@@ -278,3 +279,162 @@ def select_experiment_runs(
             mask = mask & (run_df[col] == val)
         chosen_run_df = run_df[mask]
         return chosen_run_df, None
+    
+
+def load_experiment_data(
+    config_data_path: str,
+    run_data_path: str,
+    drop_duplicated: bool = True,
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
+    """Load experiment data and split it by sweep name."""
+    all_sweeps_config_df = pd.read_csv(config_data_path, index_col=0)
+    all_sweeps_run_df = pd.read_csv(run_data_path, index_col=0)
+
+    # Remove duplicate config rows, ignoring run_id column
+    if drop_duplicated:
+        all_sweeps_config_df = all_sweeps_config_df.drop_duplicates(
+            subset = [col for col in all_sweeps_config_df.columns if col != 'run_id'],
+            keep = 'last',
+        )
+        valid_run_ids = set(all_sweeps_config_df['run_id'].unique())
+        all_sweeps_run_df = all_sweeps_run_df[all_sweeps_run_df['run_id'].isin(valid_run_ids)]
+        
+    all_sweeps_run_df = all_sweeps_run_df.dropna(subset=['step'])
+
+    sweep_names = list(all_sweeps_config_df['sweep_name'].unique())
+
+    # Split up dfs by sweep name
+    run_dfs = {}
+    config_dfs = {}
+    for sweep_name in sweep_names:
+        config_dfs[sweep_name] = all_sweeps_config_df[all_sweeps_config_df['sweep_name'] == sweep_name].reset_index(drop=True)
+        # Drop experiments that did not complete
+        max_step = config_dfs[sweep_name]['curr_step'].max()
+        config_dfs[sweep_name] = config_dfs[sweep_name][config_dfs[sweep_name]['curr_step'] == max_step]
+        
+        run_ids = set(config_dfs[sweep_name]['run_id'].unique())
+        run_dfs[sweep_name] = all_sweeps_run_df[all_sweeps_run_df['run_id'].isin(run_ids)].reset_index(drop=True)
+        
+    return config_dfs, run_dfs
+
+
+def infer_sweep_vars(config_df: pd.DataFrame) -> list:
+    """Given a df of config values from a single sweep, infer what the sweep variables are."""
+    return [
+        col for col in config_df.columns
+        if (
+            col != 'run_id' and
+            col != 'seed' and
+            '|' not in col and
+            config_df[col].nunique() > 1
+        )
+    ]
+
+
+def get_best_ablation_values(
+    config_dfs: Dict[str, pd.DataFrame],
+    run_dfs: Dict[str, pd.DataFrame],
+    sweep_ablation_vars: Optional[Dict[str, List[str]]] = None,
+    sweep_split_vars: Optional[Dict[str, List[str]]] = None,
+    print_best_values: bool = True,
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
+    """Get the best ablation values for each sweep."""
+    best_config_dfs = {}
+    best_run_dfs = {}
+    
+    report_str = ""
+    for sweep_name in config_dfs.keys():
+        # Skip sweeps where we aren't doing a step-size ablation
+        if sweep_ablation_vars is not None and sweep_name not in sweep_ablation_vars:
+            continue
+
+        config_df = config_dfs[sweep_name]
+        run_df = run_dfs[sweep_name]
+
+        split_vars = sweep_split_vars[sweep_name] if sweep_split_vars is not None else []
+        
+        if sweep_ablation_vars is not None:
+            ablation_vars = sweep_ablation_vars[sweep_name]
+        else:
+            ablation_vars = infer_sweep_vars(config_df)
+            ablation_vars = list(set(ablation_vars) - set(split_vars))
+
+        if isinstance(ablation_vars, str):
+            ablation_vars = [ablation_vars]
+
+        # Merge config info into run df
+        merge_cols = ['run_id'] + split_vars + ablation_vars
+        run_df_with_ablation = run_df.merge(
+            config_df[merge_cols],
+            on = 'run_id',
+            how = 'left'
+        )
+
+        # Calculate mean loss grouped by ablation vars and split vars
+        groupby_cols = ablation_vars + split_vars
+        mean_loss = run_df_with_ablation.groupby(groupby_cols)['loss'].mean()
+
+        report_str += f"\n=== {sweep_name} ===\n"
+
+        # Handle case where split_vars is an empty list
+        if len(split_vars) == 0:
+            split_combinations = [()]  # Single combination: ()
+        else:
+            split_var_values = [sorted(config_df[var].unique()) for var in split_vars]
+            split_combinations = list(itertools.product(*split_var_values))
+
+        # Find best ablation values for each split combination
+        best_run_ids = []
+        for split_vals in split_combinations:
+            if len(split_vars) == 0:
+                config_str = "\nConfiguration: (no split vars)"
+            else:
+                config_str = "\nConfiguration: "
+                config_str += " | ".join(
+                    f"{var}={val:.2e}" if isinstance(val, float) else f"{var}={val}"
+                    for var, val in zip(split_vars, split_vals)
+                )
+            report_str += config_str + "\n"
+
+            # Build query for this split combination
+            split_query = pd.Series(True, index=mean_loss.index)
+            for var, val in zip(split_vars, split_vals):
+                split_query &= (mean_loss.index.get_level_values(var) == val)
+
+            # Get losses for this split combination
+            split_losses = mean_loss[split_query]
+            best_loss_idx = split_losses.idxmin()
+
+            # If there are no split vars, best_loss_idx might not be a tuple, forcibly turn to tuple for indexing
+            if len(ablation_vars) == 1 and not isinstance(best_loss_idx, tuple):
+                best_loss_idx_tuple = (best_loss_idx,)
+            else:
+                best_loss_idx_tuple = best_loss_idx
+
+            # Add best ablation values to report
+            for i, var in enumerate(ablation_vars):
+                val = best_loss_idx_tuple[i]
+                if isinstance(val, str):
+                    report_str += f"  Best {var}={val}\n"
+                else:
+                    report_str += f"  Best {var}={val:.2e}\n"
+
+            # Get run_ids for this best configuration
+            query = pd.Series(True, index=config_df.index)
+            for var, val in zip(split_vars, split_vals):
+                query &= (config_df[var] == val)
+            for var, val in zip(ablation_vars, best_loss_idx_tuple[:len(ablation_vars)]):
+                query &= (config_df[var] == val)
+
+            matching_runs = config_df[query]
+            assert len(matching_runs) > 0
+            best_run_ids.extend(matching_runs['run_id'].tolist())
+
+        if print_best_values:
+            print(report_str)
+        report_str = ""
+
+        best_config_dfs[sweep_name] = config_df[config_df['run_id'].isin(best_run_ids)]
+        best_run_dfs[sweep_name] = run_df[run_df['run_id'].isin(best_run_ids)]
+        
+    return best_config_dfs, best_run_dfs
