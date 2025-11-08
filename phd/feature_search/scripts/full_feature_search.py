@@ -282,7 +282,7 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
     torch.nn.init.kaiming_uniform_(
         task.weights[-1],
         mode = 'fan_in',
-        nonlinearity = 'linear',
+        nonlinearity = 'relu',
         generator = task_init_generator,
     )
     torch.nn.init.zeros_(model.layers[-1].weight)
