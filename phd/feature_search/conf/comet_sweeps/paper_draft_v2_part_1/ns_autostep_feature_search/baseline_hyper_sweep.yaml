@@ -1,0 +1,32 @@
+name: baseline_hyper_sweep
+project: ns_autostep_feature_search_hyper_sweep
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.hidden_dim: 5120
+  task.flip_rate: "${eval:2**-12}"
+
+  feature_recycling.recycle_rate: [0.0, 0.0001, 0.001, 0.005, 0.01]
+  feature_recycling.utility_decay: [0.99, 0.999, 0.9999, 0.99999, 1.0]
+
+  optimizer.learning_rate:
+    - "${eval:2**-18}"
+    - "${eval:2**-16}"
+    - "${eval:2**-14}"
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
+  
+  optimizer.meta_learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+    - "${eval:2**-5}"
+    - "${eval:2**-3}"
+  
+  seed: [701, 702, 703, 704, 705]

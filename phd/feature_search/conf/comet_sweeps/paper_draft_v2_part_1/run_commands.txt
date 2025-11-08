@@ -79,3 +79,12 @@ sgd_output_layer_vary_ns.yaml (180): 313e07885a6144d48c81753663c9f153
 sbatch --array=1-7 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s a6ff196eb8964f6c8b3e1cda5a0e267c
 sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 6ecfef380d50415ea0d2be1b7094b9c6
 sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 313e07885a6144d48c81753663c9f153
+
+
+### Round 6 ###
+
+
+===== Created sweeps with ids =====
+baseline_hyper_sweep.yaml (3125): 6053f4f57bba486c84c0baae095efe65
+
+sbatch --array=1-35 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 6053f4f57bba486c84c0baae095efe65
