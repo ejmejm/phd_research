@@ -456,11 +456,13 @@ def run_experiment(
     return train_state, task, all_metrics
 
 
+def validate_config(cfg: DictConfig):
+    assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
+
+
 @hydra.main(config_path='../conf', config_name='full_feature_search')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
-    assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
-
     jax.config.update('jax_compilation_cache_dir', cfg.jax_jit_cache_dir)
     jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
     jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
@@ -470,6 +472,7 @@ def main(cfg: DictConfig) -> None:
     print(f"JAX is using device: {jax.devices(cfg.device)[0]}")
     
     cfg = init_experiment(cfg.project, cfg)
+    validate_config(cfg)
 
     task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng = \
         prepare_ltu_geoff_experiment(cfg)

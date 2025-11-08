@@ -30,15 +30,20 @@ def create_model_with_perfect_features(model: MLP, task: NonlinearGEOFFTask, cfg
     return new_model
 
 
-@hydra.main(config_path='../conf', config_name='perfect_features_baseline')
-def main(cfg: DictConfig) -> None:
-    """Run the feature recycling experiment."""
+def validate_config(cfg: DictConfig):
     assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
-    assert cfg.model.hidden_dim == cfg.task.hidden_dim, "Model hidden dim must match task hidden dim!"
+    assert cfg.model.hidden_dim == cfg.task.hidden_dim, (
+        f"Model hidden dim must match task hidden dim! "
+        f"Got model hidden dim: {cfg.model.hidden_dim}, task hidden dim: {cfg.task.hidden_dim}"
+    )
     
     if cfg.feature_recycling.recycle_rate != 0.0:
         logger.warning(f"Recycle rate is {cfg.feature_recycling.recycle_rate}, but it must be 0 if you want to maintain perfect features.")
 
+
+@hydra.main(config_path='../conf', config_name='perfect_features_baseline')
+def main(cfg: DictConfig) -> None:
+    """Run the feature recycling experiment."""
     jax.config.update('jax_compilation_cache_dir', cfg.jax_jit_cache_dir)
     jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
     jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
@@ -48,7 +53,8 @@ def main(cfg: DictConfig) -> None:
     print(f"JAX is using device: {jax.devices(cfg.device)[0]}")
     
     cfg = init_experiment(cfg.project, cfg)
-
+    validate_config(cfg)
+    
     task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng = \
         prepare_ltu_geoff_experiment(cfg)
     model = create_model_with_perfect_features(model, task, cfg)

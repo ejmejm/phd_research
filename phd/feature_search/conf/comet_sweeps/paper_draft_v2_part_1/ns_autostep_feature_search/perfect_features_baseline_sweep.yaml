@@ -10,7 +10,7 @@ spec:
 
 parameters:
   train.total_steps: 1_500_000
-  model.hidden_dim: 5120
+  model.hidden_dim: "${task.hidden_dim}"
   model.use_bias: false
   task.flip_rate: "${eval:2**-12}"
   train.standardize_cumulants: false

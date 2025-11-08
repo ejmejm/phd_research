@@ -25,7 +25,6 @@ parameters:
     - "${eval:2**-16}"
     - "${eval:2**-14}"
     - "${eval:2**-12}"
-    - "${eval:2**-10}"
   
   optimizer.meta_learning_rate:
     - "${eval:2**-11}"

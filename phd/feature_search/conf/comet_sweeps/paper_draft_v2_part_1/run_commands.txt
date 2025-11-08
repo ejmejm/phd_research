@@ -88,3 +88,17 @@ sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --me
 baseline_hyper_sweep.yaml (3125): 6053f4f57bba486c84c0baae095efe65
 
 sbatch --array=1-35 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 6053f4f57bba486c84c0baae095efe65
+
+
+### Round 7 ###
+
+
+===== Created sweeps with ids =====
+baseline_hyper_sweep.yaml (2500): 26391e28f1274fdd9737d85759490f1b
+maturity_threshold_hyper_sweep.yaml (3600): dd82506ff60e409ca1cb07ca67bf52f9
+perfect_features_baseline_sweep.yaml (125): b5049d38815f41a289ed487c1794bd4b
+
+
+sbatch --array=1-14 --gpus-per-node=1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 26391e28f1274fdd9737d85759490f1b
+sbatch --array=1-20 --gpus-per-node=1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s dd82506ff60e409ca1cb07ca67bf52f9
+sbatch --array=1-1 --gpus-per-node=1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s b5049d38815f41a289ed487c1794bd4b
