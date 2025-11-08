@@ -4,12 +4,14 @@ defaults:
 
 model:
   hidden_dim: ${task.hidden_dim}
-  use_bias: false
+  use_bias: true
 
 feature_recycling:
   recycle_rate: 0.0
 
-train.standardize_cumulants: false
+train:
+  standardize_cumulants: true
+  log_feature_match_stats: true
 
 optimizer:
   name: idbd # {idbd, adam, rmsprop, sgd}

@@ -217,7 +217,7 @@ class MLP(eqx.Module):
             x = self.activation_fn(x)
             
             if set_first_element_to_one:
-                x.at[..., 0].set(1.0)
+                x = x.at[..., 0].set(1.0)
         
         # Last layer (output layer)
         param_inputs.append(x)

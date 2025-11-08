@@ -17,7 +17,7 @@ def create_model_with_perfect_features(model: MLP, task: NonlinearGEOFFTask, cfg
     if has_bias:
         input_dim = task_feature_weights.shape[1]
         task_feature_weights = jnp.concatenate(
-            [task_feature_weights, jnp.zeros((1, input_dim))],
+            [jnp.zeros((1, input_dim)), task_feature_weights],
             axis = 0,
         )
     
