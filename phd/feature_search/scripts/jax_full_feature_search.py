@@ -182,7 +182,7 @@ class TrainState(eqx.Module):
         self.cbp_tracker = cbp_tracker
         self.distractor_tracker = distractor_tracker
         self.step = jnp.int32(0)
-        self.cumulant_stats = StandardizationStats(gamma=0.9999)
+        self.cumulant_stats = StandardizationStats(gamma=0.999)
         self.rng = rng
         
         self.log_utility_stats = self.cfg.train.get('log_utility_stats', False)
