@@ -29,7 +29,7 @@ def plot_param_sensitivity(
         final_step_df = run_df.groupby(id_col).agg({
             metric_col: 'sum',
             **({baseline_col: 'sum'} if baseline_col is not None else {}),
-            **{col: 'last' for col in run_df.columns if col not in [metric_col, baseline_col]}
+            **{col: 'last' for col in run_df.columns if col not in [metric_col, baseline_col, id_col]}
         }).reset_index()
         if config_df is not None:
             final_step_df = final_step_df.merge(config_df, on=id_col, how='left')
