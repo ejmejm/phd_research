@@ -18,6 +18,19 @@ Before using this repository, complete the following setup steps:
 
 You may need to install JAX separately if the first command does not automatically install the CUDA-enabled version of JAX.
 
+## Important Files
+
+The feature search work is implemented in both PyTorch and JAX. The PyTorch implmentations can be found in `phd/feature_search/core`, and the JAX implementations can be found in `phd/feature_search/jax_core`. I only actively work with the JAX implementations now, so the PyTorch implementations may be outdated. Below are explanations for key files in the JAX implementation:
+
+### File Descriptions
+
+- `optimizers/*`: `optimizer.py` contains the base class for my optimizers, which just wraps optax-style optimizers in an Equinox module, so that there is a single class that contains all optimizer info. This directory has my custom implementations of Adam, IDBD, and Autostep.
+- `tasks/geoff.py`: Implementation of GEOFF task, including many variations of the original specification.
+- `feature_recycling.py`: Configurable class for implementing feature search.
+- `models.py`: Configurable MLP.
+- `experiment_helpers.py`: Primarily code for preparing experiments based on a config, like constructing an optimizer or task based on a config specification.
+- `logging.py`: Functions for computing any of the non-trivial metrics I log (like feature similarity).
+
 ## Running Experiments
 
 ### Quick Start
@@ -74,16 +87,7 @@ Override configuration values directly from the command line. For example, we co
 python scripts/jax_full_feature_search.py train.total_steps=10000
 ```
 
-### Custom Experiment Method 2: Modify Default Config
-
-Edit the configuration file at `phd/feature_search/conf/full_feature_search.yaml`. For example, to use Adam instead of Autostep, you would change the optimizer name:
-
-```yaml
-optimizer:
-  name: adam
-```
-
-### Custom Experiment Method 3: Create New Config Files
+### Custom Experiment Method 2: Create New Config Files
 
 Create a new configuration file (e.g., `phd/feature_search/conf/autostep_cfg.yaml`):
 
@@ -105,21 +109,53 @@ Then run with your custom config:
 python scripts/experiment_template.py --config-name=autostep_cfg
 ```
 
-### Custom Experiment Method 4: Create New Scripts
+### Custom Experiment Method 3: Create New Scripts
 
 For experiments requiring functionality not supported by existing scripts, create new script files following the patterns in the existing examples.
 
-## Available Scripts
+<!-- ## Available Scripts
 
 | Script | Description |
 |--------|-------------|
 | `experiment_template.py` | Simple, extendable example for linear regression problems |
 | `rupam_experiment.py` | Framework implementing experiments from [Mahmood & Sutton (2013)](http://incompleteideas.net/papers/MS-AAAIws-2013.pdf) |
-| `full_feature_search.py` | Extended version of `rupam_experiment.py` with additional features like distractor hidden units and target noise |
+| `full_feature_search.py` | Extended version of `rupam_experiment.py` with additional features like distractor hidden units and target noise | -->
+
+## Logging
+
+All logging functions are handled by a single logging module: `phd/research_utils/logging.py`, which supports logging results to CometML and/or Weights and Biases (WandB).
+
+Logging to WandB can be enabled by setting the wandb config value: `wandb=true`. Logging to CometML can similarly be enabled by setting the comet_ml config value: `comet_ml=true`. Both of these are set to false by default, in which case, nothing is log. For Comet, you will also need to change the value of `comet_ml_workspace` in the `defaults.yaml` config to the name of a workspace you have created on your Comet dashboard. Both logging methods may require setting the relevant API keys as an environment variables or logging in via the CLI before results can be logged.
 
 ## Analysis
 
-### Downloading Experiment Data
+The method of downloading data differs depending on whether you are logging data to CometML or WandB.
+
+### Downloading CometML Experiment Data
+
+Use the `comet_download.py` script to download experiment results from Weights & Biases:
+
+```bash
+python phd/feature_search/analysis/comet_download.py --project your_project_name [options]
+```
+
+**Common usage patterns:**
+
+```bash
+# Download all data from a project with 8 threads for a speed up
+python comet_download.py --project your_project_name --n_threads 8
+```
+
+The above format usually suffices, but you can run `python comet_download.py --help` to see all of the other options. Other options include choosing a CometML workspace other than your default, or choosing only a specific subset of variables to download.
+
+**Output:**
+The script generates two CSV files:
+- `{project}_param.csv`: Run configurations and metadata, one row per run
+- `{project}_metrics.csv`: Logged metrics and results
+
+Both CSV files will share a `run_id` column that maps a run's config settings to metrics. View existing analysis notebooks in the `analysis/` directory for examples of how to process and visualize the downloaded data.
+
+### Downloading WandB Experiment Data
 
 Use the `wandb_download.py` script to download experiment results from Weights & Biases:
 
