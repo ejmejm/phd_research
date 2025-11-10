@@ -403,31 +403,39 @@ def get_best_ablation_values(
 
             # Get losses for this split combination
             split_losses = mean_loss[split_query]
+
+            #Skip this split if no runs are present for it
+            if split_losses.empty:
+                report_str += f"  [WARNING] No runs for split combination in '{sweep_name}': {config_str.strip()} Skipping.\n"
+                continue
+
             best_loss_idx = split_losses.idxmin()
 
-            # If there are no split vars, best_loss_idx might not be a tuple, forcibly turn to tuple for indexing
-            if len(ablation_vars) == 1 and not isinstance(best_loss_idx, tuple):
-                best_loss_idx_tuple = (best_loss_idx,)
-            else:
-                best_loss_idx_tuple = best_loss_idx
+            # Format idx as tuple of abslation var values even if there is only one ablation var
+            best_loss_idx = best_loss_idx if isinstance(best_loss_idx, tuple) else (best_loss_idx,)
 
             # Add best ablation values to report
             for i, var in enumerate(ablation_vars):
-                val = best_loss_idx_tuple[i]
-                if isinstance(val, str):
-                    report_str += f"  Best {var}={val}\n"
+                val = best_loss_idx[i]
+                if isinstance(val, (int, float)):
+                    if (abs(val) > 1e5 or (abs(val) < 1e-5 and val != 0)):
+                        report_str += f"  Best {var}={val:.2e}\n"
+                    else:
+                        report_str += f"  Best {var}={val}\n"
                 else:
-                    report_str += f"  Best {var}={val:.2e}\n"
+                    report_str += f"  Best {var}={val}\n"
 
             # Get run_ids for this best configuration
             query = pd.Series(True, index=config_df.index)
             for var, val in zip(split_vars, split_vals):
                 query &= (config_df[var] == val)
-            for var, val in zip(ablation_vars, best_loss_idx_tuple[:len(ablation_vars)]):
+            for var, val in zip(ablation_vars, best_loss_idx[:len(ablation_vars)]):
                 query &= (config_df[var] == val)
 
             matching_runs = config_df[query]
-            assert len(matching_runs) > 0
+            if len(matching_runs) == 0:
+                report_str += f"  [WARNING] No matching runs found for configuration in '{sweep_name}': {config_str.strip()} ablation={best_loss_idx[:len(ablation_vars)]}\n"
+                continue
             best_run_ids.extend(matching_runs['run_id'].tolist())
 
         if print_best_values:
