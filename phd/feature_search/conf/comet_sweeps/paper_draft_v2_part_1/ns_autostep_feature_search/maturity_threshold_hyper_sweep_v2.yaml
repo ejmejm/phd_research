@@ -1,0 +1,26 @@
+name: maturity_threshold_hyper_sweep_v2
+project: ns_autostep_feature_search_hyper_sweep
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.total_steps: 3_000_000
+  model.hidden_dim: 5120
+  model.use_bias: false
+  task.flip_rate: "${eval:2**-12}"
+  train.standardize_cumulants: false
+  feature_recycling.utility_reset_mode: zero
+
+  feature_recycling.recycle_rate: [0.0001, 0.0005, 0.001, 0.005]
+  feature_recycling.utility_decay: [0.999, 0.9999, 0.99999]
+  feature_recycling.feature_protection_steps: [0, 50, 100, 200, 500]
+
+  optimizer.learning_rate: "${eval:2**-14}"
+  optimizer.meta_learning_rate: "${eval:2**-6}"
+  
+  seed: [701, 702, 703, 704, 705]
