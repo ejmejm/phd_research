@@ -1,0 +1,42 @@
+name: autostep_e2e
+project: ns_gradient_descent_hyper_search
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.total_steps: 3_000_000
+  model.n_frozen_layers: 0
+  model.hidden_dim: 5120
+  model.weight_init_method: lecun_uniform
+  task.flip_rate: "${eval:2**-12}"
+  feature_recycling.recycle_rate: 0.0
+  feature_recycling.incoming_weight_init: lecun_uniform
+
+  optimizer.name: idbd
+  optimizer.autostep: true
+  optimizer.version: squared_grads
+
+  optimizer.learning_rate:
+    - "${eval:2**-6}"
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
+    - "${eval:2**-0}"
+    - "${eval:2**2}"
+    - "${eval:2**4}"
+    - "${eval:2**6}"
+  
+  optimizer.meta_learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+  
+  seed: [251111, 251112, 251113, 251114, 251115]
