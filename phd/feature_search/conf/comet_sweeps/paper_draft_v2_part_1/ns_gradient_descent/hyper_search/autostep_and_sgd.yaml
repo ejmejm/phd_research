@@ -21,6 +21,8 @@ parameters:
   optimizer.autostep: true
   optimizer.version: squared_grads
   optimizer.learning_rate:
+    - "${eval:2**-18}"
+    - "${eval:2**-15}"
     - "${eval:2**-12}"
     - "${eval:2**-9}"
     - "${eval:2**-6}"
