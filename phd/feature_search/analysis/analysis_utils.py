@@ -337,8 +337,24 @@ def get_best_ablation_values(
     sweep_ablation_vars: Optional[Dict[str, List[str]]] = None,
     sweep_split_vars: Optional[Dict[str, List[str]]] = None,
     print_best_values: bool = True,
+    metric_type: str = 'final_avg', # {'cumulative', 'final_avg'}
+    step_col: str = 'step',
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
-    """Get the best ablation values for each sweep."""
+    """Get the best ablation values for each sweep.
+    
+    Args:
+        config_dfs: Dictionary mapping sweep names to config DataFrames.
+        run_dfs: Dictionary mapping sweep names to run DataFrames.
+        sweep_ablation_vars: Dictionary mapping sweep names to lists of ablation variables.
+        sweep_split_vars: Dictionary mapping sweep names to lists of split variables.
+        print_best_values: Whether to print the best values.
+        metric_type: Type of metric to use. 'cumulative' uses mean loss over all steps,
+                     'final_avg' uses mean loss over final 5% of steps.
+        step_col: Name of the column containing time step information.
+    
+    Returns:
+        Tuple of (best_config_dfs, best_run_dfs) dictionaries.
+    """
     best_config_dfs = {}
     best_run_dfs = {}
     
@@ -370,9 +386,21 @@ def get_best_ablation_values(
             how = 'left'
         )
 
+        # Filter data based on metric_type
+        if metric_type == 'final_avg':
+            # Get final 5% of time steps
+            max_step = run_df_with_ablation[step_col].max()
+            min_step = run_df_with_ablation[step_col].min()
+            step_threshold = max_step - 0.05 * (max_step - min_step)
+            run_df_filtered = run_df_with_ablation[run_df_with_ablation[step_col] >= step_threshold]
+        elif metric_type == 'cumulative':
+            run_df_filtered = run_df_with_ablation
+        else:
+            raise ValueError(f"Invalid metric_type: {metric_type}. Must be 'cumulative' or 'final_avg'")
+
         # Calculate mean loss grouped by ablation vars and split vars
         groupby_cols = ablation_vars + split_vars
-        mean_loss = run_df_with_ablation.groupby(groupby_cols)['loss'].mean()
+        mean_loss = run_df_filtered.groupby(groupby_cols)['loss'].mean()
 
         report_str += f"\n=== {sweep_name} ===\n"
 
