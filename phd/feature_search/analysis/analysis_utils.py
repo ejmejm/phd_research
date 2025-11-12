@@ -337,6 +337,8 @@ def get_best_ablation_values(
     sweep_ablation_vars: Optional[Dict[str, List[str]]] = None,
     sweep_split_vars: Optional[Dict[str, List[str]]] = None,
     print_best_values: bool = True,
+    metric_col: str = 'loss',
+    metric_direction: str = 'min', # {'min', 'max'}
     metric_type: str = 'final_avg', # {'cumulative', 'final_avg'}
     step_col: str = 'step',
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
@@ -348,6 +350,9 @@ def get_best_ablation_values(
         sweep_ablation_vars: Dictionary mapping sweep names to lists of ablation variables.
         sweep_split_vars: Dictionary mapping sweep names to lists of split variables.
         print_best_values: Whether to print the best values.
+        metric_col: Name of the column containing the metric to use.
+        metric_direction: Direction of the metric to use. 'min' uses the minimum value,
+                         'max' uses the maximum value.
         metric_type: Type of metric to use. 'cumulative' uses mean loss over all steps,
                      'final_avg' uses mean loss over final 5% of steps.
         step_col: Name of the column containing time step information.
@@ -400,7 +405,7 @@ def get_best_ablation_values(
 
         # Calculate mean loss grouped by ablation vars and split vars
         groupby_cols = ablation_vars + split_vars
-        mean_loss = run_df_filtered.groupby(groupby_cols)['loss'].mean()
+        mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].mean()
 
         report_str += f"\n=== {sweep_name} ===\n"
 
@@ -437,7 +442,12 @@ def get_best_ablation_values(
                 report_str += f"  [WARNING] No runs for split combination in '{sweep_name}': {config_str.strip()} Skipping.\n"
                 continue
 
-            best_loss_idx = split_losses.idxmin()
+            if metric_direction == 'min':
+                best_loss_idx = split_losses.idxmin()
+            elif metric_direction == 'max':
+                best_loss_idx = split_losses.idxmax()
+            else:
+                raise ValueError(f"Invalid metric_direction: {metric_direction}. Must be 'min' or 'max'")
 
             # Format idx as tuple of abslation var values even if there is only one ablation var
             best_loss_idx = best_loss_idx if isinstance(best_loss_idx, tuple) else (best_loss_idx,)

@@ -142,6 +142,8 @@ def plot_learning_curves(
         xlim = None,
         ylim = None,
         show_ci = False,
+        show_individual_lines = False,
+        line_alpha = 0.3,
     ):
     """Creates subplots of learning curves for different values of a variable.
     
@@ -164,6 +166,8 @@ def plot_learning_curves(
         xlim: Optional tuple of (min, max) for x-axis limits
         ylim: Optional tuple of (min, max) for y-axis limits
         show_ci: Whether to show 95% confidence intervals
+        show_individual_lines: Whether to plot all individual runs in pale colors (default: False)
+        line_alpha: Transparency for individual lines (default: 0.3)
     """
     # Get full dataset
     plot_df = run_df
@@ -218,12 +222,28 @@ def plot_learning_curves(
         if subplot_col is not None:
             curr_df = plot_df[plot_df[subplot_col] == val].copy()
         
-        # Bin data
-        curr_df = bin_df(curr_df, n_bins=n_bins)
+        # Bin data for mean plot
+        binned_df = bin_df(curr_df, n_bins=n_bins)
+
+        # Show individual runs in pale colors if requested
+        if show_individual_lines and 'run_id' in curr_df.columns:
+            if hue_col is not None:
+                for hue_val in hue_values:
+                    sub_df = curr_df[curr_df[hue_col] == hue_val]
+                    color = color_map[hue_val]
+                    # Group by run_id
+                    for run_id, run_df_local in sub_df.groupby('run_id'):
+                        axes[i].plot(run_df_local[x_col], run_df_local[y_col],
+                                     color=color, alpha=line_alpha, linewidth=1, zorder=1)
+            else:
+                color = 'C0'
+                for run_id, run_df_local in curr_df.groupby('run_id'):
+                    axes[i].plot(run_df_local[x_col], run_df_local[y_col],
+                                 color=color, alpha=line_alpha, linewidth=1, zorder=1)
         
-        # Create subplot
+        # Main mean line plot
         sns.lineplot(
-            data = curr_df,
+            data = binned_df,
             x = x_col,
             y = y_col,
             hue = hue_col,
@@ -247,11 +267,11 @@ def plot_learning_curves(
             axes[i].set_ylim(y_min, y_max)
         else:
             # Calculate y limits for this subplot
-            valid_y = curr_df[y_col].replace([np.inf, -np.inf], np.nan).dropna()
+            valid_y = binned_df[y_col].replace([np.inf, -np.inf], np.nan).dropna()
             if len(valid_y) > 0:
-                filtered_curr_df = curr_df[
-                    (curr_df[y_col] >= np.percentile(valid_y, 1)) &
-                    (curr_df[y_col] <= np.percentile(valid_y, 99))
+                filtered_curr_df = binned_df[
+                    (binned_df[y_col] >= np.percentile(valid_y, 1)) &
+                    (binned_df[y_col] <= np.percentile(valid_y, 99))
                 ]
                 y_range = filtered_curr_df[y_col].max() - filtered_curr_df[y_col].min()
                 y_pad = y_range * 0.1
