@@ -319,7 +319,7 @@ if __name__ == '__main__':
     torch.nn.init.kaiming_uniform_(
         task.weights[-1],
         mode = 'fan_in',
-        nonlinearity = 'linear',
+        nonlinearity = 'relu',
         generator = task_init_generator,
     )
     
