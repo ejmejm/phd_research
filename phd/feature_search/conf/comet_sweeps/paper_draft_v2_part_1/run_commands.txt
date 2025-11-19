@@ -165,3 +165,13 @@ autostep_e2e.yaml (30): 375d213e83944f4ba5cb27db752cdb46
 
 sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 8bff83337aa149d2a7924b3d440f2dfa
 sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 375d213e83944f4ba5cb27db752cdb46
+
+
+### Round 13 ###
+
+
+===== Created sweeps with ids =====
+scaling_hyper_sweep.yaml (175): 26a94778b3f84637945c0e1ff1604dfd
+
+
+sbatch --array=1-9 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 26a94778b3f84637945c0e1ff1604dfd
