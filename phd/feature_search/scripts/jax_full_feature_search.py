@@ -295,8 +295,8 @@ def train_multi_step(
     train_state: TrainState,
     task: NonlinearGEOFFTask,
     n_steps: int,
+    train_step_fn: Callable,
 ) -> Tuple[TrainState, StepStats]:
-    train_step_fn = jax.jit(train_step, static_argnums=(2,))
     prune_frequency = train_state.cfg.feature_recycling.get('prune_frequency', 1)
     batch_size = train_state.cfg.train.batch_size
 
@@ -390,6 +390,8 @@ def compute_baseline_loss(
 
 def run_experiment(
         cfg: DictConfig,
+        train_fn: Callable,
+        metrics_fn: Callable,
         task: NonlinearGEOFFTask,
         model: MLP,
         criterion: Callable,
@@ -413,9 +415,6 @@ def run_experiment(
     )
     metrics_buffer = MetricsBuffer()
     all_metrics = []
-    
-    train_fn = jax.jit(train_multi_step, static_argnums=(2,))
-    metrics_fn = jax.jit(compute_metrics, static_argnums=(4,))
     
     sequence_length = cfg.train.log_freq
     train_cycles = cfg.train.total_steps // sequence_length
@@ -479,9 +478,15 @@ def main(cfg: DictConfig) -> None:
     
     distractor_tracker = None
     
+    train_step_fn = jax.jit(train_step, static_argnums=(2,))
+    train_fn = jax.jit(
+        partial(train_multi_step, train_step_fn=train_step_fn),
+        static_argnames = ('n_steps', 'train_step_fn'),
+    )
+    metrics_fn = jax.jit(compute_metrics, static_argnums=(4,))
     run_experiment(
-        cfg, task, model, criterion, optimizer, repr_optimizer,
-        cbp_tracker, distractor_tracker, rng,
+        cfg, train_fn, metrics_fn, task, model, criterion, optimizer,
+        repr_optimizer, cbp_tracker, distractor_tracker, rng,
     )
     
     finish_experiment(cfg)
