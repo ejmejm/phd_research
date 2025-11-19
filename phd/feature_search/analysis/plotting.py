@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 from phd.feature_search.analysis.analysis_utils import *
 
+
 def plot_param_sensitivity(
         run_df: pd.DataFrame,
         config_df: Optional[pd.DataFrame],
@@ -77,6 +78,19 @@ def plot_param_sensitivity(
     # Create temporary column with evenly spaced x positions
     final_step_df['x_position'] = final_step_df[x_col].map(x_map)
 
+    # Create color mapping for consistent colors and sorted legend
+    if hue_col is not None:
+        # Try sorting with a cast to float first, then as str if float fails
+        hue_unique = final_step_df[hue_col].unique()
+        try:
+            hue_values = sorted(hue_unique, key=lambda x: float(x))
+        except Exception:
+            hue_values = sorted(hue_unique)
+        palette = sns.color_palette('deep', n_colors=len(hue_values))
+        color_map = dict(zip(hue_values, palette))
+    else:
+        color_map = None
+
     # Create plot with evenly spaced x positions
     sns.lineplot(
         data = final_step_df,
@@ -84,7 +98,7 @@ def plot_param_sensitivity(
         y = metric_col, 
         hue = hue_col,
         marker = 'o',
-        palette = 'deep',
+        palette = color_map,
         errorbar = ('ci', 95) if show_ci else None,
     )
 
@@ -105,22 +119,25 @@ def plot_param_sensitivity(
     plt.xlabel(x_label)
     plt.ylabel(y_label)
     
-    if legend_title is not None:
+    # Handle legend with sorted values
+    if hue_col is not None and legend_title is not None:
+        # Create custom legend handles with sorted hue values
+        legend_elements = [plt.Line2D([0], [0], color=color_map[val], marker='o', label=val) 
+                         for val in hue_values]
+        
+        if pow_2_legend:
+            labels = [f'{"0" if val == 0 else f"$2^{{{int(np.log2(float(val)))}}}$"}' 
+                     for val in hue_values]
+            plt.legend(legend_elements, labels, title=legend_title)
+        else:
+            plt.legend(legend_elements, hue_values, title=legend_title)
+    elif legend_title is not None:
         plt.legend(title=legend_title)
         
     if pow_2_x_axis:
         for ax in plt.gcf().axes:
             x_vals = [float(x.get_text()) for x in ax.get_xticklabels()]
             ax.set_xticklabels([f'{"0" if x == 0 else f"$2^{{{int(np.log2(x))}}}$"}' for x in x_vals])
-            
-    if pow_2_legend and hue_col is not None:
-        legend = plt.gca().get_legend()
-        if legend is not None:
-            legend_texts = [t.get_text() for t in legend.get_texts()]
-            for t in legend.get_texts():
-                val = float(t.get_text())
-                if val != 0:
-                    t.set_text(f'$2^{{{int(np.log2(val))}}}$')
 
 
 def plot_learning_curves(
