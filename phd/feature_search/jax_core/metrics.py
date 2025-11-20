@@ -1,9 +1,11 @@
 from typing import Dict, Optional
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 from omegaconf import DictConfig
 
 from .models import MLP
+from .optimizers import EqxOptimizer
 from .tasks.geoff import NonlinearGEOFFTask
 
 
@@ -101,7 +103,7 @@ def compute_feature_match_stats(
     return metrics
     
 
-def compute_model_statistics(
+def compute_model_stats(
     model: MLP,
     task: NonlinearGEOFFTask,
 ) -> Dict[str, float]:
@@ -134,5 +136,41 @@ def compute_model_statistics(
     #     metrics[f'layer_{layer_idx}/weight_l1'] = weight_l1
     #     metrics[f'layer_{layer_idx}/max_weight_magnitude'] = jnp.max(jnp.abs(layer.weight))
     #     metrics[f'layer_{layer_idx}/min_weight_magnitude'] = jnp.min(jnp.abs(layer.weight))
+        
+    return metrics
+
+
+def compute_optimizer_stats(
+    optimizer: EqxOptimizer,
+    model: MLP,
+    task: NonlinearGEOFFTask,
+) -> Dict[str, float]:
+    """Compute statistics about the model's weights."""
+    assert len(model.layers) == 2, "Only supports two-layer learning networks!"
+    assert model.layers[1].weight.shape[0] == 1, "Only supports single-output networks!"
+    assert optimizer.name == 'idbd', "Only supports IDBD optimizer!"
+    
+    metrics = {}
+    
+    # First make a mask to divide weights into perfect matches and non-perfect matches
+    learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
+    target_net_weights = task.weights[0].T # (true_hidden, in_features)
+    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
+    best_match_diffs = feature_diffs.min(axis=1) # (learner_dim,)
+    
+    perfect_match_mask = best_match_diffs < 1e-7
+    imperfect_match_mask = ~perfect_match_mask
+    
+    output_weights = model.layers[1].weight.squeeze(0) # (learner_dim,)
+    betas = jax.tree.leaves(optimizer.state.beta)[-1].squeeze(0)
+    step_sizes = jnp.exp(betas) # (learner_dim,)
+    assert step_sizes.shape == output_weights.shape, "Step sizes and output weights should have the same shape!"
+    
+    for prefix, mask in [('perfect_', perfect_match_mask), ('imperfect_', imperfect_match_mask)]:
+        n_features = mask.sum()
+        masked_step_sizes = step_sizes * mask
+        metrics[f'optimizer/{prefix}mean_step_size'] = jnp.sum(masked_step_sizes) / n_features
+        metrics[f'optimizer/{prefix}max_step_size'] = jnp.max(masked_step_sizes)
+        metrics[f'optimizer/{prefix}min_step_size'] = jnp.min(jnp.inf * ~mask + masked_step_sizes)
         
     return metrics

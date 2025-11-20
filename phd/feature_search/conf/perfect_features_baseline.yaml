@@ -3,15 +3,17 @@ defaults:
   - _self_
 
 model:
-  hidden_dim: 41
+  hidden_dim: 20
   use_bias: false
 
 feature_recycling:
-  recycle_rate: 0.005
-  freeze_perfect_features: true
+  recycle_rate: 0.0
+  freeze_perfect_features: false
 
 train:
   standardize_cumulants: false
+  log_model_stats: false
+  log_optimizer_stats: false
   log_feature_match_stats: true
 
 optimizer:
