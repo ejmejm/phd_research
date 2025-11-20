@@ -18,6 +18,7 @@ from .optimizers.idbd import IDBDState
 from .utils import get_val_at_key_path, tree_replace, tree_unzip
 
 
+MAX_FLOAT = jnp.finfo(jnp.float32).max
 EPSILON = 1e-8
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ class CBPTracker(eqx.Module):
     decay_rate: float = eqx.field(static=True)
     
     # Non-static
-    all_feature_stats: PyTree # Pytree with FeatureStats for leaves
+    all_feature_stats: List[FeatureStats] # Pytree with FeatureStats for leaves
     rng: PRNGKeyArray
     
     def __init__(
@@ -207,6 +208,8 @@ class CBPTracker(eqx.Module):
         filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
         utility_ranking = jnp.argsort(filtered_utility)
         utility_threshold = filtered_utility[utility_ranking[n_replacements]]
+        # Utilities with inf utility should never be pruned, so set the threshold to the max float
+        utility_threshold = jnp.minimum(utility_threshold, MAX_FLOAT)
         
         # Construct the prune mask
         prune_mask = jnp.where(filtered_utility < utility_threshold, True, False)

@@ -3,11 +3,12 @@ defaults:
   - _self_
 
 model:
-  hidden_dim: ${task.hidden_dim}
+  hidden_dim: 41
   use_bias: false
 
 feature_recycling:
-  recycle_rate: 0.0
+  recycle_rate: 0.005
+  freeze_perfect_features: true
 
 train:
   standardize_cumulants: false

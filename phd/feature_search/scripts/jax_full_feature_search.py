@@ -439,11 +439,6 @@ def run_experiment(
         all_metrics.append(metrics)
         log_metrics(metrics, cfg, step=train_state.step) # Consider making logging async
         
-        # # Print all metrics
-        # print("\n\n=======================")
-        # for key, value in metrics.items():
-        #     print(f"{key}: {value}")
-        
         if pbar is not None:
             pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
             pbar.update(sequence_length)

@@ -91,7 +91,6 @@ def create_model_with_perfect_features(model: MLP, task: NonlinearGEOFFTask, cfg
     """Return a new version of the model that has the same features as the target network in the task."""
     has_bias = cfg.model.get('use_bias', True)
     model_hidden_dim = model.layers[0].weight.shape[0]
-    task_hidden_dim = task.weights[0].shape[1]
     
     if has_bias:
         model_hidden_dim -= 1
@@ -157,6 +156,25 @@ def main(cfg: DictConfig) -> None:
     task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng = \
         prepare_ltu_geoff_experiment(cfg)
     model = create_model_with_perfect_features(model, task, cfg)
+    
+    # Set true feature uilities to infinity so they are never replaced
+    if cfg.feature_recycling.get('freeze_perfect_features', False):
+        if (cfg.model.hidden_dim != cfg.task.hidden_dim and
+            cfg.model.hidden_dim <= 2 *cfg.task.hidden_dim and
+            cfg.feature_recycling.utility_reset_mode.lower() == 'median'
+        ):
+            raise ValueError(
+                f"Setting perfect features to be frozen but less than 2x the task hidden dim is not supported when utility reset mode is median! "
+                f"This would cause the median utility to be infinity, and no features would be prunable."
+            )
+        use_bias = cfg.model.get('use_bias', True)
+        n_task_features = cfg.task.n_features + int(use_bias)
+        utilities = cbp_tracker.all_feature_stats[0].utility
+        cbp_tracker = eqx.tree_at(
+            lambda x: x.all_feature_stats[0].utility,
+            cbp_tracker,
+            utilities.at[:n_task_features].set(jnp.inf),
+        )
     
     distractor_tracker = None
     
