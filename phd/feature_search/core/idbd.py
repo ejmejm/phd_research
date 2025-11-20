@@ -25,7 +25,7 @@ class IDBD(Optimizer):
         meta_lr: Meta learning rate (default: 0.01)
         init_lr: Initial learning rate (default: 0.01)
         weight_decay: Weight decay (default: 0.0)
-        version: Version of IDBD to use (default: squared_inputs)
+        version: Version of IDBD to use (default: squared_grads)
         autostep: Whether to use autostep (default: False)
         tau: Tau parameter for autostep (default: 1e4)
     """
@@ -243,16 +243,16 @@ if __name__ == '__main__':
         loss = 0.5 * torch.nn.functional.mse_loss(y_pred, y[0])
         print('loss:', loss.item(), 'step-size:', torch.exp(optimizer.state[model.weight]['beta']))
         
-        param_inputs = {model.weight: X[0]}
         optimizer.zero_grad()
-        optimizer.step(loss, y_pred, param_inputs)
+        loss.backward(create_graph=True)
+        optimizer.step(y_pred)
 
     # Test 2
     print("\nTest 2: Linear Regression w/ Undershooting (IDBD increases learning rate)")
     with torch.no_grad():
         model.weight.data.copy_(torch.tensor([[1.0, -1.0]]))
                                            # [0.5, 1.0]]))
-    optimizer = IDBD(model.parameters(), meta_lr=0.1, init_lr=0.001, autostep=True)
+    optimizer = IDBD(model.parameters(), meta_lr=0.1, init_lr=0.001, autostep=True, version='squared_inputs')
     
     for _ in range(10):
         y_pred = model(X[0])
@@ -261,7 +261,8 @@ if __name__ == '__main__':
         
         param_inputs = {model.weight: X[0]}
         optimizer.zero_grad()
-        optimizer.step(loss, y_pred, param_inputs)
+        loss.backward(create_graph=True)
+        optimizer.step(param_inputs=param_inputs)
     
     
     # # Test with 2-layer network
