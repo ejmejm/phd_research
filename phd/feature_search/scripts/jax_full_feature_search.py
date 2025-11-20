@@ -22,7 +22,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
     rng_from_string,
 )
 from phd.feature_search.jax_core.feature_recycling import CBPTracker
-from phd.feature_search.jax_core.logging import compute_feature_match_stats
+from phd.feature_search.jax_core.metrics import compute_feature_match_stats, compute_model_statistics
 from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizers import EqxOptimizer
 from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
@@ -363,7 +363,7 @@ def compute_metrics(
     if cfg.train.get('log_utility_stats', False):
         raise NotImplementedError("Utility stats are not implemented yet!")
     if cfg.train.get('log_model_stats', False):
-        raise NotImplementedError("Model stats are not implemented yet!")
+        metrics.update(compute_model_statistics(train_state.model, task))
     if cfg.train.get('log_optimizer_stats', False):
         raise NotImplementedError("Optimizer stats are not implemented yet!")
     if cfg.train.get('log_feature_match_stats', False):
