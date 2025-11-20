@@ -1,0 +1,27 @@
+name: static_features_with_perfect_features
+project: ns_autostep_feature_search_results
+command: python scripts/jax_perfect_features_baseline.py --config-name=comet_sweeps/paper_draft_v2_part_1/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.total_steps: 30_000_000
+  train.log_model_stats: true
+  train.log_optimizer_stats: true
+  
+  model.hidden_dim: 5120
+  model.use_bias: false
+
+  task.flip_rate: "${eval:2**-12}"
+  train.standardize_cumulants: false
+
+  feature_recycling.recycle_rate: 0.0
+
+  optimizer.learning_rate: "${eval:2**-14}"
+  optimizer.meta_learning_rate: "${eval:2**-5}"
+  
+  seed: [901, 902, 903, 904, 905, 906, 907, 908, 909, 910, 911, 912, 913, 914, 915, 916, 917, 918, 919, 920, 921, 922, 923, 924, 925, 926, 927, 928, 929, 930]

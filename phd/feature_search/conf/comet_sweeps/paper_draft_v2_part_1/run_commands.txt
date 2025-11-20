@@ -175,3 +175,19 @@ scaling_hyper_sweep.yaml (175): 26a94778b3f84637945c0e1ff1604dfd
 
 
 sbatch --array=1-9 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 26a94778b3f84637945c0e1ff1604dfd
+
+
+### Round 14 ###
+
+
+===== Created sweeps with ids =====
+fs_with_frozen_perfect_features.yaml (30): 1a9b4449db2c4fbf852ab15e5d606af2
+static_features_with_perfect_features.yaml (30): ce5b6fa1cf764c9c89a5ae8eb00be76a
+
+
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 1a9b4449db2c4fbf852ab15e5d606af2
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s ce5b6fa1cf764c9c89a5ae8eb00be76a
+
+
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 1a9b4449db2c4fbf852ab15e5d606af2
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s ce5b6fa1cf764c9c89a5ae8eb00be76a
