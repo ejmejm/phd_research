@@ -282,7 +282,6 @@ def train_step(
                 assert len(prune_masks) == 1, "There should only be one prune mask!"
                 prune_mask = prune_masks[0]
                 n_pruned = prune_mask.sum()
-                jax.debug.print(f"mask: {prune_mask}")
                 n_best_features_pruned = compute_n_best_features_pruned(pre_prune_model, prune_mask, task)
                 
         else:
