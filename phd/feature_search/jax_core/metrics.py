@@ -1,7 +1,7 @@
 from typing import Dict, Optional
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, Bool, Float
 from omegaconf import DictConfig
 
 from .models import MLP
@@ -174,3 +174,24 @@ def compute_optimizer_stats(
         metrics[f'optimizer/{prefix}min_step_size'] = jnp.min(jnp.inf * ~mask + masked_step_sizes)
         
     return metrics
+
+
+def compute_n_best_features_pruned(
+    model: MLP,
+    prune_mask: Bool[Array, 'n_features'],
+    task: NonlinearGEOFFTask,
+):
+    # Function takes in a model, task, and a mask of which features are being pruned
+    # Get the closest feature(s) in the learner for each target feature, generating a mask of shape (n_target_features, n_learner_features)
+    # Option 1: If there are multiple closest features per target feature, then take only the one with the closest output weight to that of the corresponding target feature
+    # Option 2: Consider all equal features
+    # Create a mask of those features
+    # Return the number of overlaps in the prune mask and the best
+    pass
+
+
+def compute_pruning_stats():
+    # Log the cumulated # best features pruned and the total # features pruned 
+    pass
+    
+    
