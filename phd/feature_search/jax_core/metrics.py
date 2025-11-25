@@ -187,11 +187,4 @@ def compute_n_best_features_pruned(
     # Option 2: Consider all equal features
     # Create a mask of those features
     # Return the number of overlaps in the prune mask and the best
-    pass
-
-
-def compute_pruning_stats():
-    # Log the cumulated # best features pruned and the total # features pruned 
-    pass
-    
-    
+    return 0

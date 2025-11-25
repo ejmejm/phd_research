@@ -22,7 +22,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
     rng_from_string,
 )
 from phd.feature_search.jax_core.feature_recycling import CBPTracker
-from phd.feature_search.jax_core.metrics import compute_feature_match_stats, compute_model_stats, compute_optimizer_stats
+from phd.feature_search.jax_core.metrics import *
 from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizers import EqxOptimizer
 from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
@@ -197,6 +197,8 @@ class StepStats(eqx.Module):
     loss: Float[Array, '']
     targets: Float[Array, 'batch_size n_outputs']
     baseline_loss: Float[Array, '']
+    n_pruned: Int[Array, '']
+    n_best_features_pruned: Int[Array, '']
 
 
 class MetricsBuffer(eqx.Module):
@@ -209,6 +211,7 @@ class MetricsBuffer(eqx.Module):
 def train_step(
     train_state: TrainState,
     data: Tuple[Float[Array, 'batch_size n_inputs'], Float[Array, 'batch_size n_outputs']],
+    task: NonlinearGEOFFTask | None = None,
     do_prune: bool = False,
 ) -> Tuple[TrainState, StepStats]:
     inputs, targets = data
@@ -262,14 +265,26 @@ def train_step(
         model = model.with_projected_weights()
     
     # CBP resets
+    n_pruned = 0
+    n_best_features_pruned = 0
     if train_state.cbp_tracker is not None:
         if do_prune:
+            pre_prune_model = model
             if repr_optimizer is not None:
                 cbp_tracker, model, (optimizer, repr_optimizer), prune_masks = train_state.cbp_tracker.prune_features(
                     model, param_inputs, (optimizer, repr_optimizer), rng=cbp_key)
             else:
                 cbp_tracker, model, optimizer, prune_masks = train_state.cbp_tracker.prune_features(
                     model, param_inputs, optimizer, rng=cbp_key)
+                
+            if cfg.train.get('log_pruning_stats', False):
+                assert task is not None, "Task is required for logging pruning stats!"
+                assert len(prune_masks) == 1, "There should only be one prune mask!"
+                prune_mask = prune_masks[0]
+                n_pruned = prune_mask.sum()
+                jax.debug.print(f"mask: {prune_mask}")
+                n_best_features_pruned = compute_n_best_features_pruned(pre_prune_model, prune_mask, task)
+                
         else:
             cbp_tracker = train_state.cbp_tracker.update_feature_stats(model, param_inputs)
     
@@ -286,7 +301,7 @@ def train_step(
     )
     train_state_updates = {k: v for k, v in train_state_updates.items() if v is not None}
     train_state = tree_replace(train_state, **train_state_updates)
-    step_stats = StepStats(loss, targets, baseline_loss)
+    step_stats = StepStats(loss, targets, baseline_loss, n_pruned, n_best_features_pruned)
     
     return train_state, step_stats
 
@@ -306,12 +321,12 @@ def train_multi_step(
         all_step_stats = []
         for _ in range(prune_frequency - 1):
             task, data = task.generate_batch(batch_size)
-            train_state, step_stats = train_step_fn(train_state, data, False)
+            train_state, step_stats = train_step_fn(train_state, data, task, False)
             all_step_stats.append(step_stats)
         
         task, data = task.generate_batch(batch_size)
         do_prune = train_state.cfg.feature_recycling.recycle_rate > 0
-        train_state, step_stats = train_step_fn(train_state, data, do_prune)
+        train_state, step_stats = train_step_fn(train_state, data, task, do_prune)
         all_step_stats.append(step_stats)
         
         step_stats = jax.tree.map(lambda *args: jnp.stack(args), *all_step_stats)
@@ -359,7 +374,10 @@ def compute_metrics(
     }
     
     if cfg.train.get('log_pruning_stats', False):
-        raise NotImplementedError("Pruning stats are not implemented yet!")
+        metrics.update({
+            'pruning_stats/n_pruned': step_stats.n_pruned.sum(),
+            'pruning_stats/n_best_features_pruned': step_stats.n_best_features_pruned.sum(),
+        })
     if cfg.train.get('log_utility_stats', False):
         raise NotImplementedError("Utility stats are not implemented yet!")
     if cfg.train.get('log_model_stats', False):
@@ -492,7 +510,7 @@ def main(cfg: DictConfig) -> None:
     
     distractor_tracker = None
     
-    train_step_fn = jax.jit(train_step, static_argnums=(2,))
+    train_step_fn = jax.jit(train_step, static_argnums=(3,))
     train_fn = jax.jit(
         partial(train_multi_step, train_step_fn=train_step_fn),
         static_argnames = ('n_steps', 'train_step_fn'),
