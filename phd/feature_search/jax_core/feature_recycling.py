@@ -25,8 +25,6 @@ logger = logging.getLogger(__name__)
 
 
 class FeatureStats(eqx.Module):
-    max_possible_replacements: int = eqx.field(static=True)
-    
     age: Int[Array, 'n_features']
     utility: Float[Array, 'n_features']
     replacement_accumulator: Float[Array, '']
@@ -40,11 +38,11 @@ class CBPTracker(eqx.Module):
     outgoing_weight_init: str = eqx.field(static=True)
     utility_reset_mode: str = eqx.field(static=True)
     initial_step_size_method: str = eqx.field(static=True)
-    replace_rate: float = eqx.field(static=True)
     maturity_threshold: int = eqx.field(static=True)
     decay_rate: float = eqx.field(static=True)
     
     # Non-static
+    replace_rate: float
     all_feature_stats: List[FeatureStats] # Pytree with FeatureStats for leaves
     rng: PRNGKeyArray
     
@@ -101,27 +99,9 @@ class CBPTracker(eqx.Module):
                 age = jnp.zeros(weight_arr.shape[1], dtype=jnp.int32),
                 utility = jnp.zeros(weight_arr.shape[1], dtype=jnp.float32),
                 replacement_accumulator = jnp.array(0.0, dtype=jnp.float32),
-                max_possible_replacements = math.ceil(replace_rate * weight_arr.shape[1]),
             )
             for weight_arr in weights
         ]
-        
-        for stats in self.all_feature_stats:
-            n_features = stats.utility.shape[0]
-            assert stats.max_possible_replacements < n_features, (
-                f"The replacement rate is too high! The maximum possible replacements is "
-                f"{stats.max_possible_replacements}, but there are {n_features} features. "
-                f"This algorithm does not support replacing all features at once."
-            )
-        
-        # jax.tree.map(
-        #     lambda weights: FeatureStats(
-        #         age = jnp.zeros(weights.shape[1], dtype=jnp.int32),
-        #         utility = jnp.zeros(weights.shape[1], dtype=jnp.float32),
-        #         replacement_accumulator = jnp.zeros(1, dtype=jnp.float32),
-        #     ),
-        #     tree = model,
-        # )
         
         self.incoming_weight_init = incoming_weight_init
         self.outgoing_weight_init = outgoing_weight_init
@@ -134,7 +114,7 @@ class CBPTracker(eqx.Module):
         if rng is None:
             rng = jax.random.PRNGKey(random.randint(0, 2**31))
         self.rng = rng
-        
+    
     @jax.named_call
     def _compute_new_feature_stats(
         self,
@@ -160,7 +140,6 @@ class CBPTracker(eqx.Module):
             age = age,
             utility = utility,
             replacement_accumulator = replacement_accumulator,
-            max_possible_replacements = feature_stats.max_possible_replacements,
         )
     
     @partial(jax.jit, static_argnames=('n_replacements',))
