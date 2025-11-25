@@ -388,6 +388,15 @@ def compute_baseline_loss(
     return loss
 
 
+def log_task_output_weights(task: NonlinearGEOFFTask, cfg: DictConfig):
+    min_idx = jnp.abs(task.weights[-1]).argmin()
+    min_output_weight = task.weights[-1][min_idx].item()
+    log_metrics({'min_output_weight': min_output_weight}, cfg, step=0)
+    weights = np.asarray(task.weights[-1]).squeeze()
+    print("Task output weights:", np.array2string(weights, formatter={'float_kind': lambda x: f"{x:.4f}"}))
+    print(f"Minimum task output weight: {min_output_weight:.6f}")
+
+
 def run_experiment(
         cfg: DictConfig,
         train_fn: Callable,
@@ -413,6 +422,7 @@ def run_experiment(
         criterion = criterion,
         rng = rng,
     )
+    log_task_output_weights(task, cfg)
     metrics_buffer = MetricsBuffer()
     all_metrics = []
     
@@ -439,7 +449,7 @@ def run_experiment(
         all_metrics.append(metrics)
         log_metrics(metrics, cfg, step=train_state.step) # Consider making logging async
         
-        # if train_state.step % 1_500_000 == 0:
+        # if train_state.step % 2_000_000 == 0:
         #     original_replace_rate = train_state.cbp_tracker.replace_rate
         #     train_state = eqx.tree_at(
         #         lambda x: x.cbp_tracker.replace_rate,

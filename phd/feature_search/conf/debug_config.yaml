@@ -2,7 +2,7 @@ defaults:
 - comet_sweeps/paper_draft_v2_part_1/base_config
 - _self_
 
-wandb: true
+wandb: false
 
 model:
   hidden_dim: 5120
@@ -28,5 +28,5 @@ optimizer:
   learning_rate: "${eval:2**-14}"
   meta_learning_rate: "${eval:2**-5}"
 
-seed: 702
+seed: 705
 
