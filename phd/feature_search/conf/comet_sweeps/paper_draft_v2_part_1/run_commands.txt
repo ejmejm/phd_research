@@ -187,7 +187,6 @@ static_features_with_perfect_features.yaml (30): ce5b6fa1cf764c9c89a5ae8eb00be76
 
 sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 1a9b4449db2c4fbf852ab15e5d606af2
 sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s ce5b6fa1cf764c9c89a5ae8eb00be76a
-<<<<<<< Updated upstream
 
 
 ### Round 15 ###
@@ -197,6 +196,4 @@ sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --me
 adaptive_lr_frozen_perfect_features.yaml (30): e75708d1ce4d4d3fa311fbc39f6b9d57
 
 
-sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s e75708d1ce4d4d3fa311fbc39f6b9d57
-=======
->>>>>>> Stashed changes
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s e75708d1ce4d4d3fa311fbc39f6b9d57
