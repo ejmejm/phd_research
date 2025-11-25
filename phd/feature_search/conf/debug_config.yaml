@@ -1,50 +1,32 @@
 defaults:
-- full_feature_search
+- comet_sweeps/paper_draft_v2_part_1/base_config
 - _self_
 
-wandb: false
-comet_ml: false
-
-device: cuda
+wandb: true
 
 model:
-  hidden_dim: 2000
-  n_frozen_layers: 0
-  use_normalize_and_project: false
-  weight_init_method: lecun_uniform
+  hidden_dim: 5120
+  use_bias: false
 
 task:
-  distractor_chance: 0.0
-  noise_std: 0.0
-  distractor_mean_range: [ 0.0, 0.0 ]
-  flip_rate: 0.0
+  flip_rate: "${eval:2**-12}"
 
 feature_recycling:
-  recycle_rate: 0.0
-  use_signed_utility: False
-  initial_step_size_method: constant
-  prune_frequency: 4
-  incoming_weight_init: binary
+  recycle_rate: 0.001
+  utility_decay: 0.999
+  utility_reset_mode: median
   feature_protection_steps: 0
+  initial_step_size_method: median
 
 train:
-  total_steps: 2_000_000
-  log_freq: 4_000
-  standardize_cumulants: true
-  log_feature_match_stats: true
+  log_model_stats: true
+  log_optimizer_stats: true
+  standardize_cumulants: false
+  total_steps: 30000000
 
 optimizer:
-  name: idbd
-  learning_rate: 0.0001 # ${eval:0.0003 / ${model.hidden_dim} ** 0.75}
-  version: squared_grads
-  weight_decay: 0.0
-  autostep: true
-  step_size_decay: 0.0
+  learning_rate: "${eval:2**-14}"
+  meta_learning_rate: "${eval:2**-5}"
 
-representation_optimizer:
-  name: sgd # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
-  weight_decay: 0
-  learning_rate: 1.0
+seed: 702
 
-
-seed: [1, 2, 3] # 20250827
