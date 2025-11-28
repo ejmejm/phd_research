@@ -12,7 +12,8 @@ from .tasks.geoff import NonlinearGEOFFTask
 def compute_feature_diff_matrix(
     learning_net_weights: Float[Array, 'hidden_dim in_features'],
     target_net_weights: Float[Array, 'true_hidden in_features'],
-) -> Tuple[Float[Array, 'hidden_dim true_hidden'], Bool[Array, 'hidden_dim true_hidden']]:
+    include_negative_features: bool = False,
+) -> Float[Array, 'hidden_dim true_hidden']:
     """Compute the matrix of feature differences between the learning network and target network."""
     # Normalize weights
     learning_net_weights = learning_net_weights / jnp.linalg.norm(learning_net_weights, axis=1, keepdims=True)
@@ -23,11 +24,13 @@ def compute_feature_diff_matrix(
     target_expanded = target_net_weights[None, :, :]
     
     weight_diffs = jnp.abs(learning_expanded - target_expanded)
-    negative_feature_diffs = jnp.abs(learning_expanded + target_expanded)
-    
     feature_diffs = weight_diffs.sum(axis=2)
-    negative_feature_diffs = negative_feature_diffs.sum(axis=2)
     
+    if not include_negative_features:
+        return feature_diffs
+    
+    negative_feature_diffs = jnp.abs(learning_expanded + target_expanded)
+    negative_feature_diffs = negative_feature_diffs.sum(axis=2)
     feature_diffs = jnp.minimum(feature_diffs, negative_feature_diffs) # (hidden_dim, true_hidden)
     negative_mask = negative_feature_diffs < feature_diffs
     return feature_diffs, negative_mask # Negative mask is True where the closest feature match is the negative feature
@@ -54,7 +57,7 @@ def compute_best_feature_match_distances(
     target_net_output_weights: Optional[Float[Array, 'true_hidden out_features']] = None,
 ) -> Float[Array, 'true_hidden']:
     """Get, for each target feature, how closely the closest learning network hidden unit matches it."""
-    feature_diffs, _ = compute_feature_diff_matrix(learning_net_weights, target_net_weights)
+    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights)
     
     # Normalize so each diff can be a maximum of 1 with binary weights
     best_feature_match_diffs = feature_diffs.min(axis=0) # (true_hidden,)
@@ -117,7 +120,7 @@ def compute_model_stats(
     # First make a mask to divide weights into perfect matches and non-perfect matches
     learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
     target_net_weights = task.weights[0].T # (true_hidden, in_features)
-    feature_diffs, _ = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
+    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
     best_match_diffs = feature_diffs.min(axis=1) # (learner_dim,)
     
     perfect_match_mask = best_match_diffs < 1e-7
@@ -156,7 +159,7 @@ def compute_optimizer_stats(
     # First make a mask to divide weights into perfect matches and non-perfect matches
     learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
     target_net_weights = task.weights[0].T # (true_hidden, in_features)
-    feature_diffs, _ = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
+    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
     best_match_diffs = feature_diffs.min(axis=1) # (learner_dim,)
     
     perfect_match_mask = best_match_diffs < 1e-7
@@ -182,42 +185,42 @@ def compute_n_best_features_pruned(
     prune_mask: Bool[Array, 'n_features'],
     task: NonlinearGEOFFTask,
 ):
-    # Function takes in a model, task, and a mask of which features are being pruned
-    # Get the closest feature(s) in the learner for each target feature, generating a mask of shape (learner_dim, target_dim)
-    # Option 1: If there are multiple closest features per target feature, then take only the one with the closest output weight to that of the corresponding target feature
-    # Option 2: Consider all equal features
-    # Create a mask of those features
-    # Return the number of overlaps in the prune mask and the best
-    
+    """
+    Takes in a model, task, and a mask of which features are being pruned.
+    Get the closest feature(s) in the learner for each target feature, generating a mask of shape (learner_dim, target_dim).
+    If there are multiple closest features per target feature, then only the one with the smallest output weight difference
+    is chosen.
+    Returns the number of features in the prune mask that were the closest match to at least one target feature.
+    """
     learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
     target_net_weights = task.weights[0].T # (true_hidden, in_features)
-    feature_diffs, negative_match_mask = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
+    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
     
-    # min_diff_idxs = feature_diffs.argmin(axis=0) # (target_dim,)
-    # negative_match_mask = negative_match_mask[min_diff_idxs, jnp.arange(feature_diffs.shape[1])] # (target_dim,)
     min_diff_per_target_feature = feature_diffs.min(axis=0) # (target_dim,)
     best_match_mask = feature_diffs <= min_diff_per_target_feature[None, :] # (learner_dim, target_dim)
+
+    # Narrow down the best match mask to a single 1 per target feature
+    # If there are multiple 1s, choose the one with the smallest output weight difference
     
+    learner_output_weights = model.layers[1].weight.squeeze(0)  # (learner_dim,)
+    target_output_weights = task.weights[1].squeeze(-1)         # (target_dim,)
+
+    # Compute absolute difference matrix between learner and target output weights
+    output_diffs = jnp.abs(learner_output_weights[:, None] - target_output_weights[None, :])  # (learner_dim, target_dim)
+
+    # Mask the output_diffs to inf where not a best match, remains valid for best matches
+    masked_output_diffs = jnp.where(best_match_mask, output_diffs, jnp.inf)
+
+    # Efficient, jittable selection: argmin over learner dimension produces exactly one best per target
+    pruned_indices = jnp.argmin(masked_output_diffs, axis=0)  # (target_dim,)
+
+    # Build a single-best-match mask: only one True per column (target feature)
+    single_best_match_mask = jax.vmap(
+        lambda idx, n: jax.nn.one_hot(idx, n, dtype=bool),
+        in_axes=(0, None)
+    )(pruned_indices, masked_output_diffs.shape[0]).T # (learner_dim, target_dim)
     
+    match_and_prune_mask = jnp.logical_and(prune_mask[:, None], single_best_match_mask)
+    n_best_features_pruned = match_and_prune_mask.any(axis=1).sum()
     
-    learner_output_weights = model.layers[1].weight # (1, learner_dim,)
-    target_output_weights = task.weights[1] # (target_dim, 1)
-    
-    # In places where the closest feature match is the negative feature
-    output_diffs = learner_output_weights - target_output_weights
-    corrected_output_diffs = jnp.where(negative_match_mask, -output_diffs, output_diffs)
-    
-    output_diffs = jnp.abs((learner_output_weights - target_output_weights) * ) # (learner_dim, target_dim)
-    
-    
-    # filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
-    # utility_ranking = jnp.argsort(filtered_utility)
-    # utility_threshold = filtered_utility[utility_ranking[n_replacements]]
-    # # Utilities with inf utility should never be pruned, so set the threshold to the max float
-    # utility_threshold = jnp.minimum(utility_threshold, MAX_FLOAT)
-    
-    
-    best_match_diffs = feature_diffs.min(axis=1) # (learner_dim,)
-    
-    
-    return 0
+    return n_best_features_pruned
