@@ -39,6 +39,8 @@ errors_idbd = []
 alpha_history_idbd = []
 utility_traces = np.zeros(n_inputs)
 utility_history = np.zeros((n_examples, n_inputs))
+correlation_traces = np.zeros(n_inputs)
+correlation_history = np.zeros((n_examples, n_inputs))
 
 for t in range(n_examples):
     x = X[t]
@@ -56,6 +58,10 @@ for t in range(n_examples):
         utility_traces[i] = utility_traces[i] * trace_decay + utility * (1 - trace_decay)
     
     utility_history[t] = utility_traces.copy()
+    
+    # Compute correlation trace for each input (x[i] * y_star)
+    correlation_traces = correlation_traces * trace_decay + x * y_star * (1 - trace_decay)
+    correlation_history[t] = correlation_traces.copy()
     
     # Update beta (log learning rates)
     beta += theta * delta * x * h
@@ -121,7 +127,7 @@ print(f"  Mean (irrelevant): {np.mean(final_alphas[5:]):.4f}")
 # ============================================
 # Plot Results
 # ============================================
-fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
+fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 13))
 
 # Plot 1: Error curves
 window = 500
@@ -167,6 +173,26 @@ ax3.set_title('Evolution of Input Utility Traces (decay=0.01)')
 ax3.legend()
 ax3.grid(True, alpha=0.3)
 ax3.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
+
+# Plot 4: Absolute Correlation traces over time
+for i in range(n_inputs):
+    if i < n_relevant:
+        # Relevant inputs: blue
+        ax4.plot(time_axis, np.abs(correlation_history[:, i]), color='blue', alpha=0.3, linewidth=1)
+    else:
+        # Irrelevant inputs: red
+        ax4.plot(time_axis, np.abs(correlation_history[:, i]), color='red', alpha=0.2, linewidth=0.8)
+
+# Add dummy lines for legend
+ax4.plot([], [], color='blue', alpha=0.6, linewidth=2, label='Relevant inputs (1-5)')
+ax4.plot([], [], color='red', alpha=0.6, linewidth=2, label='Irrelevant inputs (6-20)')
+
+ax4.set_xlabel('Examples')
+ax4.set_ylabel('Absolute Correlation Trace')
+ax4.set_title('Evolution of Absolute Input-Target Correlation Traces (decay=0.01)')
+ax4.legend()
+ax4.grid(True, alpha=0.3)
+ax4.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
 
 plt.tight_layout()
 plt.show()
