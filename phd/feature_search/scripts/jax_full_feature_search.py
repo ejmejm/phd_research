@@ -372,6 +372,9 @@ def compute_metrics(
         'baseline_loss': step_stats.baseline_loss.sum() / steps_since_log,
     }
     
+    if cfg.train.get('log_scaled_loss', False):
+        metrics['scaled_loss'] = metrics['loss'] / metrics['baseline_loss']
+    
     if cfg.train.get('log_pruning_stats', False):
         metrics.update({
             'pruning_stats/n_pruned': step_stats.n_pruned.sum(),
