@@ -57,7 +57,7 @@ def compute_best_feature_match_distances(
     target_net_output_weights: Optional[Float[Array, 'true_hidden out_features']] = None,
 ) -> Float[Array, 'true_hidden']:
     """Get, for each target feature, how closely the closest learning network hidden unit matches it."""
-    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights)
+    feature_diffs, _ = compute_feature_diff_matrix(learning_net_weights, target_net_weights, include_negative_features=True)
     
     # Normalize so each diff can be a maximum of 1 with binary weights
     best_feature_match_diffs = feature_diffs.min(axis=0) # (true_hidden,)
@@ -120,7 +120,7 @@ def compute_model_stats(
     # First make a mask to divide weights into perfect matches and non-perfect matches
     learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
     target_net_weights = task.weights[0].T # (true_hidden, in_features)
-    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
+    feature_diffs, _ = compute_feature_diff_matrix(learning_net_weights, target_net_weights, include_negative_features=True) # (learner_dim, target_dim)
     best_match_diffs = feature_diffs.min(axis=1) # (learner_dim,)
     
     perfect_match_mask = best_match_diffs < 1e-7
@@ -159,7 +159,7 @@ def compute_optimizer_stats(
     # First make a mask to divide weights into perfect matches and non-perfect matches
     learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
     target_net_weights = task.weights[0].T # (true_hidden, in_features)
-    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
+    feature_diffs, _ = compute_feature_diff_matrix(learning_net_weights, target_net_weights, include_negative_features=True) # (learner_dim, target_dim)
     best_match_diffs = feature_diffs.min(axis=1) # (learner_dim,)
     
     perfect_match_mask = best_match_diffs < 1e-7
@@ -180,6 +180,7 @@ def compute_optimizer_stats(
     return metrics
 
 
+# TODO: Fix this function. Consider the negative feature case and stop comparing output weights.
 def compute_n_best_features_pruned(
     model: MLP,
     prune_mask: Bool[Array, 'n_features'],
@@ -194,10 +195,11 @@ def compute_n_best_features_pruned(
     """
     learning_net_weights = model.layers[0].weight # (hidden_dim, in_features)
     target_net_weights = task.weights[0].T # (true_hidden, in_features)
-    feature_diffs = compute_feature_diff_matrix(learning_net_weights, target_net_weights) # (learner_dim, target_dim)
+    feature_diffs, _ = compute_feature_diff_matrix(learning_net_weights, target_net_weights, include_negative_features=True) # (learner_dim, target_dim)
     
     min_diff_per_target_feature = feature_diffs.min(axis=0) # (target_dim,)
     best_match_mask = feature_diffs <= min_diff_per_target_feature[None, :] # (learner_dim, target_dim)
+    
 
     # Narrow down the best match mask to a single 1 per target feature
     # If there are multiple 1s, choose the one with the smallest output weight difference
