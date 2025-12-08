@@ -419,10 +419,12 @@ def get_best_ablation_values(
         # Find best ablation values for each split combination
         best_run_ids = []
         for split_vals in split_combinations:
+            config_str = ""
+            vals_str = ""
             if len(split_vars) == 0:
-                config_str = "\nConfiguration: (no split vars)"
+                config_str += "\nConfiguration: (no split vars)"
             else:
-                config_str = "\nConfiguration: "
+                config_str += "\nConfiguration: "
                 config_str += " | ".join(
                     f"{var}={val:.2e}" if isinstance(val, float) else f"{var}={val}"
                     for var, val in zip(split_vars, split_vals)
@@ -438,7 +440,7 @@ def get_best_ablation_values(
 
             # Skip this split if no runs are present for it
             if split_losses.empty:
-                report_str += f"  [WARNING] No runs for split combination in '{sweep_name}': {config_str.strip()} Skipping.\n"
+                vals_str += f"  [WARNING] No runs for split combination in '{sweep_name}': {config_str.strip()} Skipping.\n"
                 continue
 
             if metric_direction == 'min':
@@ -456,11 +458,11 @@ def get_best_ablation_values(
                 val = best_loss_idx[i]
                 if isinstance(val, (int, float)):
                     if (abs(val) > 1e5 or (abs(val) < 1e-5 and val != 0)):
-                        report_str += f"  Best {var}={val:.2e}\n"
+                        vals_str += f"  Best {var}={val:.2e}\n"
                     else:
-                        report_str += f"  Best {var}={val}\n"
+                        vals_str += f"  Best {var}={val}\n"
                 else:
-                    report_str += f"  Best {var}={val}\n"
+                    vals_str += f"  Best {var}={val}\n"
 
             # Get run_ids for this best configuration
             query = pd.Series(True, index=config_df.index)
@@ -471,7 +473,7 @@ def get_best_ablation_values(
                 query &= (config_df[var] == val)
                 
             num_in_bucket = query.sum()
-            report_str += f"{config_str} | # runs: {num_in_bucket}\n"
+            config_str += f" | # runs: {num_in_bucket}\n"
 
             matching_runs = config_df[query]
             if len(matching_runs) == 0:
@@ -479,7 +481,7 @@ def get_best_ablation_values(
                 continue
             best_run_ids.extend(matching_runs['run_id'].tolist())
 
-            report_str = config_str + '\n' + report_str
+            report_str += config_str + vals_str
 
         if print_best_values:
             print(report_str)
