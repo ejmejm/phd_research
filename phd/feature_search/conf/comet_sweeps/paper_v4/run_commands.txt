@@ -28,7 +28,5 @@ sgd_layerwise_step_size.yaml (3080): f0f90ab3d599494eb3e42c014457cdee
 
 50 experiments per 6 hour job
 
-sbatch --array=1-30%10 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 18420159274b42fc914ec06ad32d54c2
-sbatch --array=1-30%10 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s f0f90ab3d599494eb3e42c014457cdee
-
-
+sbatch --array=1-10 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=18:00:00 launch_comet_agent.sbatch -s 18420159274b42fc914ec06ad32d54c2
+sbatch --array=1-10 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=18:00:00 launch_comet_agent.sbatch -s f0f90ab3d599494eb3e42c014457cdee
