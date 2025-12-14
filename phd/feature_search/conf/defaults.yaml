@@ -1,8 +1,17 @@
 defaults:
 - _self_
+- override hydra/hydra_logging: disabled  
+- override hydra/job_logging: disabled
+
+hydra:  
+  output_subdir: null  
+  run:  
+    dir: .
 
 seed: null
 wandb: false
+mlflow: false
+mlflow_tracking_uri: sqlite:///outputs/mlflow_runs.db
 comet_ml: false
 comet_ml_workspace: phd-research
 project: feature-search # Will appear in logging under this project

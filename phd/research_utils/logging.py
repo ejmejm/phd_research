@@ -6,6 +6,7 @@ import random
 import string
 import sys
 import tempfile
+from typing import Tuple
 import warnings
 
 import numpy as np
@@ -14,35 +15,13 @@ from omegaconf import DictConfig
 
 
 COMET_META_PARAMS = ['config-name', 'sweep_command', 'sweep_name', 'sweep_project']
+MLFLOW_DEFAULT_TRACKING_URI = 'sqlite:///mlruns.db'
 
 
 wandb = None
 comet_ml = None
+mlflow = None
 experiment_module_name: Optional[str] = None
-
-
-def update_params(config: DictConfig) -> None:
-    """Update experiment parameters in the active logging framework.
-    
-    Args:
-        config: Hydra configuration object containing experiment parameters.
-    """
-    if config.wandb:
-        wandb.config.update(config, allow_val_change=True)
-    elif config.comet_ml:
-        experiment = comet_ml.get_global_experiment()
-        raw_dict_config = omegaconf.OmegaConf.to_container(
-            config, resolve=True, throw_on_missing=True)
-        experiment.log_parameters(raw_dict_config)
-
-
-def get_comet_sweep_id() -> Optional[str]:
-    """Get Comet ML sweep ID from environment variables.
-    
-    Returns:
-        Sweep ID if available, None otherwise.
-    """
-    return os.environ.get('COMET_OPTIMIZER_ID', None)
 
 
 def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[DictConfig]:
@@ -55,9 +34,18 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
     Returns:
         Updated configuration object, or None if no config provided.
     """
-    global wandb, comet_ml, experiment_module_name
+    global wandb, comet_ml, mlflow, experiment_module_name
     
-    if config and config.wandb:
+    if config and config.get('mlflow', False):
+        import mlflow
+        mlflow.set_tracking_uri(config.get('mlflow_tracking_uri', MLFLOW_DEFAULT_TRACKING_URI))
+        mlflow.set_experiment(project)
+        mlflow.set_tag('project', project)
+        raw_dict_config = omegaconf.OmegaConf.to_container(
+            config, resolve=True, throw_on_missing=True)
+        mlflow.log_params(raw_dict_config)
+    
+    if config and config.get('wandb', False):
         import wandb
     
         raw_dict_config = omegaconf.OmegaConf.to_container(
@@ -70,11 +58,7 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
         # config = wandb.config # TODO: Make sure this is still a DictConfig and has the right values
 
     comet_sweep_id = get_comet_sweep_id()
-    if comet_sweep_id or (config and config.comet_ml):
-        # import os
-        # os.environ['COMET_LOGGING_FILE_LEVEL'] = 'DEBUG'
-        # os.environ['COMET_LOGGING_FILE'] = './comet.log'
-
+    if comet_sweep_id or (config and config.get('comet_ml', False)):
         import comet_ml
 
         # Used for capturing log output
@@ -197,17 +181,47 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
     return config
 
 
+def update_params(config: DictConfig) -> None:
+    """Update experiment parameters in the active logging framework.
+    
+    Args:
+        config: Hydra configuration object containing experiment parameters.
+    """
+    if config.get('mlflow', False):
+        raw_dict_config = omegaconf.OmegaConf.to_container(
+            config, resolve=True, throw_on_missing=True)
+        mlflow.log_params(raw_dict_config)
+    if config.get('wandb', False):
+        wandb.config.update(config, allow_val_change=True)
+    elif config.get('comet_ml', False):
+        experiment = comet_ml.get_global_experiment()
+        raw_dict_config = omegaconf.OmegaConf.to_container(
+            config, resolve=True, throw_on_missing=True)
+        experiment.log_parameters(raw_dict_config)
+
+
+def get_comet_sweep_id() -> Optional[str]:
+    """Get Comet ML sweep ID from environment variables.
+    
+    Returns:
+        Sweep ID if available, None otherwise.
+    """
+    return os.environ.get('COMET_OPTIMIZER_ID', None)
+
+
 def import_logger(config: DictConfig) -> None:
     """Import the appropriate logging framework based on configuration.
     
     Args:
         config: Hydra configuration object specifying which logger to use.
     """
-    global wandb, comet_ml
+    global wandb, comet_ml, mlflow
     
-    if config.wandb:
+    if config.get('mlflow', False):
+        import mlflow
+    if config.get('wandb', False):
         import wandb
-    elif config.comet_ml:
+    elif config.get('comet_ml', False):
         import comet_ml
 
 
@@ -221,13 +235,30 @@ def log_metrics(metrics: Dict[str, Union[int, float]], config: DictConfig,
         prefix: Optional prefix to prepend to metric names.
         step: Optional step number for the metrics.
     """
-    if config.wandb:
+    if config.get('mlflow', False):
+        if 'step' in metrics:
+            if step is None:
+                step = metrics['step']
+            else:
+                assert metrics['step'] == step, 'Step mismatch in metrics and explicit step argument!'
+        prefix = prefix + '/' if prefix else ''
+        prepped_metrics = {}
+        for k, v in metrics.items():
+            if k == 'step':
+                continue
+            if isinstance(v, np.ndarray):
+                v = v.tolist()
+            prepped_metrics[f'{prefix}{k}'] = v
+        step = int(step)
+        mlflow.log_metrics(prepped_metrics, step=step)
+    
+    if config.get('wandb', False):
         if step is not None:
             metrics['step'] = step
         prefix = prefix + '/' if prefix else ''
-        wandb.log({f'{prefix}{k}': v for k, v in metrics.items()}) #, step=step)
+        wandb.log({f'{prefix}{k}': v for k, v in metrics.items()})
     
-    if config.comet_ml:
+    if config.get('comet_ml', False):
         if 'step' in metrics:
             if step is None:
                 step = metrics['step']
@@ -249,11 +280,14 @@ def log_images(images: Dict[str, List[np.ndarray]], config: DictConfig,
         step: Optional step number for the images.
     """
     prefix = prefix + '/' if prefix else ''
-    if config.wandb:
+    if config.get('mlflow', False):
+        for name, image in images.items():
+            mlflow.log_image(image, key=f'{prefix}{name}', step=step)
+    if config.get('wandb', False):
         formatted_imgs = {f'{prefix}{k}': [wandb.Image(img) for img in v] \
             for k, v in images.items()}
         wandb.log(formatted_imgs) #, step=step)
-    if config.comet_ml:
+    if config.get('comet_ml', False):
         experiment = comet_ml.get_global_experiment()
         for k, v in images.items():
             for image in v:
@@ -271,10 +305,13 @@ def log_figures(figures: Dict[str, List[Any]], config: DictConfig,
         step: Optional step number for the figures.
     """
     prefix = prefix + '/' if prefix else ''
-    if config.wandb:
+    if config.get('mlflow', False):
+        for name, figure in figures.items():
+            mlflow.log_figure(figure, artifact_file=f'{prefix}{name}.png')
+    if config.get('wandb', False):
         wandb.log({f'{prefix}{k}': [wandb.Image(figure) for figure in v] \
             for k, v in figures.items()}) #, step=step)
-    if config.comet_ml:
+    if config.get('comet_ml', False):
         experiment = comet_ml.get_global_experiment()
         for k, v in figures.items():
             for figure in v:
@@ -292,13 +329,15 @@ def log_videos(videos: Dict[str, List[List[np.ndarray]]], config: DictConfig,
         step: Optional step number for the videos.
     """
     prefix = prefix + '/' if prefix else ''
-    if config.wandb:
+    if config.get('mlflow', False):
+        raise NotImplementedError('Logging videos to MLflow is not supported.')
+    if config.get('wandb', False):
         formatted_vids = {
             f'{prefix}{k}': [wandb.Video(frames, fps=4, format='gif') for frames in v] \
             for k, v in videos.items()
         }
         wandb.log(formatted_vids) #, step=step)
-    if config.comet_ml:
+    if config.get('comet_ml', False):
         experiment = comet_ml.get_global_experiment()
         for k, v in videos.items():
             for frames in v:
@@ -313,9 +352,11 @@ def finish_experiment(config: DictConfig) -> None:
     Args:
         config: Hydra configuration object specifying logging framework.
     """
-    if config.wandb:
+    if config.get('mlflow', False):
+        mlflow.end_run()
+    if config.get('wandb', False):
         wandb.finish()
-    if config.comet_ml:
+    if config.get('comet_ml', False):
         experiment = comet_ml.get_global_experiment()
         experiment.end()
 
@@ -327,8 +368,12 @@ def track_model(model: Any, config: DictConfig) -> None:
         model: The model to track (typically a PyTorch or TensorFlow model).
         config: Hydra configuration object specifying logging framework.
     """
-    if config.wandb:
+    if config.get('mlflow', False):
+        raise NotImplementedError('Tracking models with MLflow is not supported.')
+    if config.get('wandb', False):
         wandb.watch(model)
+    if config.get('comet_ml', False):
+        raise NotImplementedError('Tracking models with Comet ML is not supported.')
 
 
 def log_np_array(arr: np.ndarray, name: str, config: DictConfig) -> None:
@@ -339,7 +384,12 @@ def log_np_array(arr: np.ndarray, name: str, config: DictConfig) -> None:
         name: Name for the array artifact.
         config: Hydra configuration object specifying logging framework.
     """
-    if config.wandb:
+    if config.get('mlflow', False):
+        with tempfile.NamedTemporaryFile() as f:
+            np.save(f, arr)
+            mlflow.log_artifact(f.name, artifact_path=f'{name}.npy')
+    
+    if config.get('wandb', False):
         artifact = wandb.Artifact(name, type='np_array')
         # Generate a temporary file to write the array to
         with tempfile.NamedTemporaryFile() as f:
@@ -347,7 +397,7 @@ def log_np_array(arr: np.ndarray, name: str, config: DictConfig) -> None:
             artifact.add_file(f.name)
             wandb.log_artifact(artifact)
 
-    if config.comet_ml:
+    if config.get('comet_ml', False):
         experiment = comet_ml.get_global_experiment()
 
         # Generate a random string to use as the temporary file name
