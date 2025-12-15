@@ -209,7 +209,7 @@ weight_decay_sweep.yaml (80): 1c05c79e2fba4b279e32adeab32f7604
 baseline_hyper_sweep_v2.yaml (2000): 284157029e304b9999a0f26dc6acbfec
 
 
-sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s bb50e0113d7c402c98a696094715791a
-sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 9197137fde204a0a8af720c0d433dab8
-sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 1c05c79e2fba4b279e32adeab32f7604
-sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 284157029e304b9999a0f26dc6acbfec
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s bb50e0113d7c402c98a696094715791a
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 9197137fde204a0a8af720c0d433dab8
+sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 1c05c79e2fba4b279e32adeab32f7604
+sbatch --array=1-64%16 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 284157029e304b9999a0f26dc6acbfec
