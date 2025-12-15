@@ -1,0 +1,31 @@
+name: autostep
+project: generalization_paper_v4_ns_grad_descent_hyper_sweep
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_v4/ns_grad_descent/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  optimizer.name: idbd
+  optimizer.autostep: true
+
+  optimizer.learning_rate:
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
+    - "${eval:2**0}"
+    - "${eval:2**2}"
+    - "${eval:2**4}"
+    - "${eval:2**6}"
+  
+  optimizer.meta_learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
+  
+
+  seed: [1001, 1002, 1003, 1004, 1005]
