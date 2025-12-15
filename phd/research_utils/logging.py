@@ -24,6 +24,19 @@ mlflow = None
 experiment_module_name: Optional[str] = None
 
 
+def flatten_dict(d, parent_key='', sep='.'):
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            # Recursively flatten nested dictionaries
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            # Add non-dict items
+            items.append((new_key, v))
+    return dict(items)
+
+
 def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[DictConfig]:
     """Initialize experiment logging with W&B or Comet ML.
     
@@ -39,11 +52,13 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
     if config and config.get('mlflow', False):
         import mlflow
         mlflow.set_tracking_uri(config.get('mlflow_tracking_uri', MLFLOW_DEFAULT_TRACKING_URI))
-        mlflow.set_experiment(project)
-        mlflow.set_tag('project', project)
+        if os.environ.get('MLFLOW_RUN_ID') is None:
+            mlflow.set_experiment(project)
+        mlflow.start_run(parent_run_id=os.environ.get('MLFLOW_PARENT_RUN_ID'))
         raw_dict_config = omegaconf.OmegaConf.to_container(
             config, resolve=True, throw_on_missing=True)
-        mlflow.log_params(raw_dict_config)
+        flat_config = flatten_dict(raw_dict_config)
+        mlflow.log_params(flat_config)
     
     if config and config.get('wandb', False):
         import wandb

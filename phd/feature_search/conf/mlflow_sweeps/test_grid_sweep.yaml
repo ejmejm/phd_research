@@ -1,0 +1,23 @@
+experiment: test_experiment
+sweep_name: test_grid_sweep
+optuna_storage: sqlite:///outputs/optuna_sweeps.db
+mlflow_storage: sqlite:///outputs/mlflow_runs.db
+command: python scripts/jax_full_feature_search.py
+algorithm: grid
+
+# sampler:
+#   type: grid
+
+spec:
+  metric: cumulative_loss
+  direction: minimize
+  # retryAssignLimit: 4
+
+parameters:
+  mlflow: true
+  train.total_steps: 20000
+  model.hidden_dim: 5120
+  
+  optimizer.learning_rate: ["${eval:2**-13}", "${eval:2**-10}"]
+
+  seed: [1, 2]

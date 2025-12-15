@@ -493,7 +493,7 @@ def validate_config(cfg: DictConfig):
     assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
 
 
-@hydra.main(config_path='../conf', config_name='full_feature_search')
+@hydra.main(config_path='../conf', config_name='full_feature_search', version_base='1.1')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     jax.config.update('jax_compilation_cache_dir', cfg.jax_jit_cache_dir)

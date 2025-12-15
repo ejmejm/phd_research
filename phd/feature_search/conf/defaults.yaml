@@ -9,11 +9,15 @@ hydra:
     dir: .
 
 seed: null
+
 wandb: false
+
 mlflow: false
 mlflow_tracking_uri: sqlite:///outputs/mlflow_runs.db
+
 comet_ml: false
 comet_ml_workspace: phd-research
+
 project: feature-search # Will appear in logging under this project
 device: cpu # {cpu, cuda}
 jax_jit_cache_dir: /tmp/jax_cache # Directory to cache JIT compiled functions (JAX ONLY)
