@@ -198,7 +198,7 @@ class TestOptimizers:
         current_model = model
         current_optimizer = optimizer
         train_step = jax.jit(self._train_step)
-        for _ in range(100):
+        for _ in range(500):
             current_model, current_optimizer, loss = train_step(
                 current_model, current_optimizer, x_data, y_data
             )
@@ -263,7 +263,8 @@ class TestIDBD:
         
         return loss_grads, output_grads
     
-    def test_idbd_batch_size_equivalence(self):
+    @pytest.mark.parametrize("autostep", [True, False])
+    def test_idbd_batch_size_equivalence(self, autostep):
         """Test that IDBD updates are equivalent for batch_size=1 (4 steps) vs batch_size=4 (1 step)."""
         key = jax.random.PRNGKey(42)
         model_key, data_key = jax.random.split(key)
@@ -280,7 +281,7 @@ class TestIDBD:
         optimizer_config = DictConfig({
             'learning_rate': 0.01,
             'meta_learning_rate': 0.005,
-            'autostep': False,
+            'autostep': autostep,
         })
         
         # Store initial parameters (will be reused)
@@ -348,15 +349,6 @@ class TestIDBD:
         h_changes_bs4 = jax.tree.map(
             lambda new, old: new - old,
             final_state_bs4.h, initial_state_bs4.h)
-        
-        # Compare: mean parameter updates from batch_size=1 (4 steps) should equal 
-        # parameter updates from batch_size=4 (1 step) divided by 4
-        # param_updates_mean_bs4 = jax.tree.map(
-        #     lambda x: x / 4.0, param_updates_bs4)
-        # beta_changes_mean_bs4 = jax.tree.map(
-        #     lambda x: x / 4.0, beta_changes_bs4)
-        # h_changes_mean_bs4 = jax.tree.map(
-        #     lambda x: x / 4.0, h_changes_bs4)
         
         param_updates_mean_bs4 = param_updates_bs4
         beta_changes_mean_bs4 = beta_changes_bs4
