@@ -426,7 +426,7 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
             - New task state
             - Batch data (x, y)
         """
-        accumulators = self.flip_accumulators + self.flip_rate * self._n_flippable
+        accumulators = self.flip_accumulators + self.flip_rate * self._n_flippable * batch_size
         
         new_rng, flip_key, x_key = random.split(self.rng, 3)
 
