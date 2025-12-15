@@ -54,7 +54,7 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
         mlflow.set_tracking_uri(config.get('mlflow_tracking_uri', MLFLOW_DEFAULT_TRACKING_URI))
         if os.environ.get('MLFLOW_RUN_ID') is None:
             mlflow.set_experiment(project)
-        mlflow.start_run(parent_run_id=os.environ.get('MLFLOW_PARENT_RUN_ID'))
+        mlflow.start_run()
         raw_dict_config = omegaconf.OmegaConf.to_container(
             config, resolve=True, throw_on_missing=True)
         flat_config = flatten_dict(raw_dict_config)

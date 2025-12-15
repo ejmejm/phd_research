@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import argparse
 from dataclasses import dataclass
 from functools import partial
+import hashlib
 import logging
 import os
 import signal
@@ -9,6 +10,7 @@ import time
 import subprocess
 from typing import Any, Dict, List, Tuple
 
+from filelock import FileLock
 import mlflow
 from mlflow.tracking import MlflowClient
 import numpy as np
@@ -19,8 +21,13 @@ import optuna
 # - [x] Implement grid sweep from config with run command and parameters
 # - [ ] Implement random sweep from config with run command and parameters
 # - [ ] Implement hyperparameter sensitivity from config with run command and parameters
-# - [ ] Only have a single parent MLFlow run for all trials even when distributed
+# - [x] Only have a single parent MLFlow run for all trials even when distributed
 # - [ ] Better handle failed runs, ideally retrying or just overwritting with the same param set
+# - [ ] Delete failed runs when being replaced
+# - [ ] Change sweep run # that is printed to be the # run in this sweep, not in the whole experiment
+# - [ ] Make a sampler that uses a lock to avoid duplicate runs
+# - [ ] Don't mark parent MLFlow run as complete until all trials are done
+# - [ ] Add an option to delete a sweep, and remove it from both MLFlow and Optuna storages
 
 # 1. Get config from parser that describes the sweep (run command, parameters, potential parent)
 # 2. Create a new local study in optuna with SQLite storage
@@ -38,7 +45,7 @@ import optuna
 
 CONFIG_REQUIRED_FIELDS = [
     'experiment', 'sweep_name', 'command', 'algorithm', 'parameters',
-    'optuna_storage', 'mlflow_storage',
+    'optuna_storage', 'mlflow_storage', 'output_dir',
 ]
 VALID_ALGORITHMS = ['grid']
 MLFLOW_DEFAULT_TRACKING_URI = 'sqlite:///mlruns.db'
@@ -286,19 +293,28 @@ def make_sampler(config: DictConfig, param_specs: Dict[str, ParamSpec]) -> optun
         return optuna.samplers.GridSampler(search_space)
     else:
         raise ValueError(f"Invalid sweep algorithm: {config.algorithm}")
-    
+
+
+def _optuna_study_lock_path(config: DictConfig) -> str:
+    # Compute a unique filename based on (study_name, storage) tuple
+    study_name = f'{config.experiment}/{config.sweep_name}'
+    storage = str(config.optuna_storage)
+    lock_id = hashlib.md5(f'{study_name}:{storage}'.encode('utf-8')).hexdigest()
+    return os.path.join(config.output_dir, f'study_{lock_id}.lock')
 
 
 def init_study(config: DictConfig) -> Tuple[optuna.Study, Dict[str, ParamSpec]]:
     study_name = f'{config.experiment}/{config.sweep_name}'
     param_specs = config_params_to_spec_dict(config)
-    study = optuna.create_study(
-        study_name = study_name,
-        sampler = make_sampler(config, param_specs),
-        storage = config.optuna_storage,
-        direction = config.get('spec', {}).get('direction'),
-        load_if_exists = True,
-    )
+
+    with FileLock(_optuna_study_lock_path(config)):
+        study = optuna.create_study(
+            study_name = study_name,
+            sampler = make_sampler(config, param_specs),
+            storage = config.optuna_storage,
+            direction = config.get('spec', {}).get('direction'),
+            load_if_exists = True,
+        )
     return study, param_specs
 
 
@@ -393,6 +409,39 @@ def run_experiment(
     return 0
 
 
+def start_mlflow_parent_run(client: MlflowClient, config: DictConfig, optuna_study_name: str) -> mlflow.ActiveRun:
+    # Make lock for this study
+    lock_id = hashlib.md5(f'{config.mlflow_storage}:{optuna_study_name}'.encode('utf-8')).hexdigest()
+    lock_path = os.path.join(config.output_dir, f'mlflow_sweep_parent_{lock_id}.lock')
+    
+    with FileLock(lock_path):
+        # First search for a run to get if one already exists
+        print(config.sweep_name, type(config.sweep_name), optuna_study_name, type(optuna_study_name))
+        runs = mlflow.search_runs(
+            experiment_names = [config.experiment],
+            filter_string = f'tags.sweep_name = "{config.sweep_name}" AND tags.optuna_study_name = "{optuna_study_name}"',
+            output_format = 'list',
+        )
+        assert len(runs) <= 1, f"Multiple parent runs found for sweep {config.sweep_name} and study {optuna_study_name}!"
+        
+        # Create a new parent run if one doesn't exist
+        if len(runs) == 0:
+            parent_run = mlflow.start_run(
+                run_name = config.sweep_name,
+                tags = {
+                    'sweep_name': config.sweep_name,
+                    'optuna_study_name': optuna_study_name,
+                },
+            )
+            logger.info(f"Creating new parent MLFlow run: {config.sweep_name}.")
+            return parent_run
+    
+        # Otherwise, return the existing parent run
+        run_id = runs[0].info.run_id
+        logger.info(f"Using existing parent MLFlow run: {run_id}.")
+        return mlflow.start_run(run_id=run_id)
+
+
 def main():
     # Configure logging
     handler = logging.StreamHandler()
@@ -412,28 +461,33 @@ def main():
     
     # Run sweeps
     for config in configs:
+        os.makedirs(config.output_dir, exist_ok=True)
+        
+        # Init Optuna study
+        study, param_specs = init_study(config)
         
         # Setup MLFlow tracking
         logger.info(f"Running sweep: {config.experiment}/{config.sweep_name}")
         mlflow.set_tracking_uri(config.mlflow_storage)
         mlflow_client = MlflowClient(tracking_uri=config.mlflow_storage)
         mlflow.set_experiment(config.experiment)
+        parent_run = start_mlflow_parent_run(mlflow_client, config, study.study_name)
         
-        with mlflow.start_run(tags={'sweep_name': config.sweep_name}):
-            logger.info(f"Created parent MLFlow run: {mlflow.active_run().info.run_id}.")
-            dict_config = OmegaConf.to_container(config, throw_on_missing=True)
-            mlflow.log_params(dict_config)
-            
-            # Initialize and run the Optuna study
-            study, param_specs = init_study(config)
-            run_fn = partial(
-                run_experiment,
-                config = config,
-                param_specs = param_specs,
-                mlflow_client = mlflow_client,
-            )
-            study.optimize(run_fn, n_trials=args.n_trials, n_jobs=args.n_jobs)
-            
+        dict_config = OmegaConf.to_container(config, throw_on_missing=True)
+        mlflow.log_params(dict_config)
+        
+        # Run the Optuna study
+        run_fn = partial(
+            run_experiment,
+            config = config,
+            param_specs = param_specs,
+            mlflow_client = mlflow_client,
+        )
+        study.optimize(run_fn, n_trials=args.n_trials, n_jobs=args.n_jobs)
+        
+        # TODO: Don't mark run as complete if there are more trials remaining.
+        #       Check if all combinations have successful completions, otherwise pass different status arguments to end_run.
+        mlflow.end_run()
         logger.info(f"Sweep {config.sweep_name} completed.")
 
 
