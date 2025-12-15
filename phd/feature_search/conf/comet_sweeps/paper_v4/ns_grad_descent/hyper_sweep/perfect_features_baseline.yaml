@@ -1,0 +1,33 @@
+name: perfect_features_autostep
+project: generalization_paper_v4_ns_grad_descent_hyper_sweep
+command: python scripts/jax_perfect_features_baseline.py --config-name=comet_sweeps/paper_v4/ns_grad_descent/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.hidden_dim: "${task.hidden_dim}"
+
+  optimizer.name: idbd
+  optimizer.autostep: true
+
+  optimizer.learning_rate:
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
+    - "${eval:2**0}"
+    - "${eval:2**2}"
+  
+  optimizer.meta_learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+    - "${eval:2**-5}"
+    - "${eval:2**-3}"
+    - "${eval:2**-1}"
+  
+  seed: [1001, 1002, 1003, 1004, 1005]
