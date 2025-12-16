@@ -469,15 +469,6 @@ def run_experiment(
         all_metrics.append(metrics)
         log_metrics(metrics, cfg, step=train_state.step) # Consider making logging async
         
-        # if train_state.step % 2_000_000 == 0:
-        #     original_replace_rate = train_state.cbp_tracker.replace_rate
-        #     train_state = eqx.tree_at(
-        #         lambda x: x.cbp_tracker.replace_rate,
-        #         train_state,
-        #         train_state.cbp_tracker.replace_rate * 0.5,
-        #     )
-        #     print(f"Replacement rate: {original_replace_rate:.2e} -> {train_state.cbp_tracker.replace_rate:.2e}")
-        
         if pbar is not None:
             pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
             pbar.update(sequence_length)

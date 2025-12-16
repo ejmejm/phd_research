@@ -42,7 +42,7 @@ def optax_idbd(
         weight_decay: Weight decay (default: 0.0)
         version: Version of IDBD to use (default: squared_inputs)
         autostep: Whether to use autostep (default: False)
-        tau: Tau parameter for autostep (default: 1e4)\
+        tau: Tau parameter for autostep (default: 1e4)
             
     Returns:
         A :class:`optax.GradientTransformation` object.
