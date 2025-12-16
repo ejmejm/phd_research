@@ -1,5 +1,5 @@
 name: perfect_features_autostep
-project: generalization_paper_v4_ns_grad_descent_hyper_sweep
+project: generalization_paper_v4_ns_grad_descent_hyper_sweep_tmp
 command: python scripts/jax_perfect_features_baseline.py --config-name=comet_sweeps/paper_v4/ns_grad_descent/base_config.yaml
 algorithm: grid
 
@@ -10,7 +10,9 @@ spec:
 
 parameters:
   model.hidden_dim: "${task.hidden_dim}"
+  model.n_frozen_layers: 1
 
+  train.log_optimizer_stats: true
   optimizer.name: idbd
   optimizer.autostep: true
 

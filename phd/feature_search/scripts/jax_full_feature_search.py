@@ -250,7 +250,7 @@ def train_step(
         output_grads = jax.grad(
             lambda m, x: jax.vmap(partial(
                 m, set_first_element_to_one=use_bias, key=model_key
-            ))(x)[0].mean(axis=0).sum())(model, inputs) # TODO: Divide the results of this by the batch size (or maybe mean instead of sum?)
+            ))(x)[0].mean(axis=0).sum())(model, inputs)
         updates, optimizer = optimizer.with_update((grads, output_grads), model)
     else:
         updates, optimizer = optimizer.with_update(grads, model)

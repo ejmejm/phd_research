@@ -71,3 +71,13 @@ perfect_features_baseline.yaml (180): a67f4414bee04b3ea56b717558da0589
 sbatch --array=1-12 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=00:30:00 launch_comet_agent.sbatch -s a67f4414bee04b3ea56b717558da0589
 
 sbatch --array=1-10 --gpus-per-node=1 --cpus-per-task=2 --mem=8G --time=00:30:00 launch_comet_agent.sbatch -s a67f4414bee04b3ea56b717558da0589
+
+
+### Round 6 ###
+
+
+===== Created sweeps with ids =====
+autostep.yaml (150): 95e3a3fa98534cc6a78daf51b3bb26fe
+perfect_features_baseline.yaml (180): c21d5936edf6431db58d816be88b947b
+sgd.yaml (35): 0352ca96d7da48bd8a5b47f369c87e47
+sgd_layerwise_step_size.yaml (210): 156ade695c0e47d7baf5b3a49562212a
