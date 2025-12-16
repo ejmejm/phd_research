@@ -40,12 +40,13 @@ logger = logging.getLogger(__name__)
 
 
 class TrainState(OriginalTrainState):
-    learning_feature_idx: Int[Array, '']
+    learning_feature_idxs: Int[Array, 'n_parallel']
     learning_layer_idx: Int[Array, '']
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.learning_feature_idx = jnp.array(0)
+        n_parallel = self.cfg.train.get('n_parallel_learning_features', 1)
+        self.learning_feature_idxs = jnp.arange(n_parallel)
         self.learning_layer_idx = jnp.array(0)
 
 
@@ -57,7 +58,7 @@ def filter_grads_by_feature_and_layer(grads, train_state):
     feature_switch_interval = train_state.cfg.train.get('learning_feature_switch_interval', -1)
     
     learning_layer_idx = train_state.learning_layer_idx
-    learning_feature_idx = train_state.learning_feature_idx
+    learning_feature_idxs = train_state.learning_feature_idxs  # Shape: [n_parallel]
     
     # If no filtering is needed, return gradients as-is
     if feature_switch_interval == -1 and layer_switch_interval == -1:
@@ -78,14 +79,15 @@ def filter_grads_by_feature_and_layer(grads, train_state):
     
     # Apply feature mask if specified using numerical masking
     if feature_switch_interval != -1:
-        # Mask layer 0 weights: only keep row at learning_feature_idx
+        # Mask layer 0 weights: only keep rows at learning_feature_idxs
         layer0_weight = grads.layers[0].weight
-        feature_mask_0 = (jnp.arange(layer0_weight.shape[0]) == learning_feature_idx)[:, None]
+        # Check if each feature index is in the learning set
+        feature_mask_0 = jnp.isin(jnp.arange(layer0_weight.shape[0]), learning_feature_idxs)[:, None]
         masked_weight_0 = jnp.where(feature_mask_0, layer0_weight, jnp.zeros_like(layer0_weight))
         
-        # Mask layer 1 weights: only keep column at learning_feature_idx
+        # Mask layer 1 weights: only keep columns at learning_feature_idxs
         layer1_weight = grads.layers[1].weight
-        feature_mask_1 = (jnp.arange(layer1_weight.shape[1]) == learning_feature_idx)[None, :]
+        feature_mask_1 = jnp.isin(jnp.arange(layer1_weight.shape[1]), learning_feature_idxs)[None, :]
         masked_weight_1 = jnp.where(feature_mask_1, layer1_weight, jnp.zeros_like(layer1_weight))
         
         # Update the grads with masked weights
@@ -103,18 +105,20 @@ def maybe_update_learning_indices(
     cfg = train_state.cfg
     feature_switch_interval = cfg.train.get('learning_feature_switch_interval', -1)
     layer_switch_interval = cfg.train.get('learning_layer_switch_interval', -1)
+    n_parallel = cfg.train.get('n_parallel_learning_features', 1)
 
     updated_state = train_state
 
     if feature_switch_interval > 0:
         n_features = train_state.model.layers[0].weight.shape[0]
-        new_feature_idx = jax.random.randint(feature_idx_key, (1,), 0, n_features)[0]
-        new_feature_idx = jnp.where(
+        # Sample n_parallel unique feature indices using random permutation
+        new_feature_idxs = jax.random.permutation(feature_idx_key, n_features)[:n_parallel]
+        new_feature_idxs = jnp.where(
             train_state.step % feature_switch_interval == 0,
-            new_feature_idx,
-            train_state.learning_feature_idx,
+            new_feature_idxs,
+            train_state.learning_feature_idxs,
         )
-        updated_state = tree_replace(updated_state, learning_feature_idx=new_feature_idx)
+        updated_state = tree_replace(updated_state, learning_feature_idxs=new_feature_idxs)
 
     if layer_switch_interval > 0:
         new_layer_idx = 1 - train_state.learning_layer_idx
@@ -131,7 +135,7 @@ def maybe_update_learning_indices(
 def log_stuff(train_state, grads):
     jax.debug.print('\n==================================')
     
-    jax.debug.print('Feature idx: {x} | Layer idx: {y}\n', x=train_state.learning_feature_idx, y=train_state.learning_layer_idx, ordered=True)
+    jax.debug.print('Feature idxs: {x} | Layer idx: {y}\n', x=train_state.learning_feature_idxs, y=train_state.learning_layer_idx, ordered=True)
     
     jax.debug.print('Output grads: {x}', x=grads.layers[1].weight.squeeze(0), ordered=True)
     jax.debug.print('Input grads: {x}\n', x=jnp.abs(grads.layers[0].weight).mean(axis=1), ordered=True)
