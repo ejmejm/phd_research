@@ -21,6 +21,7 @@ task:
   flip_rate: ${eval:2**-12}
   n_features: 10
   hidden_dim: 10
+  n_stationary_layers: 1
 
 feature_recycling:
   recycle_rate: 0.0

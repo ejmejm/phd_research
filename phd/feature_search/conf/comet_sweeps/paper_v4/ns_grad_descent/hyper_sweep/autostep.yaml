@@ -9,6 +9,9 @@ spec:
   retryAssignLimit: 4
 
 parameters:
+  train.log_optimizer_stats: true
+  train.log_model_stats: true
+
   optimizer.name: idbd
   optimizer.autostep: true
 
