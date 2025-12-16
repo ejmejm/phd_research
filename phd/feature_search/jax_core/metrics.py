@@ -165,17 +165,23 @@ def compute_optimizer_stats(
     perfect_match_mask = best_match_diffs < 1e-7
     imperfect_match_mask = ~perfect_match_mask
     
+    # Get output layer step-sizes
     output_weights = model.layers[1].weight.squeeze(0) # (learner_dim,)
-    betas = jax.tree.leaves(optimizer.state.beta)[-1].squeeze(0)
-    step_sizes = jnp.exp(betas) # (learner_dim,)
-    assert step_sizes.shape == output_weights.shape, "Step sizes and output weights should have the same shape!"
+    output_betas = jax.tree.leaves(optimizer.state.beta)[-1].squeeze(0)
+    output_step_sizes = jnp.exp(output_betas) # (learner_dim,)
+    assert output_step_sizes.shape == output_weights.shape, "Step sizes and output weights should have the same shape!"
+    
+    # Get input layer step-sizes
+    input_betas = jax.tree.leaves(optimizer.state.beta)[0]
+    input_step_sizes = jnp.exp(input_betas) # (learner_dim, in_features)
+    input_step_sizes = input_step_sizes.mean(axis=1) # (learner_dim,)
     
     for prefix, mask in [('perfect_', perfect_match_mask), ('imperfect_', imperfect_match_mask)]:
         n_features = mask.sum()
-        masked_step_sizes = step_sizes * mask
-        metrics[f'optimizer/{prefix}mean_step_size'] = jnp.sum(masked_step_sizes) / n_features
-        metrics[f'optimizer/{prefix}max_step_size'] = jnp.max(masked_step_sizes)
-        metrics[f'optimizer/{prefix}min_step_size'] = jnp.min(jnp.inf * ~mask + masked_step_sizes)
+        masked_output_step_sizes = output_step_sizes * mask
+        metrics[f'optimizer/{prefix}mean_output_step_size'] = jnp.sum(masked_output_step_sizes) / n_features
+        masked_input_step_sizes = input_step_sizes * mask
+        metrics[f'optimizer/{prefix}mean_input_step_size'] = jnp.sum(masked_input_step_sizes) / n_features
         
     return metrics
 
