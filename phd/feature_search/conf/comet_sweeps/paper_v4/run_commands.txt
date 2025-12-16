@@ -77,7 +77,15 @@ sbatch --array=1-10 --gpus-per-node=1 --cpus-per-task=2 --mem=8G --time=00:30:00
 
 
 ===== Created sweeps with ids =====
-autostep.yaml (150): 95e3a3fa98534cc6a78daf51b3bb26fe
-perfect_features_baseline.yaml (180): c21d5936edf6431db58d816be88b947b
-sgd.yaml (35): 0352ca96d7da48bd8a5b47f369c87e47
-sgd_layerwise_step_size.yaml (210): 156ade695c0e47d7baf5b3a49562212a
+autostep.yaml (150): 2a7ce56300fe4cfe984f4e802f11e21d
+perfect_features_baseline.yaml (180): 8b52be5e102448598e27c75a757160c6
+sgd.yaml (35): 05ac7ccdab6042819cd94ab8143ac60f
+sgd_layerwise_step_size.yaml (210): aba78049b6d845df9037246a106c4a06
+
+50 experiments per 6 hour job
+
+sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s 2a7ce56300fe4cfe984f4e802f11e21d
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s 8b52be5e102448598e27c75a757160c6
+sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s 05ac7ccdab6042819cd94ab8143ac60f
+sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s aba78049b6d845df9037246a106c4a06
+
