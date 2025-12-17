@@ -121,12 +121,15 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
             "Non-binary weight initialization for learner input weights, which is not what is "
             "used in the Mahmood and Sutton (2013) paper.",
         )
-    assert cfg.task.weight_init == 'binary', \
-        "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)"
-    assert cfg.model.activation == 'ltu', \
-        "LTU activations are required for reproducing Mahmood and Sutton (2013)"
-    assert cfg.task.activation == 'ltu', \
-        "LTU activations are required for reproducing Mahmood and Sutton (2013)"
+    if cfg.task.weight_init != 'binary':
+        logger.warning(
+            "Binary weight initialization is required for reproducing Mahmood and Sutton (2013)")
+    if cfg.model.activation != 'ltu':
+        logger.warning(
+            "LTU activations are required for reproducing Mahmood and Sutton (2013)")
+    if cfg.task.activation != 'ltu':
+        logger.warning(
+            "LTU activations are required for reproducing Mahmood and Sutton (2013)")
     if cbp_tracker.incoming_weight_init != 'binary':
         logger.warning(
             "Non-binary weight initialization used in feature search weight init, which is not what is "
@@ -136,14 +139,15 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
         "Log frequency must be a multiple of prune frequency!"
     
     # Init target output weights to kaiming uniform and predictor output weights to zero
-    task_init_key = rng_from_string(rng, 'task_init_key')
-    task.weights[-1] = jax.random.uniform(
-        task_init_key,
-        task.weights[-1].shape,
-        minval = -jnp.sqrt(6 / task.weights[-1].shape[0]),
-        maxval = jnp.sqrt(6 / task.weights[-1].shape[0]),
-    )
-    model = eqx.tree_at(lambda m: m.layers[-1].weight, model, jnp.zeros_like(model.layers[-1].weight))
+    if type(task) == NonlinearGEOFFTask:
+        task_init_key = rng_from_string(rng, 'task_init_key')
+        task.weights[-1] = jax.random.uniform(
+            task_init_key,
+            task.weights[-1].shape,
+            minval = -jnp.sqrt(6 / task.weights[-1].shape[0]),
+            maxval = jnp.sqrt(6 / task.weights[-1].shape[0]),
+        )
+        model = eqx.tree_at(lambda m: m.layers[-1].weight, model, jnp.zeros_like(model.layers[-1].weight))
     
     # Note: LTU thresholds are all set to 0.0 by default
 
