@@ -413,7 +413,9 @@ def compute_baseline_loss(
 
 
 def log_task_output_weights(task: NonlinearGEOFFTask, cfg: DictConfig):
-    min_idx = jnp.abs(task.weights[-1]).argmin()
+    abs_weights = jnp.abs(task.weights[-1])
+    min_idx_flat = abs_weights.argmin()
+    min_idx = jnp.unravel_index(min_idx_flat, abs_weights.shape)
     min_output_weight = task.weights[-1][min_idx].item()
     log_metrics({'min_output_weight': min_output_weight}, cfg, step=0)
     weights = np.asarray(task.weights[-1]).squeeze()
