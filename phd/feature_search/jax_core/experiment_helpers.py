@@ -140,7 +140,7 @@ def prepare_optimizer(
         
     elif optimizer_name == 'idbd':
         kwargs = _extract_kwargs(
-            ['learning_rate', 'meta_learning_rate', 'weight_decay', 'autostep', 'step_size_decay'],                     
+            ['learning_rate', 'meta_learning_rate', 'weight_decay', 'autostep', 'step_size_decay', 'version'],                     
             {'version': 'prediction_grads', 'weight_decay': 0, 'autostep': True, 'step_size_decay': 0.0},
         )
         kwargs['init_lr'] = kwargs.pop('learning_rate')
