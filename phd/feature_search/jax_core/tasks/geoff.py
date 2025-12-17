@@ -416,7 +416,7 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         inputs += jnp.expand_dims(self.input_subspace_centers, 0)
         inputs = jnp.clip(inputs, self.input_bounds[0], self.input_bounds[1])
         return inputs
-
+    
     def generate_batch(self, batch_size: int = 1) -> Tuple[eqx.Module, Tuple]:
         """Generates a single batch of data.
         
@@ -471,3 +471,46 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         
         # Return updated state and the batch
         return new_task_state, (x, y)
+
+
+class BinaryRegressionTask(InputChangingGEOFFTask):
+    """Input changing version of GEOFF task with configurable depth and activation.
+    
+    This implements the JAX version of the GEOFF task for use with Equinox.
+    Model is structured as an Equinox module with separate static and non-static
+    parameters as needed.
+    """
+    output_thresholds: Float[Array, 'n_outputs'] # Thresholds for each output dimension
+
+    def __init__(
+        self,
+        n_features: int,
+        flip_rate: float = 0.0, # Percentage of weights to flip per step
+        n_layers: int = 2,
+        n_stationary_layers: int = 0,
+        hidden_dim: int = 64,
+        n_outputs: int = 1,
+        weight_scale: float = 1.0,
+        sparsity: float = 0.0,
+        input_bounds: Tuple[float, float] = (-1.0, 1.0),
+        input_subspace_range: float = 0.1,
+        input_change_freq: Optional[int] = None, # Int unless inf
+        max_input_center_change: float = 0.1,
+        seed: Optional[int] = None,
+    ):
+        super().__init__(
+            n_features, flip_rate, n_layers, n_stationary_layers, hidden_dim,
+            n_outputs, weight_scale, 'ltu', sparsity, 'binary', input_bounds,
+            input_subspace_range, input_change_freq, max_input_center_change, seed,
+        )
+        self.rng, output_threshold_key = jax.random.split(self.rng, 2)
+        self.output_thresholds = self._compute_output_thresholds(output_threshold_key)
+    
+    def _compute_output_thresholds(self, rng: jax.random.PRNGKey, n_samples: int = 100):
+        inputs = jax.random.uniform(
+            rng, (n_samples, self.n_features), jnp.float32,
+            self.input_bounds[0], self.input_bounds[1],
+        )
+        outputs = jax.vmap(self._forward)(inputs)
+        return jnp.mean(outputs, axis=0)
+    
