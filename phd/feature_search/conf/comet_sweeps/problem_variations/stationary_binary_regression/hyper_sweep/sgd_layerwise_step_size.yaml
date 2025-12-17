@@ -1,0 +1,35 @@
+name: sgd_layerwise_step_size
+project: stationary_binary_regression
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/problem_variations/stationary_binary_regression/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.hidden_dim: 2000
+
+  optimizer.name: sgd
+
+  optimizer.name: sgd
+  optimizer.learning_rate:
+    - "${eval:2**-22}"
+    - "${eval:2**-18}"
+    - "${eval:2**-14}"
+    - "${eval:2**-10}"
+
+  representation_optimizer.name: sgd
+  representation_optimizer.learning_rate:
+    - "${eval:2**-14}"
+    - "${eval:2**-10}"
+    - "${eval:2**-6}"
+    - "${eval:2**-2}"
+    - "${eval:2**2}"
+    - "${eval:2**6}"
+  
+  model.n_layers: [2, 3]
+  model.activation: [ltu, swish]
+
+  seed: [2512171, 2512172, 2512173, 2512174, 2512175]
