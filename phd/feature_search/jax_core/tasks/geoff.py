@@ -405,16 +405,21 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         self.step = jnp.array(0, dtype=jnp.int32)
     
     def _compute_updated_input_subspace_centers(self, rng: random.PRNGKey) -> Float[Array, 'n_features']:
-        min_bounds = jnp.maximum(self.input_subspace_centers - self.max_input_center_change, self.input_bounds[0])
-        max_bounds = jnp.minimum(self.input_subspace_centers + self.max_input_center_change, self.input_bounds[1])
-        new_centers = jax.random.uniform(rng, (self.n_features,), jnp.float32, min_bounds, max_bounds)
+        min_change = -self.max_input_center_change
+        max_change = self.max_input_center_change
+        center_shifts = jax.random.uniform(rng, (self.n_features,), jnp.float32, min_change, max_change)
+        new_centers = self.input_subspace_centers + center_shifts
+        min_bound, max_bound = self.input_bounds
+        range_size = max_bound - min_bound
+        new_centers = min_bound + jnp.mod(new_centers - min_bound, range_size)
         return new_centers
     
     def _sample_inputs(self, rng: random.PRNGKey, batch_size: int = 1) -> Tuple[Float[Array, 'batch_size n_features']]:
         bound = self.input_subspace_range / 2.0
         inputs = jax.random.uniform(rng, (batch_size, self.n_features), jnp.float32, -bound, bound)
         inputs += jnp.expand_dims(self.input_subspace_centers, 0)
-        inputs = jnp.clip(inputs, self.input_bounds[0], self.input_bounds[1])
+        min_val, max_val = self.input_bounds
+        inputs = min_val + jnp.mod(inputs - min_val, max_val - min_val)
         return inputs
     
     def generate_batch(self, batch_size: int = 1) -> Tuple[eqx.Module, Tuple]:
@@ -506,11 +511,26 @@ class BinaryRegressionTask(InputChangingGEOFFTask):
         self.rng, output_threshold_key = jax.random.split(self.rng, 2)
         self.output_thresholds = self._compute_output_thresholds(output_threshold_key)
     
-    def _compute_output_thresholds(self, rng: jax.random.PRNGKey, n_samples: int = 100):
+    def _compute_output_thresholds(self, rng: jax.random.PRNGKey, n_samples: int = 1000):
         inputs = jax.random.uniform(
             rng, (n_samples, self.n_features), jnp.float32,
             self.input_bounds[0], self.input_bounds[1],
         )
         outputs = jax.vmap(self._forward)(inputs)
         return jnp.mean(outputs, axis=0)
+    
+    def generate_batch(self, batch_size: int = 1) -> Tuple[eqx.Module, Tuple]:
+        """Generates a single batch of data.
+        
+        Args:
+            batch_size: Size of batch to generate
+            
+        Returns:
+            Tuple containing:
+            - New task state
+            - Batch data (x, y)
+        """
+        new_task_state, (x, y) = super().generate_batch(batch_size)
+        y = jnp.where(y > self.output_thresholds, 1, 0)
+        return new_task_state, (x, y)
     
