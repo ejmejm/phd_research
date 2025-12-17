@@ -27,6 +27,7 @@ class NonlinearGEOFFTask(eqx.Module):
     
     # Static parameters (configuration)
     n_features: int = eqx.field(static=True)
+    n_outputs: int = eqx.field(static=True)
     n_layers: int = eqx.field(static=True)
     n_stationary_layers: int = eqx.field(static=True)
     hidden_dim: int = eqx.field(static=True)
@@ -52,6 +53,7 @@ class NonlinearGEOFFTask(eqx.Module):
         n_layers: int = 2,
         n_stationary_layers: int = 0,
         hidden_dim: int = 64,
+        n_outputs: int = 1,
         weight_scale: float = 1.0,
         activation: str = 'relu',
         sparsity: float = 0.0,
@@ -67,8 +69,9 @@ class NonlinearGEOFFTask(eqx.Module):
             n_layers: Number of layers in the target network (1 = linear)
             n_stationary_layers: Number of layers that do not flip
             hidden_dim: Hidden dimension size for intermediate layers
+            n_outputs: Number of output dimensions
             weight_scale: Scale factor for weights (weights will be ±scale)
-            activation: Activation function ('relu', 'tanh', or 'sigmoid')
+            activation: Activation function ('ltu', 'relu', 'tanh', or 'sigmoid')
             sparsity: Percentage of weights (other than the last layer) to set to zero
             weight_init: Weight initialization method ('binary' or 'kaiming_uniform')
             input_mean_range: Range for random input mean values
@@ -81,6 +84,7 @@ class NonlinearGEOFFTask(eqx.Module):
         
         # Store static configuration
         self.n_features = n_features
+        self.n_outputs = n_outputs
         self.n_layers = n_layers
         self.n_stationary_layers = n_stationary_layers
         self.hidden_dim = hidden_dim
@@ -122,6 +126,7 @@ class NonlinearGEOFFTask(eqx.Module):
             n_layers = n_layers,
             n_features = n_features,
             hidden_dim = hidden_dim,
+            n_outputs = n_outputs,
             flip_rate = flip_rate,
             sparsity = sparsity,
             key = network_key,
@@ -130,11 +135,11 @@ class NonlinearGEOFFTask(eqx.Module):
         n_flippable = []
         for i in range(len(self.flip_accumulators)):
             if self.n_layers == 1:
-                n_flippable = self.n_features
+                n_flippable = self.n_features * self.n_outputs
             elif i == 0:
                 n_flippable = self.n_features * self.hidden_dim
             elif i == len(self.weights) - 1:
-                n_flippable = self.hidden_dim
+                n_flippable = self.hidden_dim * self.n_outputs
             else:
                 n_flippable = self.hidden_dim * self.hidden_dim
         self._n_flippable = jnp.array(n_flippable, dtype=jnp.int32)
@@ -142,16 +147,16 @@ class NonlinearGEOFFTask(eqx.Module):
         self.rng = key
         
     def _initialize_network(
-        self, n_layers: int, n_features: int, hidden_dim: int,
+        self, n_layers: int, n_features: int, hidden_dim: int, n_outputs: int,
         flip_rate: float, sparsity: float, key: random.PRNGKey,
     ):
         # Initialize network weights and accumulators based on layers configuration
         if n_layers == 1:
             # Single linear layer
             weight_key, key = random.split(key)
-            layer_weights = self._initialize_weights(weight_key, n_features, 1)
+            layer_weights = self._initialize_weights(weight_key, n_features, n_outputs)
             self.weights = [layer_weights]
-            flip_accumulators = [flip_rate * n_features]
+            flip_accumulators = [flip_rate * n_features * n_outputs]
         else:
             # Multiple layers with hidden dimensions
             # We'll use JAX's functional approach to build the weights list
@@ -161,7 +166,7 @@ class NonlinearGEOFFTask(eqx.Module):
             
             # Prepare dimensions for each layer
             in_dims = [n_features] + [hidden_dim] * (n_layers - 1)
-            out_dims = [hidden_dim] * (n_layers - 1) + [1]
+            out_dims = [hidden_dim] * (n_layers - 1) + [n_outputs]
             
             # Initialize weights for each layer
             all_weights = []
@@ -199,7 +204,7 @@ class NonlinearGEOFFTask(eqx.Module):
         else:  # kaiming_uniform
             # Using He initialization (kaiming)
             limit = jnp.sqrt(6 / in_features)  # He/kaiming initialization
-            weights = random.uniform(key, (in_features, out_features), -limit, limit)
+            weights = random.uniform(key, (in_features, out_features), jnp.float32, -limit, limit)
             
         return weights * self.weight_scale
     
@@ -350,6 +355,7 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         n_layers: int = 2,
         n_stationary_layers: int = 0,
         hidden_dim: int = 64,
+        n_outputs: int = 1,
         weight_scale: float = 1.0,
         activation: str = 'relu',
         sparsity: float = 0.0,
@@ -367,8 +373,9 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
             n_layers: Number of layers in the target network (1 = linear)
             n_stationary_layers: Number of layers that do not flip
             hidden_dim: Hidden dimension size for intermediate layers
+            n_outputs: Number of output dimensions
             weight_scale: Scale factor for weights (weights will be ±scale)
-            activation: Activation function ('relu', 'tanh', or 'sigmoid')
+            activation: Activation function ('ltu', 'relu', 'tanh', or 'sigmoid')
             sparsity: Percentage of weights (other than the last layer) to set to zero
             weight_init: Weight initialization method ('binary' or 'kaiming_uniform')
             input_bounds: Overall bounds of the input space
@@ -379,7 +386,7 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         """
         super().__init__(
             n_features, flip_rate, n_layers, n_stationary_layers, hidden_dim,
-            weight_scale, activation, sparsity, weight_init, (0, 0), (1, 1), seed,
+            n_outputs, weight_scale, activation, sparsity, weight_init, (0, 0), (1, 1), seed,
         )
         self.rng, input_distrib_key = random.split(self.rng, 2)
         
@@ -409,12 +416,7 @@ class InputChangingGEOFFTask(NonlinearGEOFFTask):
         inputs += jnp.expand_dims(self.input_subspace_centers, 0)
         inputs = jnp.clip(inputs, self.input_bounds[0], self.input_bounds[1])
         return inputs
-    
-    def _forward(self, x: jax.Array) -> jax.Array:
-        # Call parent forward implementation then add bias
-        y = super()._forward(x)
-        return y + self.bias
-    
+
     def generate_batch(self, batch_size: int = 1) -> Tuple[eqx.Module, Tuple]:
         """Generates a single batch of data.
         
