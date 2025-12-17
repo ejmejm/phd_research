@@ -10,7 +10,7 @@ spec:
 
 parameters:
   device: cuda
-  jax_jit_cache_dir: "$HOME/scratch/jax_cache"
+  jax_jit_cache_dir: ${oc.env:HOME}/scratch/jax_cache
   feature_recycling.prune_frequency: 4
   train.log_freq: 4000
   train.log_utility_stats: false

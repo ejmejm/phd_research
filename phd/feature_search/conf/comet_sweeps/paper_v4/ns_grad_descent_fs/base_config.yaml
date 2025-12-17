@@ -6,7 +6,7 @@ defaults:
 
 comet_ml: true
 device: cuda
-jax_jit_cache_dir: "$HOME/scratch/jax_cache"
+jax_jit_cache_dir: ${oc.env:HOME}/scratch/jax_cache
 
 model:
   use_bias: false
