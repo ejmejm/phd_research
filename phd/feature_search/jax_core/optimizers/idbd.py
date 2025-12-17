@@ -28,6 +28,7 @@ def optax_idbd(
     step_size_decay: float = 0.0,
     autostep: bool = False,
     tau: float = 1e4,
+    version: str = 'prediction_grads', # {prediction_grads, loss_grads}
 ) -> base.GradientTransformation:
     """Incremental Delta-Bar-Delta optimizer.
     
@@ -86,7 +87,11 @@ def optax_idbd(
         loss_grads, prediction_grads = updates
         init_beta, beta, h, v = state
         
-        h_decay_term = jax.tree.map(jnp.square, prediction_grads)
+        # Try square of loss grads version of this as fisher approximation of hessian
+        if version == 'loss_grads':
+            h_decay_term = jax.tree.map(jnp.square, loss_grads)
+        elif version == 'prediction_grads':
+            h_decay_term = jax.tree.map(jnp.square, prediction_grads)
         
         if autostep:
             def _autostep_update(beta, h, v, loss_grads, h_decay_term):
