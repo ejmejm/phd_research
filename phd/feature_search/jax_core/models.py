@@ -65,6 +65,7 @@ ACTIVATION_MAP = {
     'tanh': jax.nn.tanh,
     'sigmoid': jax.nn.sigmoid,
     'ltu': ltu,
+    'swish': jax.nn.swish,
 }
 
 
