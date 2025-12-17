@@ -44,7 +44,7 @@ train:
 
 optimizer:
   name: idbd
-  version: squared_grads
+  version: prediction_grads
   autostep: true
   learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
   meta_learning_rate: 0.005

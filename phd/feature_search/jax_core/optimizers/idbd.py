@@ -51,6 +51,7 @@ def optax_idbd(
 
     def init_fn(params):
         assert autostep or step_size_decay == 0.0, "Step size decay is only supported with autostep!"
+        assert version in ['prediction_grads', 'loss_grads'], f"Invalid IDBD version: {version}!"
         
         if step_size_decay != 0.0:
             raise NotImplementedError("Step-size decay is not implemented with JAX!")
@@ -142,5 +143,84 @@ def optax_idbd(
         state = IDBDState(init_beta=init_beta, beta=beta, h=h, v=v)
         
         return param_updates, state
+
+    return base.GradientTransformation(init_fn, update_fn)
+
+
+def categorical_optax_idbd(
+    meta_lr: float = 0.005,
+    init_lr: float = 0.01,
+    weight_decay: float = 0.0,
+    autostep: bool = False,
+    tau: float = 1e4,
+) -> base.GradientTransformation:
+    """
+    IDBD for softmax + categorical cross-entropy with linear logits.
+    
+    Expects updates = (loss_grads, logit_grads, probs)
+    where:
+        loss_grads  = ∂ℓ/∂w
+        logit_grads = ∂z/∂w
+        probs       = softmax(z)
+    """
+
+    def init_fn(params):
+        init_beta = jnp.log(init_lr)
+        beta = jax.tree.map(lambda x: jnp.full_like(x, init_beta), params)
+        h = jax.tree.map(jnp.zeros_like, params)
+        v = jax.tree.map(jnp.zeros_like, params) if autostep else None
+        return IDBDState(init_beta=init_beta, beta=beta, h=h, v=v)
+
+    def update_fn(updates, state, params):
+        loss_grads, logit_grads, probs = updates
+        beta, h, v = state.beta, state.h, state.v
+
+        alpha = jax.tree.map(jnp.exp, beta)
+
+        # --- curvature term: exact softmax GN diagonal ---
+        h_decay_term = jax.tree.map(
+            lambda dz, p: jnp.square(dz) * p * (1.0 - p),
+            logit_grads,
+            probs,
+        )
+
+        # --- meta update ---
+        if autostep:
+            def _autostep(beta, h, v, g, d):
+                alpha = jnp.exp(beta)
+                v = jnp.maximum(
+                    jnp.abs(h * g),
+                    v + (alpha / tau) * d * (jnp.abs(h * g) - v),
+                )
+                new_alpha = alpha * jnp.exp(meta_lr * h * g / v)
+                alpha = jnp.where(v > 0, new_alpha, alpha)
+                beta = jnp.log(alpha)
+                return beta, v
+
+            beta, v = jax.tree.map(_autostep, beta, h, v, loss_grads, h_decay_term)
+            alpha = jax.tree.map(jnp.exp, beta)
+
+        else:
+            beta = jax.tree.map(
+                lambda b, g, h: b + meta_lr * g * h,
+                beta, loss_grads, h,
+            )
+            alpha = jax.tree.map(jnp.exp, beta)
+
+        # --- h-trace update (IDBD core equation) ---
+        h = jax.tree.map(
+            lambda h, a, g, d: h * jnp.clip(1 - a * d, 0.0) + a * g,
+            h, alpha, loss_grads, h_decay_term,
+        )
+
+        # --- parameter update ---
+        param_updates = jax.tree.map(
+            lambda a, g, p: -a * (g + weight_decay * p),
+            alpha, loss_grads, params,
+        )
+
+        return param_updates, IDBDState(
+            init_beta=state.init_beta, beta=beta, h=h, v=v
+        )
 
     return base.GradientTransformation(init_fn, update_fn)
