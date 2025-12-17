@@ -1,0 +1,10 @@
+defaults:
+  - full_feature_search
+  - _self_
+
+task:
+  name: binary_regression
+  input_change_freq: 1 # 10_000
+  input_bounds: [-1.0, 1.0]
+  input_subspace_range: 0.5
+  max_input_center_change: 2.0

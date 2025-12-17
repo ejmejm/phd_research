@@ -35,10 +35,10 @@ if not omegaconf.OmegaConf.has_resolver('as_tuple'):
 def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
     """Prepare the task based on configuration."""
     if cfg.task.name.lower() == 'nonlinear_geoff':
-        cfg.model.output_dim = 1
         cfg.task.type = 'regression'
         return NonlinearGEOFFTask(
             n_features = cfg.task.n_features,
+            n_outputs = cfg.task.n_outputs,
             flip_rate = cfg.task.flip_rate,
             n_layers = cfg.task.n_layers,
             n_stationary_layers = cfg.task.n_stationary_layers,
@@ -50,10 +50,10 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
             seed = seed,
         )
     elif cfg.task.name.lower() == 'input_changing_geoff':
-        cfg.model.output_dim = 1
         cfg.task.type = 'regression'
         return InputChangingGEOFFTask(
             n_features = cfg.task.n_features,
+            n_outputs = cfg.task.n_outputs,
             flip_rate = cfg.task.flip_rate,
             n_layers = cfg.task.n_layers,
             n_stationary_layers = cfg.task.n_stationary_layers,
@@ -69,10 +69,10 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
             seed = seed,
         )
     elif cfg.task.name.lower() == 'binary_regression':
-        cfg.model.output_dim = 1
-        cfg.task.type = 'classification'
+        cfg.task.type = 'regression'
         return BinaryRegressionTask(
             n_features = cfg.task.n_features,
+            n_outputs = cfg.task.n_outputs,
             flip_rate = cfg.task.flip_rate,
             n_stationary_layers = cfg.task.n_stationary_layers,
             hidden_dim = cfg.task.hidden_dim if cfg.task.n_layers > 1 else 0,
@@ -190,82 +190,6 @@ def rng_from_string(rng: Optional[PRNGKeyArray], string: str) -> PRNGKeyArray:
     return jax.random.fold_in(rng, string_int)
 
 
-# def get_model_statistics(
-#     model: MLP,
-#     features: Float[Array, 'batch features'],
-#     param_inputs: List[Float[Array, 'batch features']],
-#     masks: Optional[List[Bool[Array, 'features']]] = None,
-#     metric_prefix: str = '',
-# ) -> Dict[str, float]:
-#     """
-#     Compute statistics about the model's weights, biases, and layer inputs.
-    
-#     Args:
-#         model: The MLP model to analyze
-#         features: Input features to compute layer activations
-#         param_inputs: List of input arrays to each layer (from model forward pass)
-#         masks: Optional list of boolean masks for computing statistics only on certain
-#             units in each layer. If provided, must contain one mask per layer.
-#         metric_prefix: Prefix to add to metric names
-        
-#     Returns:
-#         Dictionary containing various model statistics
-#     """
-    
-#     def compute_layer_stats(i: int, layer: Any, layer_input: Array, mask: Optional[Array]) -> Tuple[float, float]:
-#         """Compute statistics for a single layer."""
-#         # Create default mask if none provided
-#         if mask is None:
-#             mask = jnp.ones(layer.weight.shape[1], dtype=bool)
-        
-#         # Weight norms (masked)
-#         weight_masked = layer.weight[:, mask]
-#         weight_l1 = jnp.where(
-#             weight_masked.size > 0,
-#             jnp.linalg.norm(weight_masked, ord=1) / weight_masked.size,
-#             0.0
-#         )
-        
-#         # Input norms (masked)
-#         mask_sum = jnp.sum(mask)
-#         input_l1 = jnp.where(
-#             mask_sum > 0,
-#             jnp.mean(jnp.linalg.norm(layer_input[:, mask], ord=1, axis=-1) / mask_sum),
-#             0.0
-#         )
-        
-#         return weight_l1, input_l1
-    
-#     # Get all linear layers (in JAX MLP, all layers are linear)
-#     n_layers = len(model.layers)
-    
-#     # Verify param_inputs length matches number of layers
-#     assert len(param_inputs) == n_layers, \
-#         f"Expected {n_layers} param_inputs but got {len(param_inputs)}"
-    
-#     if masks is not None:
-#         assert len(masks) == n_layers, \
-#             f"Expected {n_layers} masks but got {len(masks)}"
-    
-#     # Compute statistics for each layer
-#     stats = {}
-#     for i, layer in enumerate(model.layers):
-#         mask = masks[i] if masks is not None else None
-#         layer_input = param_inputs[i]
-        
-#         # Ensure layer_input is 2D (add batch dimension if needed)
-#         if layer_input.ndim == 1:
-#             layer_input = jnp.expand_dims(layer_input, axis=0)
-        
-#         weight_l1, input_l1 = compute_layer_stats(i, layer, layer_input, mask)
-        
-#         stats[f'layer_{i}/{metric_prefix}weight_l1'] = float(weight_l1)
-#         stats[f'layer_{i}/{metric_prefix}input_l1'] = float(input_l1)
-    
-#     return stats
-
-
-
 class StandardizationStats(eqx.Module):
     """Holds running statistics for standardization."""
     running_mean: Float[Array, ''] = eqx.field(default=1, converter=jnp.asarray)
@@ -348,7 +272,7 @@ def prepare_components(cfg: DictConfig):
     # Initialize model and optimizer
     model = MLP(
         input_dim = cfg.task.n_features,
-        output_dim = cfg.model.output_dim,
+        output_dim = cfg.task.get('n_outputs', 1),
         n_layers = cfg.model.n_layers,
         hidden_dim = cfg.model.hidden_dim + int(use_bias),
         weight_init_method = cfg.model.weight_init_method,

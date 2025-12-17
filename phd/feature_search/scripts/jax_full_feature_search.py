@@ -46,7 +46,7 @@ def prepare_components(cfg: DictConfig):
     # Initialize model and optimizer
     model = MLP(
         input_dim = cfg.task.n_features,
-        output_dim = cfg.model.output_dim,
+        output_dim = cfg.task.get('n_outputs', 1),
         n_layers = cfg.model.n_layers,
         hidden_dim = cfg.model.hidden_dim + int(use_bias),
         weight_init_method = cfg.model.weight_init_method,
@@ -485,7 +485,8 @@ def run_experiment(
 
 
 def validate_config(cfg: DictConfig):
-    assert cfg.model.n_layers == 2, "Only 2-layer models are supported!"
+    if cfg.model.n_layers != 2:
+        logger.warning("2-layer models have not been well-tested yet!")
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search', version_base='1.1')
