@@ -19,15 +19,16 @@ import optuna
 
 # TODO:
 # - [x] Implement grid sweep from config with run command and parameters
-# - [ ] Implement random sweep from config with run command and parameters
-# - [ ] Implement hyperparameter sensitivity from config with run command and parameters
 # - [x] Only have a single parent MLFlow run for all trials even when distributed
+# - [ ] Make a sampler that uses a lock to avoid duplicate runs
+# - [ ] Change sweep run # that is printed to be the # run in this sweep, not in the whole experiment
+# - [ ] Don't mark parent MLFlow run as complete until all trials are done
+# - [ ] Make sure filelocks are deleted after use
+# - [ ] Add an option to delete a sweep, and remove it from both MLFlow and Optuna storages
 # - [ ] Better handle failed runs, ideally retrying or just overwritting with the same param set
 # - [ ] Delete failed runs when being replaced
-# - [ ] Change sweep run # that is printed to be the # run in this sweep, not in the whole experiment
-# - [ ] Make a sampler that uses a lock to avoid duplicate runs
-# - [ ] Don't mark parent MLFlow run as complete until all trials are done
-# - [ ] Add an option to delete a sweep, and remove it from both MLFlow and Optuna storages
+# - [ ] Implement random sweep from config with run command and parameters
+# - [ ] Implement hyperparameter sensitivity from config with run command and parameters
 
 # 1. Get config from parser that describes the sweep (run command, parameters, potential parent)
 # 2. Create a new local study in optuna with SQLite storage
