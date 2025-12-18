@@ -45,7 +45,7 @@ def run_multiseed_experiment(
         metrics_buffers, metrics = metrics_fn(train_state, task, metrics_buffers, step_stats, cfg)
         metrics = {k: np.asarray(v).mean(axis=0) for k, v in metrics.items()}
         all_metrics.append(metrics)
-        log_metrics(metrics, cfg, step=train_state.step) # Consider making logging async
+        log_metrics(metrics, cfg, step=train_state.step[0]) # Consider making logging async
         
         if pbar is not None:
             pbar.set_postfix(loss=f"{metrics['loss']:.5f}")
