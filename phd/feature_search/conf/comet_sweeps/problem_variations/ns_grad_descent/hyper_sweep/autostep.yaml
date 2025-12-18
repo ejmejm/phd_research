@@ -1,0 +1,46 @@
+name: autostep
+project: problem_variations_ns_grad_descent
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/problem_variations/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.log_freq: 4000
+
+  model.hidden_dim: 5120
+  model.n_layers: ${task.n_layers}
+  model.activation: swish
+
+  optimizer.name: idbd
+  optimizer.autostep: true
+
+  optimizer.learning_rate:
+    - "${eval:2**-4}"
+    - "${eval:2**0}"
+    - "${eval:2**4}"
+  
+  optimizer.meta_learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+    - "${eval:2**-4}" # <=====
+    - "${eval:2**-2}"
+  
+  # task.name: input_changing_geoff
+  # task.n_features: 10
+  # task.hidden_dim: 20
+  # task.weight_init: kaiming_uniform
+  # task.sparsity: 0.0
+  # task.flip_rate: 0.0
+  # task.input_change_freq: 40000
+  # task.input_subspace_range: 0.1
+  # task.max_input_center_change: 2.0
+
+  task.n_layers: [3, 4, 5]
+  task.activation: [ltu, relu, sigmoid]
+
+  seed: [2512161, 2512162, 2512163, 2512164, 2512165]

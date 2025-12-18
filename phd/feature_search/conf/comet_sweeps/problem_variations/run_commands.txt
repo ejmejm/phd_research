@@ -1,0 +1,12 @@
+
+### Round 1 ###
+
+
+===== Created sweeps with ids =====
+autostep.yaml (600): 895da591f2264de799ed86b3fa891f06
+sgd_layerwise_step_size.yaml (480): 38ffe8dd3dbe46efb0b1d17a3c656f46
+
+~45 experiments per 3 hour job? (3 layer is actually much longer)
+
+sbatch --array=1-14 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=03:00:00 launch_comet_agent.sbatch -s 895da591f2264de799ed86b3fa891f06
+sbatch --array=1-11 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=03:00:00 launch_comet_agent.sbatch -s 38ffe8dd3dbe46efb0b1d17a3c656f46
