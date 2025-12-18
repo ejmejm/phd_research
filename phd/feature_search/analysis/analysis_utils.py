@@ -341,6 +341,7 @@ def get_best_ablation_values(
     metric_direction: str = 'min', # {'min', 'max'}
     metric_type: str = 'final_avg', # {'cumulative', 'final_avg'}
     step_col: str = 'step',
+    split_dfs_by_split_vars: bool = False,
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
     """Get the best ablation values for each sweep.
     
@@ -356,6 +357,10 @@ def get_best_ablation_values(
         metric_type: Type of metric to use. 'cumulative' uses mean loss over all steps,
                      'final_avg' uses mean loss over final 5% of steps.
         step_col: Name of the column containing time step information.
+        split_dfs_by_split_vars: If True, return separate DataFrames for each split variable
+                            combination with keys like 'sweep_name|var1=val1|var2=val2'.
+                            If False, return one DataFrame per sweep containing all split
+                            combinations (default behavior).
     
     Returns:
         Tuple of (best_config_dfs, best_run_dfs) dictionaries.
@@ -417,7 +422,7 @@ def get_best_ablation_values(
             split_combinations = list(itertools.product(*split_var_values))
 
         # Find best ablation values for each split combination
-        best_run_ids = []
+        best_run_ids_all = []  # For collecting all run_ids when split_by_split_vars=False
         for split_vals in split_combinations:
             config_str = ""
             vals_str = ""
@@ -441,6 +446,7 @@ def get_best_ablation_values(
             # Skip this split if no runs are present for it
             if split_losses.empty:
                 vals_str += f"  [WARNING] No runs for split combination in '{sweep_name}': {config_str.strip()} Skipping.\n"
+                report_str += vals_str
                 continue
 
             if metric_direction == 'min':
@@ -479,15 +485,44 @@ def get_best_ablation_values(
             if len(matching_runs) == 0:
                 report_str += f"  [WARNING] No matching runs found for configuration in '{sweep_name}': {config_str.strip()} ablation={best_loss_idx[:len(ablation_vars)]}\n"
                 continue
-            best_run_ids.extend(matching_runs['run_id'].tolist())
+            
+            best_run_ids = matching_runs['run_id'].tolist()
 
             report_str += config_str + vals_str
+
+            if split_dfs_by_split_vars:
+                # Create key for this split combination
+                if len(split_vars) == 0:
+                    # No split vars, use original sweep name
+                    split_key = sweep_name
+                else:
+                    # Create key with format: 'sweep_name|var1=val1|var2=val2'
+                    split_key_parts = [sweep_name]
+                    for var, val in zip(split_vars, split_vals):
+                        if isinstance(val, float):
+                            # Use scientific notation for floats if needed
+                            if (abs(val) > 1e5 or (abs(val) < 1e-5 and val != 0)):
+                                split_key_parts.append(f"{var}={val:.2e}")
+                            else:
+                                split_key_parts.append(f"{var}={val}")
+                        else:
+                            split_key_parts.append(f"{var}={val}")
+                    split_key = "|".join(split_key_parts)
+
+                # Store filtered dfs under the split key
+                best_config_dfs[split_key] = config_df[config_df['run_id'].isin(best_run_ids)]
+                best_run_dfs[split_key] = run_df[run_df['run_id'].isin(best_run_ids)]
+            else:
+                # Collect all run_ids to store under original sweep name
+                best_run_ids_all.extend(best_run_ids)
+
+        # If not splitting by split_vars, store all results under original sweep name
+        if not split_dfs_by_split_vars:
+            best_config_dfs[sweep_name] = config_df[config_df['run_id'].isin(best_run_ids_all)]
+            best_run_dfs[sweep_name] = run_df[run_df['run_id'].isin(best_run_ids_all)]
 
         if print_best_values:
             print(report_str)
         report_str = ""
-
-        best_config_dfs[sweep_name] = config_df[config_df['run_id'].isin(best_run_ids)]
-        best_run_dfs[sweep_name] = run_df[run_df['run_id'].isin(best_run_ids)]
         
     return best_config_dfs, best_run_dfs
