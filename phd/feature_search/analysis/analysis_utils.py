@@ -1,5 +1,6 @@
 from io import BytesIO
 import itertools
+import math
 import os
 from typing import Dict, List, Optional, Tuple
 import warnings
@@ -325,10 +326,42 @@ def infer_sweep_vars(config_df: pd.DataFrame) -> list:
         if (
             col != 'run_id' and
             col != 'seed' and
-            '|' not in col and
+            '.' not in col and
             config_df[col].nunique() > 1
         )
     ]
+
+
+def float_is_power_of_2(val, tol=1e-8):
+    if isinstance(val, float) and val > 0.0:
+        exp = math.log2(val)
+        return abs(exp - round(exp)) < tol
+    return False
+
+
+def format_val_for_report(val):
+    if isinstance(val, float) and float_is_power_of_2(val):
+        exp = int(round(math.log2(val)))
+        return f"2**{exp}"
+    elif isinstance(val, float):
+        if (abs(val) > 1e5 or (abs(val) < 1e-5 and val != 0)):
+            return f"{val:.2e}"
+        else:
+            return f"{val}"
+    else:
+        return f"{val}"
+
+
+def build_sorted_split_key(sweep_name, split_vars, split_vals):
+    """Return key with split_vars/vals sorted by var name."""
+    if len(split_vars) == 0:
+        return sweep_name
+    # Pair vars and vals, sort by var name
+    sorted_pairs = sorted(zip(split_vars, split_vals), key=lambda x: x[0])
+    key_parts = [sweep_name]
+    for var, val in sorted_pairs:
+        key_parts.append(f"{var}={format_val_for_report(val)}")
+    return "&".join(key_parts)
 
 
 def get_best_ablation_values(
@@ -342,7 +375,7 @@ def get_best_ablation_values(
     metric_type: str = 'final_avg', # {'cumulative', 'final_avg'}
     step_col: str = 'step',
     split_dfs_by_split_vars: bool = False,
-) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, Dict[str, any]]]:
     """Get the best ablation values for each sweep.
     
     Args:
@@ -363,11 +396,13 @@ def get_best_ablation_values(
                             combinations (default behavior).
     
     Returns:
-        Tuple of (best_config_dfs, best_run_dfs) dictionaries.
+        Tuple of (best_config_dfs, best_run_dfs, best_var_vals) dictionaries.
+        best_var_vals: dict mapping sweep/split key to dict of best ablation var->value.
     """
     best_config_dfs = {}
     best_run_dfs = {}
-    
+    best_var_vals = {}
+
     report_str = ""
     for sweep_name in config_dfs.keys():
         # Skip sweeps where we aren't doing a step-size ablation
@@ -431,7 +466,7 @@ def get_best_ablation_values(
             else:
                 config_str += "\nConfiguration: "
                 config_str += " | ".join(
-                    f"{var}={val:.2e}" if isinstance(val, float) else f"{var}={val}"
+                    f"{var}={format_val_for_report(val)}"
                     for var, val in zip(split_vars, split_vals)
                 )
 
@@ -459,25 +494,21 @@ def get_best_ablation_values(
             # Format idx as tuple of ablation var values even if there is only one ablation var
             best_loss_idx = best_loss_idx if isinstance(best_loss_idx, tuple) else (best_loss_idx,)
 
-            # Add best ablation values to report
+            # Add best ablation values to report and save for output
+            best_ablation_vals = {}
             for i, var in enumerate(ablation_vars):
                 val = best_loss_idx[i]
-                if isinstance(val, (int, float)):
-                    if (abs(val) > 1e5 or (abs(val) < 1e-5 and val != 0)):
-                        vals_str += f"  Best {var}={val:.2e}\n"
-                    else:
-                        vals_str += f"  Best {var}={val}\n"
-                else:
-                    vals_str += f"  Best {var}={val}\n"
+                best_ablation_vals[var] = val
+                vals_str += f"  Best {var}={format_val_for_report(val)}\n"
 
             # Get run_ids for this best configuration
             query = pd.Series(True, index=config_df.index)
             for var, val in zip(split_vars, split_vals):
                 query &= (config_df[var] == val)
-            
+
             for var, val in zip(ablation_vars, best_loss_idx[:len(ablation_vars)]):
                 query &= (config_df[var] == val)
-                
+
             num_in_bucket = query.sum()
             config_str += f" | # runs: {num_in_bucket}\n"
 
@@ -485,36 +516,29 @@ def get_best_ablation_values(
             if len(matching_runs) == 0:
                 report_str += f"  [WARNING] No matching runs found for configuration in '{sweep_name}': {config_str.strip()} ablation={best_loss_idx[:len(ablation_vars)]}\n"
                 continue
-            
+
             best_run_ids = matching_runs['run_id'].tolist()
 
             report_str += config_str + vals_str
 
             if split_dfs_by_split_vars:
-                # Create key for this split combination
-                if len(split_vars) == 0:
-                    # No split vars, use original sweep name
-                    split_key = sweep_name
-                else:
-                    # Create key with format: 'sweep_name|var1=val1|var2=val2'
-                    split_key_parts = [sweep_name]
-                    for var, val in zip(split_vars, split_vals):
-                        if isinstance(val, float):
-                            # Use scientific notation for floats if needed
-                            if (abs(val) > 1e5 or (abs(val) < 1e-5 and val != 0)):
-                                split_key_parts.append(f"{var}={val:.2e}")
-                            else:
-                                split_key_parts.append(f"{var}={val}")
-                        else:
-                            split_key_parts.append(f"{var}={val}")
-                    split_key = "|".join(split_key_parts)
+                # Create key for this split combination, with sorted split vars
+                split_key = build_sorted_split_key(sweep_name, split_vars, split_vals)
 
-                # Store filtered dfs under the split key
                 best_config_dfs[split_key] = config_df[config_df['run_id'].isin(best_run_ids)]
                 best_run_dfs[split_key] = run_df[run_df['run_id'].isin(best_run_ids)]
+                best_var_vals[split_key] = best_ablation_vals
             else:
                 # Collect all run_ids to store under original sweep name
                 best_run_ids_all.extend(best_run_ids)
+                # For the sweep key, save just last (if more than 1 split, will be last split combination value)
+                # Instead: If multiple splits, accumulate best var vals per split
+                if len(split_combinations) == 1:  # No split vars
+                    best_var_vals[sweep_name] = best_ablation_vals
+                else:
+                    # Use a joined key like var1=val1|var2=val2 (sorted by var name)
+                    split_key = build_sorted_split_key(sweep_name, split_vars, split_vals)
+                    best_var_vals[split_key] = best_ablation_vals
 
         # If not splitting by split_vars, store all results under original sweep name
         if not split_dfs_by_split_vars:
@@ -525,4 +549,4 @@ def get_best_ablation_values(
             print(report_str)
         report_str = ""
         
-    return best_config_dfs, best_run_dfs
+    return best_config_dfs, best_run_dfs, best_var_vals
