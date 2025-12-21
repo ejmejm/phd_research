@@ -14,7 +14,7 @@ parameters:
   model.activation: ltu
 
   task.hidden_dim: 20
-  task.n_outputs: 10
+  task.n_outputs: 5
 
   optimizer.name: idbd
   optimizer.autostep: true
