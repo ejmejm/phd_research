@@ -1,0 +1,31 @@
+name: autostep
+project: ns_binary_regression
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/problem_variations/ns_binary_regression/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.log_freq: 4000
+
+  optimizer.name: idbd
+  optimizer.autostep: true
+
+  optimizer.learning_rate:
+    - "${eval:2**0}"
+    - "${eval:2**2}"
+    - "${eval:2**4}"
+    - "${eval:2**6}"
+    - "${eval:2**8}"
+  
+  optimizer.meta_learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
+
+  seed: [2512191, 2512192, 2512193, 2512194, 2512195]
