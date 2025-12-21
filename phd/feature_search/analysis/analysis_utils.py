@@ -26,6 +26,9 @@ def t_ci(vals):
 
 
 def bin_df(df, n_bins=10, bin_var='step', zero_start=True, run_key='run_id'):
+    if n_bins == -1:
+        return df
+    
     min_val = 0 if zero_start else df[bin_var].min()
     bin_size = (df[bin_var].max() - df[bin_var].min()) / n_bins
     bins = np.arange(min_val, df[bin_var].max() + bin_size, bin_size) # define bins
