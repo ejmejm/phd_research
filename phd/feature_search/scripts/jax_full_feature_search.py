@@ -114,7 +114,7 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
     task, model, criterion, optimizer, repr_optimizer, cbp_tracker = \
         prepare_components(cfg)
 
-    assert isinstance(task, NonlinearGEOFFTask)
+    # assert isinstance(task, NonlinearGEOFFTask)
     
     if cfg.model.weight_init_method != 'binary':
         logger.warning(

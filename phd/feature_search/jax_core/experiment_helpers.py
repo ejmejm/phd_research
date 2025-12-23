@@ -17,7 +17,7 @@ import optax
 from .feature_recycling import CBPTracker
 from .models import MLP
 from .optimizers import EqxOptimizer, optax_idbd, custom_optax_adam
-from .tasks.geoff import BinaryRegressionTask, InputChangingGEOFFTask, NonlinearGEOFFTask
+from .tasks.geoff import BinaryRegressionTask, CoreTransientBinaryTask, InputChangingGEOFFTask, NonlinearGEOFFTask
 from .utils import tree_replace
 
 
@@ -82,6 +82,26 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
             input_subspace_range = cfg.task.input_subspace_range,
             input_change_freq = cfg.task.input_change_freq,
             max_input_center_change = cfg.task.max_input_center_change,
+            seed = seed,
+        )
+    elif cfg.task.name.lower() == 'core_transient_binary':
+        cfg.task.type = 'regression'
+        return CoreTransientBinaryTask(
+            n_features = cfg.task.n_features,
+            n_core_layers = cfg.task.n_core_layers,
+            core_hidden_dim = cfg.task.core_hidden_dim,
+            core_sparsity = cfg.task.core_sparsity,
+            n_transient_layers = cfg.task.n_transient_layers,
+            transient_hidden_dim = cfg.task.transient_hidden_dim,
+            transient_sparsity = cfg.task.transient_sparsity,
+            transient_activation_rate = cfg.task.transient_activation_rate,
+            n_outputs = cfg.task.n_outputs,
+            weight_scale = cfg.task.weight_scale,
+            input_bounds = cfg.task.input_bounds,
+            input_subspace_range = cfg.task.input_subspace_range,
+            input_change_freq = cfg.task.input_change_freq,
+            max_input_center_change = cfg.task.max_input_center_change,
+            n_calibration_samples = cfg.task.get('n_calibration_samples', 10000),
             seed = seed,
         )
     else:

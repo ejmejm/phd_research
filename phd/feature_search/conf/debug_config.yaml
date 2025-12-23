@@ -1,33 +1,31 @@
 defaults:
-- comet_sweeps/paper_draft_v2_part_1/base_config
+- core_transient_binary
 - _self_
 
-wandb: true
-
-model:
-  hidden_dim: 5120
-  use_bias: false
+wandb: false
 
 task:
-  flip_rate: "${eval:2**-12}"
+  n_outputs: 20
 
-feature_recycling:
-  recycle_rate: 0.001
-  utility_decay: 0.999
-  utility_reset_mode: median
-  feature_protection_steps: 0
-  initial_step_size_method: median
+  n_transient_layers: 2
+  transient_sparsity: 0.9
+  transient_activation_rate: 0.05
+
+model:
+  n_layers: 4
+  hidden_dim: 256
+  activation: ltu
+  use_bias: false
 
 train:
-  log_model_stats: true
-  log_optimizer_stats: true
-  log_pruning_stats: true
-  standardize_cumulants: false
-  total_steps: 30000000
+  total_steps: 5_000_000
+  log_freq: 2000
 
 optimizer:
-  learning_rate: "${eval:2**-14}"
-  meta_learning_rate: "${eval:2**-5}"
+  name: idbd
+  autostep: true
+  learning_rate: 8.0
+  meta_learning_rate: 0.05
 
-seed: 705
+seed: [2512231, 2512232, 2512233, 2512234, 2512235]
 

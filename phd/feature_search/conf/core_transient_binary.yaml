@@ -1,0 +1,25 @@
+defaults:
+  - full_feature_search
+  - _self_
+
+task:
+  name: core_transient_binary
+
+  n_outputs: 5
+
+  n_core_layers: 1
+  core_hidden_dim: 20
+  core_sparsity: 0.0
+
+  n_transient_layers: 1
+  transient_hidden_dim: 2048
+  transient_sparsity: 0.0
+  transient_activation_rate: 0.01
+
+  input_change_freq: 20_000
+  input_bounds: [-1.0, 1.0]
+  input_subspace_range: 0.5
+  max_input_center_change: 2.0
+
+train:
+  standardize_cumulants: false
