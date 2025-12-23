@@ -10,6 +10,59 @@ from jaxtyping import Array, Float, Int
 from ..utils import tree_replace
 
 
+def initialize_weights(
+    key: random.PRNGKey,
+    in_features: int,
+    out_features: int,
+    weight_init: str = 'binary',
+    weight_scale: float = 1.0,
+) -> jax.Array:
+    """Initialize weights based on specified initialization method.
+    
+    Args:
+        key: PRNG key for random initialization
+        in_features: Number of input features
+        out_features: Number of output features
+        weight_init: Initialization method ('binary' or 'kaiming_uniform')
+        weight_scale: Scale factor for weights
+        
+    Returns:
+        Initialized weight matrix of shape (in_features, out_features)
+    """
+    if weight_init == 'binary':
+        weights = random.randint(key, (in_features, out_features), 0, 2) * 2 - 1
+        weights = weights.astype(jnp.float32)
+    elif weight_init == 'kaiming_uniform':
+        limit = jnp.sqrt(6 / in_features)
+        weights = random.uniform(key, (in_features, out_features), jnp.float32, -limit, limit)
+    else:
+        raise ValueError(f"Unsupported weight initialization: {weight_init}")
+    
+    return weights * weight_scale
+
+
+def sparsify_weights(
+    key: random.PRNGKey,
+    weights: jax.Array,
+    sparsity: float,
+) -> jax.Array:
+    """Set a percentage of weights to zero based on random mask.
+    
+    Args:
+        key: PRNG key
+        weights: Weight matrix to sparsify
+        sparsity: Fraction of weights to set to zero (0.0 to 1.0)
+        
+    Returns:
+        Sparsified weight matrix
+    """
+    if sparsity == 0:
+        return weights
+    
+    mask = random.uniform(key, weights.shape) >= sparsity
+    return weights * mask
+
+
 class LTU(eqx.Module):
     """Linear Threshold Unit activation function."""
     
@@ -154,12 +207,15 @@ class NonlinearGEOFFTask(eqx.Module):
         if n_layers == 1:
             # Single linear layer
             weight_key, key = random.split(key)
-            layer_weights = self._initialize_weights(weight_key, n_features, n_outputs)
+            layer_weights = initialize_weights(
+                weight_key, n_features, n_outputs,
+                weight_init = self.weight_init,
+                weight_scale = self.weight_scale,
+            )
             self.weights = [layer_weights]
             flip_accumulators = [flip_rate * n_features * n_outputs]
         else:
             # Multiple layers with hidden dimensions
-            # We'll use JAX's functional approach to build the weights list
             keys = random.split(key, 2 * n_layers - 1)
             weight_keys = keys[:n_layers]
             sparsify_keys = keys[n_layers:]
@@ -173,20 +229,32 @@ class NonlinearGEOFFTask(eqx.Module):
             all_accumulators = []
             
             # Input layer
-            w = self._initialize_weights(weight_keys[0], in_dims[0], out_dims[0])
-            w = self._sparsify_weights(sparsify_keys[0], w, sparsity)
+            w = initialize_weights(
+                weight_keys[0], in_dims[0], out_dims[0],
+                weight_init = self.weight_init,
+                weight_scale = self.weight_scale,
+            )
+            w = sparsify_weights(sparsify_keys[0], w, sparsity)
             all_weights.append(w)
             all_accumulators.append(flip_rate * in_dims[0] * out_dims[0])
             
             # Hidden layers
             for i in range(1, n_layers - 1):
-                w = self._initialize_weights(weight_keys[i], in_dims[i], out_dims[i])
-                w = self._sparsify_weights(sparsify_keys[i], w, sparsity)
+                w = initialize_weights(
+                    weight_keys[i], in_dims[i], out_dims[i],
+                    weight_init = self.weight_init,
+                    weight_scale = self.weight_scale,
+                )
+                w = sparsify_weights(sparsify_keys[i], w, sparsity)
                 all_weights.append(w)
                 all_accumulators.append(flip_rate * in_dims[i] * out_dims[i])
             
             # Output layer
-            w = self._initialize_weights(weight_keys[-1], in_dims[-1], out_dims[-1])
+            w = initialize_weights(
+                weight_keys[-1], in_dims[-1], out_dims[-1],
+                weight_init = self.weight_init,
+                weight_scale = self.weight_scale,
+            )
             all_weights.append(w)
             all_accumulators.append(flip_rate * in_dims[-1] * out_dims[-1])
             
@@ -194,37 +262,6 @@ class NonlinearGEOFFTask(eqx.Module):
             flip_accumulators = all_accumulators
             
         self.flip_accumulators = jnp.array(flip_accumulators, dtype=jnp.float32)
-    
-    def _initialize_weights(self, key: random.PRNGKey, in_features: int, out_features: int) -> jax.Array:
-        """Initialize weights based on specified initialization method."""
-        if self.weight_init == 'binary':
-            # Create binary ±1 weights
-            weights = random.randint(key, (in_features, out_features), 0, 2) * 2 - 1
-            weights = weights.astype(jnp.float32)
-        else:  # kaiming_uniform
-            # Using He initialization (kaiming)
-            limit = jnp.sqrt(6 / in_features)  # He/kaiming initialization
-            weights = random.uniform(key, (in_features, out_features), jnp.float32, -limit, limit)
-            
-        return weights * self.weight_scale
-    
-    def _sparsify_weights(self, key: random.PRNGKey, weights: jax.Array, sparsity: float) -> jax.Array:
-        """Set a percentage of weights to zero based on random mask.
-        
-        Args:
-            key: PRNG key
-            weights: Weight matrix to sparsify
-            sparsity: Fraction of weights to set to zero (0.0 to 1.0)
-            
-        Returns:
-            Sparsified weight matrix
-        """
-        if sparsity == 0:
-            return weights
-            
-        # Create random mask
-        mask = random.uniform(key, weights.shape) >= sparsity
-        return weights * mask
     
     def _get_activation_fn(self, x: jax.Array) -> jax.Array:
         """Apply the configured activation function to input."""
@@ -533,4 +570,317 @@ class BinaryRegressionTask(InputChangingGEOFFTask):
         new_task_state, (x, y) = super().generate_batch(batch_size)
         y = jnp.where(y > self.output_thresholds, 1, 0)
         return new_task_state, (x, y)
+
+
+class CoreTransientBinaryTask(eqx.Module):
+    """Binary regression task with separate core and transient layers.
     
+    Core layers form the initial representation with standard LTU activation
+    (threshold at 0). Transient layers have thresholds calibrated to achieve a
+    target activation rate, creating sparse representations.
+    
+    The network structure is:
+    - Input -> Core layers (with core_hidden_dim) -> Transient layers 
+      (with transient_hidden_dim) -> Output
+    
+    Layer biases are calibrated such that transient layer units fire at the
+    target activation rate when sampled uniformly from the full input bounds.
+    Output thresholds are computed after layer bias calibration to maximize
+    output entropy (balanced class distribution).
+    """
+    
+    # Static parameters (configuration)
+    n_features: int = eqx.field(static=True)
+    n_outputs: int = eqx.field(static=True)
+    n_layers: int = eqx.field(static=True)
+    weight_scale: float = eqx.field(static=True)
+    
+    # Core layer configuration
+    n_core_layers: int = eqx.field(static=True)
+    core_hidden_dim: int = eqx.field(static=True)
+    core_sparsity: float = eqx.field(static=True)
+    
+    # Transient layer configuration
+    transient_hidden_dim: int = eqx.field(static=True)
+    transient_sparsity: float = eqx.field(static=True)
+    transient_activation_rate: float = eqx.field(static=True)
+    
+    # Input distribution configuration
+    input_bounds: Tuple[float, float] = eqx.field(static=True)
+    input_subspace_range: float = eqx.field(static=True)
+    input_change_freq: Optional[int] = eqx.field(static=True)
+    max_input_center_change: float = eqx.field(static=True)
+    n_calibration_samples: int = eqx.field(static=True)
+    
+    # Dynamic parameters (weights and state)
+    weights: List[Float[Array, 'in_features out_features']]
+    layer_biases: List[Float[Array, 'layer_dim']]
+    output_thresholds: Float[Array, 'n_outputs']
+    input_subspace_centers: Float[Array, 'n_features']
+    step: Int[Array, '']
+    rng: random.PRNGKey
+
+    def __init__(
+        self,
+        n_features: int,
+        n_core_layers: int = 2,
+        core_hidden_dim: int = 64,
+        core_sparsity: float = 0.0,
+        n_transient_layers: int = 2,
+        transient_hidden_dim: int = 2048,
+        transient_sparsity: float = 0.8,
+        transient_activation_rate: float = 0.05,
+        n_outputs: int = 1,
+        weight_scale: float = 1.0,
+        input_bounds: Tuple[float, float] = (-1.0, 1.0),
+        input_subspace_range: float = 0.1,
+        input_change_freq: Optional[int] = None,
+        max_input_center_change: float = 0.1,
+        n_calibration_samples: int = 10000,
+        seed: Optional[int] = None,
+    ):
+        """Initialize a core-transient binary regression task.
+        
+        Args:
+            n_features: Number of input features
+            n_core_layers: Number of core layers (with standard threshold at 0)
+            core_hidden_dim: Hidden dimension for core layers
+            core_sparsity: Weight sparsity for core layers (fraction set to zero)
+            n_transient_layers: Number of transient layers (with calibrated thresholds)
+            transient_hidden_dim: Hidden dimension for transient layers
+            transient_sparsity: Weight sparsity for transient layers
+            transient_activation_rate: Target activation rate for transient units
+            n_outputs: Number of output dimensions
+            weight_scale: Scale factor for weights
+            input_bounds: Overall bounds of the input space
+            input_subspace_range: Range of the uniform distributions for sampling
+            input_change_freq: Number of steps between input changes
+            max_input_center_change: Maximum change of a subspace center per step
+            n_calibration_samples: Number of samples for calibrating thresholds
+            seed: Random seed for reproducibility
+        """
+        # Store static configuration
+        self.n_features = n_features
+        self.n_outputs = n_outputs
+        self.n_layers = n_core_layers + n_transient_layers + 1
+        self.weight_scale = weight_scale
+        
+        # Core layer configuration
+        self.n_core_layers = n_core_layers
+        self.core_hidden_dim = core_hidden_dim
+        self.core_sparsity = core_sparsity
+        
+        # Transient layer configuration
+        self.transient_hidden_dim = transient_hidden_dim
+        self.transient_sparsity = transient_sparsity
+        self.transient_activation_rate = transient_activation_rate
+        
+        # Input distribution configuration
+        self.input_bounds = input_bounds
+        self.input_subspace_range = input_subspace_range
+        self.input_change_freq = input_change_freq
+        self.max_input_center_change = max_input_center_change
+        self.n_calibration_samples = n_calibration_samples
+        
+        # Set up RNG
+        if seed is None:
+            seed = np.random.randint(0, 2**31)
+        key = random.PRNGKey(seed)
+        
+        # Initialize network weights
+        key, network_key = random.split(key)
+        self._initialize_network(network_key)
+        
+        # Initialize input distribution
+        key, input_key = random.split(key)
+        self.input_subspace_centers = random.uniform(
+            input_key, (n_features,), jnp.float32,
+            input_bounds[0], input_bounds[1],
+        )
+        self.step = jnp.array(0, dtype=jnp.int32)
+        
+        # Calibrate layer biases for transient layers
+        key, calibrate_key = random.split(key)
+        self._calibrate_layer_biases(calibrate_key)
+        
+        # Compute output thresholds after calibrating layer biases
+        key, threshold_key = random.split(key)
+        self.output_thresholds = self._compute_output_thresholds(threshold_key)
+        
+        self.rng = key
+    
+    def _initialize_network(self, key: random.PRNGKey):
+        """Initialize network weights with different dimensions for core vs transient."""
+        keys = random.split(key, 2 * self.n_layers)
+        weight_keys = keys[:self.n_layers]
+        sparsify_keys = keys[self.n_layers:]
+        
+        all_weights = []
+        n_hidden_layers = self.n_layers - 1
+        
+        for i in range(self.n_layers):
+            # Determine input dimension
+            if i == 0:
+                in_dim = self.n_features
+            elif i - 1 < self.n_core_layers:
+                in_dim = self.core_hidden_dim
+            else:
+                in_dim = self.transient_hidden_dim
+            
+            # Determine output dimension
+            if i == self.n_layers - 1:
+                out_dim = self.n_outputs
+            elif i < self.n_core_layers:
+                out_dim = self.core_hidden_dim
+            else:
+                out_dim = self.transient_hidden_dim
+            
+            # Determine sparsity for this layer
+            if i == self.n_layers - 1:
+                layer_sparsity = 0.0
+            elif i < self.n_core_layers:
+                layer_sparsity = self.core_sparsity
+            else:
+                layer_sparsity = self.transient_sparsity
+            
+            # Initialize weights
+            w = initialize_weights(
+                weight_keys[i], in_dim, out_dim,
+                weight_init = 'binary',
+                weight_scale = self.weight_scale,
+            )
+            if layer_sparsity > 0:
+                w = sparsify_weights(sparsify_keys[i], w, layer_sparsity)
+            all_weights.append(w)
+        
+        self.weights = all_weights
+        
+        # Initialize biases to zeros (will be calibrated later)
+        self.layer_biases = []
+        for i in range(n_hidden_layers):
+            if i < self.n_core_layers:
+                bias_dim = self.core_hidden_dim
+            else:
+                bias_dim = self.transient_hidden_dim
+            self.layer_biases.append(jnp.zeros(bias_dim))
+    
+    def _forward(self, x: jax.Array) -> jax.Array:
+        """Forward pass with layer-specific biases (LTU activation)."""
+        for i in range(self.n_layers - 1):
+            x = x @ self.weights[i]
+            x = x - self.layer_biases[i]
+            x = jnp.where(x > 0, 1.0, 0.0)  # LTU activation
+        
+        return x @ self.weights[-1]
+    
+    def _calibrate_layer_biases(self, key: random.PRNGKey):
+        """Calibrate biases for each layer to achieve target activation rates.
+        
+        Core layers keep bias at 0 (standard LTU threshold).
+        Transient layers have biases set to the appropriate percentile of
+        pre-activations so that each unit fires at the target activation rate.
+        """
+        full_input_samples = random.uniform(
+            key,
+            (self.n_calibration_samples, self.n_features),
+            jnp.float32,
+            self.input_bounds[0],
+            self.input_bounds[1],
+        )
+        
+        calibrated_biases = []
+        x = full_input_samples
+        n_hidden_layers = self.n_layers - 1
+        
+        for layer_idx in range(n_hidden_layers):
+            pre_activations = x @ self.weights[layer_idx]
+            
+            if layer_idx >= self.n_core_layers:
+                # Transient layer: set threshold for target activation rate
+                target_percentile = 100 * (1 - self.transient_activation_rate)
+                thresholds = jnp.percentile(pre_activations, target_percentile, axis = 0)
+                calibrated_biases.append(thresholds)
+            else:
+                # Core layer: keep bias at 0
+                calibrated_biases.append(self.layer_biases[layer_idx])
+            
+            # Apply bias and activation for next layer
+            x = pre_activations - calibrated_biases[layer_idx]
+            x = jnp.where(x > 0, 1.0, 0.0)
+        
+        self.layer_biases = calibrated_biases
+    
+    def _compute_output_thresholds(
+        self, key: random.PRNGKey,
+    ) -> Float[Array, 'n_outputs']:
+        """Compute output thresholds to maximize entropy (balance class distribution)."""
+        inputs = random.uniform(
+            key, (self.n_calibration_samples, self.n_features), jnp.float32,
+            self.input_bounds[0], self.input_bounds[1],
+        )
+        outputs = jax.vmap(self._forward)(inputs)
+        return jnp.mean(outputs, axis = 0)
+    
+    def _compute_updated_input_subspace_centers(
+        self, key: random.PRNGKey,
+    ) -> Float[Array, 'n_features']:
+        """Compute new input subspace centers with random shift."""
+        center_shifts = random.uniform(
+            key, (self.n_features,), jnp.float32,
+            -self.max_input_center_change, self.max_input_center_change,
+        )
+        new_centers = self.input_subspace_centers + center_shifts
+        min_bound, max_bound = self.input_bounds
+        range_size = max_bound - min_bound
+        new_centers = min_bound + jnp.mod(new_centers - min_bound, range_size)
+        return new_centers
+    
+    def _sample_inputs(
+        self, key: random.PRNGKey, batch_size: int = 1,
+    ) -> Float[Array, 'batch_size n_features']:
+        """Sample inputs from current subspace."""
+        bound = self.input_subspace_range / 2.0
+        inputs = random.uniform(
+            key, (batch_size, self.n_features), jnp.float32, -bound, bound,
+        )
+        inputs = inputs + jnp.expand_dims(self.input_subspace_centers, 0)
+        min_val, max_val = self.input_bounds
+        inputs = min_val + jnp.mod(inputs - min_val, max_val - min_val)
+        return inputs
+    
+    def generate_batch(self, batch_size: int = 1) -> Tuple[eqx.Module, Tuple]:
+        """Generates a single batch of data.
+        
+        Args:
+            batch_size: Size of batch to generate
+            
+        Returns:
+            Tuple containing:
+            - New task state
+            - Batch data (x, y) where y is binary
+        """
+        new_rng, center_key, x_key = random.split(self.rng, 3)
+        
+        # Update input subspace centers if needed
+        input_subspace_centers = self.input_subspace_centers
+        if self.input_change_freq is not None:
+            updated_centers = self._compute_updated_input_subspace_centers(center_key)
+            should_update = (self.step % self.input_change_freq == 0)
+            input_subspace_centers = jnp.where(
+                should_update, updated_centers, input_subspace_centers,
+            )
+        
+        # Create new task state
+        new_task_state: CoreTransientBinaryTask = tree_replace(
+            self,
+            input_subspace_centers = input_subspace_centers,
+            step = self.step + 1,
+            rng = new_rng,
+        )
+        
+        # Generate inputs and compute outputs
+        x = new_task_state._sample_inputs(x_key, batch_size)
+        y = jax.vmap(new_task_state._forward)(x)
+        y = jnp.where(y > self.output_thresholds, 1, 0)
+        
+        return new_task_state, (x, y)
