@@ -25,7 +25,7 @@ from phd.feature_search.jax_core.feature_recycling import CBPTracker
 from phd.feature_search.jax_core.metrics import *
 from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizers import EqxOptimizer
-from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
+from phd.feature_search.jax_core.tasks.geoff import CoreTransientBinaryTask, NonlinearGEOFFTask
 from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
 
@@ -113,8 +113,6 @@ def prepare_ltu_geoff_experiment(cfg: DictConfig):
     
     task, model, criterion, optimizer, repr_optimizer, cbp_tracker = \
         prepare_components(cfg)
-
-    # assert isinstance(task, NonlinearGEOFFTask)
     
     if cfg.model.weight_init_method != 'binary':
         logger.warning(
@@ -215,7 +213,7 @@ class MetricsBuffer(eqx.Module):
 def train_step(
     train_state: TrainState,
     data: Tuple[Float[Array, 'batch_size n_inputs'], Float[Array, 'batch_size n_outputs']],
-    task: NonlinearGEOFFTask | None = None,
+    task: NonlinearGEOFFTask | CoreTransientBinaryTask | None = None,
     do_prune: bool = False,
 ) -> Tuple[TrainState, StepStats]:
     inputs, targets = data
@@ -311,7 +309,7 @@ def train_step(
 
 def train_multi_step(
     train_state: TrainState,
-    task: NonlinearGEOFFTask,
+    task: NonlinearGEOFFTask | CoreTransientBinaryTask,
     n_steps: int,
     train_step_fn: Callable,
 ) -> Tuple[TrainState, StepStats]:
@@ -349,7 +347,7 @@ def train_multi_step(
 
 def compute_metrics(
         train_state: TrainState,
-        task: NonlinearGEOFFTask,
+        task: NonlinearGEOFFTask | CoreTransientBinaryTask,
         metrics_buffer: MetricsBuffer,
         step_stats: StepStats,
         cfg: DictConfig,
@@ -412,7 +410,7 @@ def compute_baseline_loss(
     return loss
 
 
-def log_task_output_weights(task: NonlinearGEOFFTask, cfg: DictConfig):
+def log_task_output_weights(task: NonlinearGEOFFTask | CoreTransientBinaryTask, cfg: DictConfig):
     abs_weights = jnp.abs(task.weights[-1])
     min_idx_flat = abs_weights.argmin()
     min_idx = jnp.unravel_index(min_idx_flat, abs_weights.shape)
@@ -491,9 +489,7 @@ def validate_config(cfg: DictConfig):
         logger.warning("2-layer models have not been well-tested yet!")
 
 
-@hydra.main(config_path='../conf', config_name='full_feature_search', version_base='1.1')
-def main(cfg: DictConfig) -> None:
-    """Run the feature recycling experiment."""
+def configure_jax(cfg: DictConfig):
     jax.config.update('jax_compilation_cache_dir', cfg.jax_jit_cache_dir)
     jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
     jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
@@ -501,7 +497,13 @@ def main(cfg: DictConfig) -> None:
     
     jax.config.update('jax_platform_name', cfg.device)
     print(f"JAX is using device: {jax.devices(cfg.device)[0]}")
+
+
+@hydra.main(config_path='../conf', config_name='full_feature_search', version_base='1.1')
+def main(cfg: DictConfig) -> None:
+    """Run the feature recycling experiment."""
     
+    configure_jax(cfg)
     cfg = init_experiment(cfg.project, cfg)
     validate_config(cfg)
 

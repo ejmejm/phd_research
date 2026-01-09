@@ -18,11 +18,15 @@ model:
   hidden_dim: 256
   activation: ltu
   use_bias: false
-  n_frozen_layers: 0
+  n_frozen_layers: 1
 
 train:
   total_steps: 5_000_000
   log_freq: 2000
+
+feature_recycling:
+  recycle_rate: 0.0
+  freeze_perfect_features: true
 
 optimizer:
   name: idbd
@@ -30,6 +34,5 @@ optimizer:
   learning_rate: 8.0
   meta_learning_rate: 0.05
 
-seed: [2601091, 2601092, 2601093]
-
+seed: 2601091
 

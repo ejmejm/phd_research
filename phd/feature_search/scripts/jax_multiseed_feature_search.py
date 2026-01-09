@@ -71,14 +71,7 @@ def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""
     assert cfg.seed is None or not isinstance(cfg.seed, list), "Seed must be a list of integers!"
     
-    jax.config.update('jax_compilation_cache_dir', cfg.jax_jit_cache_dir)
-    jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
-    jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
-    jax.config.update('jax_persistent_cache_enable_xla_caches', 'xla_gpu_per_fusion_autotune_cache_dir')
-    
-    jax.config.update('jax_platform_name', cfg.device)
-    print(f"JAX is using device: {jax.devices(cfg.device)[0]}")
-    
+    configure_jax(cfg)
     cfg = init_experiment(cfg.project, cfg)
     validate_config(cfg)
     
