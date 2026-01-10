@@ -5,6 +5,17 @@
 ===== Created sweeps with ids =====
 change_type.yaml (150): 2b48d7dd672248a8bc315cc3431364c0
 
-50 experiments per 6 hour job
+40 experiments per 6 hour job
 
 sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 2b48d7dd672248a8bc315cc3431364c0
+
+
+### Round 2 ###
+
+
+===== Created sweeps with ids =====
+change_type_given_features.yaml (150): 90727a80e2b2477d8ecd6d3809a6672b
+
+40 experiments per 6 hour job
+
+sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s 90727a80e2b2477d8ecd6d3809a6672b
