@@ -1,7 +1,4 @@
-import copy
-
 from phd.feature_search.scripts.jax_full_feature_search import *
-
 
 
 def run_multiseed_experiment(
@@ -82,6 +79,13 @@ def main(cfg: DictConfig) -> None:
         cfg.seed = seed
         task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng = \
             prepare_ltu_geoff_experiment(cfg)
+            
+        if cfg.model.get('use_perfect_features', False):
+            model = create_model_with_perfect_features(model, task, cfg)
+            
+            if cfg.feature_recycling.get('perfect_features_irreplaceable', False):
+                cbp_tracker = make_perfect_features_irreplacable(cbp_tracker, task, cfg)
+            
         run_vars.append([task, model, optimizer, repr_optimizer, cbp_tracker, rng])
     
     tasks, models, optimizers, repr_optimizers, cbp_trackers, rngs = \

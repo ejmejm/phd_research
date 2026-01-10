@@ -35,5 +35,5 @@ optimizer:
   learning_rate: 8.0
   meta_learning_rate: 0.05
 
-seed: 2601091
+seed: [2601091, 2601092, 2601093]
 
