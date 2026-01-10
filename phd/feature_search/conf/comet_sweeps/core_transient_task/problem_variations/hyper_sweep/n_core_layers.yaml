@@ -1,0 +1,18 @@
+name: change_type
+project: core_transient_problem_variations
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/core_transient_task/problem_variations/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.n_layers: 6 # 5 if I make transient layers 1
+  task.n_core_layers: [1, 2, 3, 4, 5]
+  model.n_transient_layers: 2 # Maybe 1?
+  task.input_change_freq: ???
+  task.max_input_center_change: ???
+
+  seed: [101, 102, 103, 104, 105]
