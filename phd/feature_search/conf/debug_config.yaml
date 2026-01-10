@@ -13,6 +13,9 @@ task:
   transient_activation_rate: 0.05
   input_change_freq: 100_000
 
+feature_recycling:
+  recycle_rate: 0.0
+
 model:
   n_layers: 4
   hidden_dim: 256

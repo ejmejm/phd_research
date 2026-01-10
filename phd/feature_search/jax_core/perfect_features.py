@@ -68,10 +68,10 @@ def _core_transient_binary_create_perfect_model(
         task_feature_weights = task.weights[layer_idx].T # -> (hidden_dim, in_features/hidden_dim)
             
         model_weights = model.layers[layer_idx].weight
-        new_weights = jnp.concatenate(
-            [task_feature_weights, model_weights[task_feature_weights.shape[0]:]],
-            axis = 0,
-        )
+        
+        new_weights = jnp.zeros_like(model_weights)
+        new_weights = new_weights.at[:task_feature_weights.shape[0], :task_feature_weights.shape[1]].set(task_feature_weights)
+        
         assert new_weights.shape == model_weights.shape, \
             f"Bug in code: new weights shape ({new_weights.shape}) does not match model weights shape ({model_weights.shape})!"
 
