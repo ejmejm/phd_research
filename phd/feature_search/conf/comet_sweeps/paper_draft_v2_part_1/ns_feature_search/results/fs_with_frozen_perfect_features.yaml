@@ -21,7 +21,7 @@ parameters:
 
   feature_recycling.utility_reset_mode: median
   feature_recycling.feature_protection_steps: 0
-  feature_recycling.freeze_perfect_features: true
+  feature_recycling.perfect_features_irreplaceable: true
   feature_recycling.recycle_rate: 0.001
   feature_recycling.utility_decay: 0.999
 

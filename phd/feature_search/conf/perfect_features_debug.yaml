@@ -19,6 +19,7 @@ model:
   activation: ltu
   use_bias: false
   n_frozen_layers: 1
+  use_perfect_features: true
 
 train:
   total_steps: 5_000_000
@@ -26,7 +27,7 @@ train:
 
 feature_recycling:
   recycle_rate: 0.0
-  freeze_perfect_features: true
+  perfect_features_irreplaceable: true
 
 optimizer:
   name: idbd

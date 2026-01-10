@@ -42,6 +42,7 @@ model:
   output_dim: ${task.n_outputs}
   activation: ltu
   use_bias: true
+  use_perfect_features: false
 
 optimizer:
   name: idbd # {idbd, adam, rmsprop, sgd}

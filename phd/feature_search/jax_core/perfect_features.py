@@ -1,4 +1,15 @@
-from jax_full_feature_search import *
+import logging
+
+import equinox as eqx
+import jax.numpy as jnp
+from omegaconf import DictConfig
+
+from phd.feature_search.jax_core.models import MLP
+from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask, CoreTransientBinaryTask
+from phd.feature_search.jax_core.feature_recycling import CBPTracker
+
+
+logger = logging.getLogger(__name__)
 
 
 def _nonlinear_geoff_create_perfect_model(
@@ -156,7 +167,7 @@ def validate_config(cfg: DictConfig):
             f"Model hidden dim ({cfg.model.hidden_dim}) does not match task hidden dim ({cfg.task.hidden_dim})! "
             f"This means that the learner will have features in addition to the perfect features."
         )
-    
+        
     if cfg.model.n_frozen_layers == 0:
         logger.warning(
             f"Model has {cfg.model.n_frozen_layers} frozen layers, so perfect features may be changed!")
@@ -164,39 +175,3 @@ def validate_config(cfg: DictConfig):
     if cfg.feature_recycling.recycle_rate != 0.0:
         logger.warning(f"Recycle rate is {cfg.feature_recycling.recycle_rate}, but it must be 0 if you want to maintain perfect features.")
 
-
-@hydra.main(config_path='../conf', config_name='perfect_features_baseline')
-def main(cfg: DictConfig) -> None:
-    """Run the feature recycling experiment."""
-    # Option to freeze only perfect features: feature_recycling.perfect_features_irreplaceable
-    
-    configure_jax(cfg)
-    cfg = init_experiment(cfg.project, cfg)
-    validate_config(cfg)
-    
-    task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng = \
-        prepare_ltu_geoff_experiment(cfg)
-    model = create_model_with_perfect_features(model, task, cfg)
-    
-    # Set true feature uilities to infinity so they are never replaced
-    if cfg.feature_recycling.get('perfect_features_irreplaceable', False):
-        cbp_tracker = make_perfect_features_irreplacable(cbp_tracker, task, cfg)
-    
-    distractor_tracker = None
-    
-    train_step_fn = jax.jit(train_step, static_argnums=(3,))
-    train_fn = jax.jit(
-        partial(train_multi_step, train_step_fn=train_step_fn),
-        static_argnames = ('n_steps', 'train_step_fn'),
-    )
-    metrics_fn = jax.jit(compute_metrics, static_argnums=(4,))
-    run_experiment(
-        cfg, train_fn, metrics_fn, task, model, criterion, optimizer,
-        repr_optimizer, cbp_tracker, distractor_tracker, rng,
-    )
-    
-    finish_experiment(cfg)
-
-
-if __name__ == '__main__':
-    main()

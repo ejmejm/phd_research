@@ -27,6 +27,11 @@ from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizers import EqxOptimizer
 from phd.feature_search.jax_core.tasks.geoff import CoreTransientBinaryTask, NonlinearGEOFFTask
 from phd.feature_search.jax_core.utils import tree_replace
+from phd.feature_search.jax_core.perfect_features import (
+    create_model_with_perfect_features,
+    make_perfect_features_irreplacable,
+    validate_config as validate_perfect_features_config,
+)
 from phd.research_utils.logging import *
 
 
@@ -487,6 +492,9 @@ def run_experiment(
 def validate_config(cfg: DictConfig):
     if cfg.model.n_layers != 2:
         logger.warning("2-layer models have not been well-tested yet!")
+        
+    if cfg.model.get('use_perfect_features', False):
+        validate_perfect_features_config(cfg)
 
 
 def configure_jax(cfg: DictConfig):
@@ -509,6 +517,12 @@ def main(cfg: DictConfig) -> None:
 
     task, model, criterion, optimizer, repr_optimizer, cbp_tracker, rng = \
         prepare_ltu_geoff_experiment(cfg)
+    
+    if cfg.model.get('use_perfect_features', False):
+        model = create_model_with_perfect_features(model, task, cfg)
+        
+        if cfg.feature_recycling.get('perfect_features_irreplaceable', False):
+            cbp_tracker = make_perfect_features_irreplacable(cbp_tracker, task, cfg)
     
     distractor_tracker = None
     

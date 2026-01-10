@@ -5,10 +5,11 @@ defaults:
 model:
   hidden_dim: 20
   use_bias: false
+  use_perfect_features: true
 
 feature_recycling:
   recycle_rate: 0.0
-  freeze_perfect_features: false
+  perfect_features_irreplaceable: false
 
 train:
   standardize_cumulants: false
