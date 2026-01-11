@@ -7,7 +7,6 @@ import string
 import sys
 import tempfile
 from typing import Tuple
-import warnings
 
 import numpy as np
 import omegaconf
@@ -22,6 +21,9 @@ wandb = None
 comet_ml = None
 mlflow = None
 experiment_module_name: Optional[str] = None
+
+
+logger = logging.getLogger(__name__)
 
 
 def flatten_dict(d, parent_key='', sep='.'):
@@ -51,7 +53,17 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
     
     if config and config.get('mlflow', False):
         import mlflow
-        mlflow.set_tracking_uri(config.get('mlflow_tracking_uri', MLFLOW_DEFAULT_TRACKING_URI))
+        
+        if os.environ.get('MLFLOW_TRACKING_URI'):
+            if config.get('mlflow_tracking_uri') is not None:
+                logger.warning(
+                    f"MLFLOW_TRACKING_URI is set in the environment, "
+                    f"using it instead of config value: {config.get('mlflow_tracking_uri')}"
+                )
+            mlflow.set_tracking_uri(os.environ.get('MLFLOW_TRACKING_URI'))
+        else:
+            mlflow.set_tracking_uri(config.get('mlflow_tracking_uri', MLFLOW_DEFAULT_TRACKING_URI))
+        
         if os.environ.get('MLFLOW_RUN_ID') is None:
             mlflow.set_experiment(project)
         mlflow.start_run()
