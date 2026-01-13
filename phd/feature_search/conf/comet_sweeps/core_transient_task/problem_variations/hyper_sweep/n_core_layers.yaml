@@ -9,9 +9,9 @@ spec:
   retryAssignLimit: 4
 
 parameters:
-  model.n_layers: 6 # 5 if I make transient layers 1
+  model.n_layers: 5
   task.n_core_layers: [1, 2, 3, 4, 5]
-  model.n_transient_layers: 2 # Maybe 1?
+  model.n_transient_layers: 1
   task.input_change_freq: ???
   task.max_input_center_change: ???
 
