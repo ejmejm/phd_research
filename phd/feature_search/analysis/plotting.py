@@ -154,6 +154,7 @@ def plot_learning_curves(
         y_col = 'loss',
         y_label = None,
         hue_col = None,
+        style_col = None,
         legend_title = None,
         pow_2_legend = False,
         xlim = None,
@@ -178,6 +179,7 @@ def plot_learning_curves(
         y_col: Column to plot on y-axis (default: 'loss')
         y_label: Label for y-axis (default: same as y_col)
         hue_col: Column to use for line colors
+        style_col: Column to use for line styles (e.g., solid, dashed)
         legend_title: Title for the legend
         pow_2_legend: Whether to display legend values as powers of 2
         xlim: Optional tuple of (min, max) for x-axis limits
@@ -232,6 +234,17 @@ def plot_learning_curves(
         hue_values = sorted(plot_df[hue_col].unique())
         palette = sns.color_palette('deep', n_colors=len(hue_values))
         color_map = dict(zip(hue_values, palette))
+    
+    # Create style mapping for consistent line styles across subplots
+    dashes_map = None
+    if style_col is not None:
+        style_values = sorted(plot_df[style_col].unique())
+        # Matplotlib line styles: solid, dashed, dashdot, dotted, etc.
+        line_styles = ['-', '--', '-.', ':', (0, (3, 1, 1, 1)), (0, (5, 2, 1, 2))]
+        # Cycle through styles if we have more values than styles
+        style_map = {val: line_styles[i % len(line_styles)] 
+                    for i, val in enumerate(style_values)}
+        
 
     for i, val in enumerate(subplot_values):
         # Filter for current value if subplot_col exists
@@ -244,7 +257,19 @@ def plot_learning_curves(
 
         # Show individual runs in pale colors if requested
         if show_individual_lines and 'run_id' in curr_df.columns:
-            if hue_col is not None:
+            if hue_col is not None and style_col is not None:
+                for hue_val in hue_values:
+                    for style_val in style_values:
+                        sub_df = curr_df[(curr_df[hue_col] == hue_val) & 
+                                        (curr_df[style_col] == style_val)]
+                        color = color_map[hue_val]
+                        linestyle = style_map[style_val]
+                        # Group by run_id
+                        for run_id, run_df_local in sub_df.groupby('run_id'):
+                            axes[i].plot(run_df_local[x_col], run_df_local[y_col],
+                                         color=color, linestyle=linestyle, 
+                                         alpha=line_alpha, linewidth=1, zorder=1)
+            elif hue_col is not None:
                 for hue_val in hue_values:
                     sub_df = curr_df[curr_df[hue_col] == hue_val]
                     color = color_map[hue_val]
@@ -252,6 +277,15 @@ def plot_learning_curves(
                     for run_id, run_df_local in sub_df.groupby('run_id'):
                         axes[i].plot(run_df_local[x_col], run_df_local[y_col],
                                      color=color, alpha=line_alpha, linewidth=1, zorder=1)
+            elif style_col is not None:
+                for style_val in style_values:
+                    sub_df = curr_df[curr_df[style_col] == style_val]
+                    linestyle = style_map[style_val]
+                    # Group by run_id
+                    for run_id, run_df_local in sub_df.groupby('run_id'):
+                        axes[i].plot(run_df_local[x_col], run_df_local[y_col],
+                                     linestyle=linestyle, alpha=line_alpha, 
+                                     linewidth=1, zorder=1)
             else:
                 color = 'C0'
                 for run_id, run_df_local in curr_df.groupby('run_id'):
@@ -264,11 +298,31 @@ def plot_learning_curves(
             x = x_col,
             y = y_col,
             hue = hue_col,
+            style = style_col,
+            style_order = style_values if style_col is not None else None,
             palette = color_map if hue_col is not None else None,
             errorbar = ('ci', 95) if show_ci else None,
             ax = axes[i],
             legend = False  # Don't show legend for any subplot
         )
+        
+        # Manually set line styles after seaborn creates the plot
+        if style_col is not None:
+            lines = axes[i].get_lines()
+            if hue_col is not None and style_col is not None:
+                # When both hue and style are used, lines are ordered by (hue, style)
+                # For each hue value, we cycle through style values
+                line_idx = 0
+                for hue_val in hue_values:
+                    for style_val in style_values:
+                        if line_idx < len(lines):
+                            lines[line_idx].set_linestyle(style_map[style_val])
+                            line_idx += 1
+            elif style_col is not None:
+                # When only style is used, lines are in order of style values
+                for line_idx, style_val in enumerate(style_values):
+                    if line_idx < len(lines):
+                        lines[line_idx].set_linestyle(style_map[style_val])
         
         # Customize subplot
         axes[i].grid(True, alpha=0.4)
@@ -304,20 +358,42 @@ def plot_learning_curves(
         axes[i].set_ylabel(y_label if y_label else y_col)
     
     # Add a single legend to the figure
-    if hue_col is not None:
+    if hue_col is not None or style_col is not None:
         # Create custom legend handles
-        legend_elements = [plt.Line2D([0], [0], color=color_map[val], label=val) 
+        if hue_col is not None and style_col is not None:
+            # Combine hue and style in legend
+            legend_elements = []
+            labels = []
+            for hue_val in hue_values:
+                for style_val in style_values:
+                    color = color_map[hue_val]
+                    linestyle = style_map[style_val]
+                    # Create label combining both hue and style
+                    if pow_2_legend:
+                        hue_label = f'{"0" if hue_val == 0 else f"$2^{{{int(np.log2(float(hue_val)))}}}$"}'
+                    else:
+                        hue_label = str(hue_val)
+                    label = f'{hue_label} ({style_val})'
+                    legend_elements.append(
+                        plt.Line2D([0], [0], color=color, linestyle=linestyle, label=label)
+                    )
+                    labels.append(label)
+        elif hue_col is not None:
+            legend_elements = [plt.Line2D([0], [0], color=color_map[val], label=val) 
+                             for val in hue_values]
+            if pow_2_legend:
+                labels = [f'{"0" if val == 0 else f"$2^{{{int(np.log2(float(val)))}}}$"}' 
                          for val in hue_values]
+            else:
+                labels = hue_values
+        else:  # style_col is not None
+            legend_elements = [plt.Line2D([0], [0], linestyle=style_map[val], label=val) 
+                             for val in style_values]
+            labels = style_values
         
         # Add the legend to the figure
-        if pow_2_legend:
-            labels = [f'{"0" if val == 0 else f"$2^{{{int(np.log2(float(val)))}}}$"}' 
-                     for val in hue_values]
-            fig.legend(legend_elements, labels, title=legend_title,
-                      bbox_to_anchor=(1.05, 0.5), loc='center left')
-        else:
-            fig.legend(legend_elements, hue_values, title=legend_title,
-                      bbox_to_anchor=(1.05, 0.5), loc='center left')
+        fig.legend(legend_elements, labels, title=legend_title,
+                  bbox_to_anchor=(1.05, 0.5), loc='center left')
     
     # Remove any extra subplots
     for i in range(len(subplot_values), len(axes)):
