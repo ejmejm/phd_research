@@ -472,7 +472,8 @@ def run_experiment(
         criterion = criterion,
         rng = rng,
     )
-    log_task_output_weights(task, cfg)
+    if isinstance(task, (NonlinearGEOFFTask, CoreTransientBinaryTask)):
+        log_task_output_weights(task, cfg)
     metrics_buffer = MetricsBuffer()
     all_metrics = []
     

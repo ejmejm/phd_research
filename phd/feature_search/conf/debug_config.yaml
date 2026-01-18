@@ -1,40 +1,40 @@
 defaults:
-- core_transient_binary
+- full_feature_search
+- summation_task
 - _self_
 
 wandb: true
 
 task:
-  n_outputs: 20
-
-  n_core_layers: 1
-  n_transient_layers: 2
-  transient_sparsity: 0.9
-  transient_activation_rate: 0.05
-  input_change_freq: 100_000
+  change_subset_freq: 200
+  change_multiplier_freq: null
 
 feature_recycling:
   recycle_rate: 0.0
 
 model:
-  n_layers: 4
-  hidden_dim: 256
-  activation: ltu
+  n_layers: 3
+  hidden_dim: 300
+  activation: linear
   use_bias: false
-  n_frozen_layers: 1
+  n_frozen_layers: 0
 
 train:
-  total_steps: 5_000_000
-  log_freq: 2000
-  log_optimizer_stats: true
-  log_update_stats: true
+  total_steps: 1_000_000
+  log_freq: 500
+  log_optimizer_stats: false
+  log_update_stats: false
+
+# optimizer:
+#   name: sgd
+#   learning_rate: 0.001
 
 optimizer:
   name: idbd
   autostep: true
-  learning_rate: 8.0
-  meta_learning_rate: 0.05
+  learning_rate: 0.0001
+  meta_learning_rate: 0.01
 
-seed: 1 # [2601091, 2601092, 2601093]
+seed: [26011701, 26011702, 26011703, 26011704, 26011705]
 
 

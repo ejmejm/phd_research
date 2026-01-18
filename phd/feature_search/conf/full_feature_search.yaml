@@ -31,7 +31,7 @@ train:
   total_steps: 1_000_000
   log_freq: 2000
   batch_size: 1
-  standardize_cumulants: true
+  standardize_cumulants: false
   log_feature_match_stats: false
 
 model:

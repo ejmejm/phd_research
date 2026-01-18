@@ -18,6 +18,7 @@ from .feature_recycling import CBPTracker
 from .models import MLP
 from .optimizers import EqxOptimizer, optax_idbd, custom_optax_adam
 from .tasks.geoff import BinaryRegressionTask, CoreTransientBinaryTask, InputChangingGEOFFTask, NonlinearGEOFFTask
+from .tasks.summation import SummationTask
 from .utils import tree_replace
 
 
@@ -102,6 +103,18 @@ def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
             input_change_freq = cfg.task.input_change_freq,
             max_input_center_change = cfg.task.max_input_center_change,
             n_calibration_samples = cfg.task.get('n_calibration_samples', 10000),
+            seed = seed,
+        )
+    elif cfg.task.name.lower() == 'summation':
+        cfg.task.type = 'regression'
+        return SummationTask(
+            n_features = cfg.task.n_features,
+            subset_size = cfg.task.subset_size,
+            change_subset_freq = cfg.task.change_subset_freq,
+            flip_multiplier_freq = cfg.task.flip_multiplier_freq,
+            input_min = cfg.task.input_min,
+            input_max = cfg.task.input_max,
+            initial_multiplier = cfg.task.initial_multiplier,
             seed = seed,
         )
     else:

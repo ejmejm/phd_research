@@ -1,0 +1,13 @@
+defaults:
+- _self_
+
+
+task:
+  name: summation
+  n_features: 16
+  subset_size: 2
+  change_subset_freq: null
+  flip_multiplier_freq: null
+  input_min: -1.0
+  input_max: 1.0
+  initial_multiplier: 1.0
