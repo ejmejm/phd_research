@@ -9,7 +9,7 @@ spec:
   retryAssignLimit: 4
 
 parameters:
-  task.change_subset_freq: 200
+  task.flip_multiplier_freq: 200
 
   optimizer.name: upgd
   optimizer.learning_rate:

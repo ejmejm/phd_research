@@ -7,7 +7,7 @@ wandb: true
 
 task:
   change_subset_freq: 200
-  change_multiplier_freq: null
+  flip_multiplier_freq: null
 
 feature_recycling:
   recycle_rate: 0.0
