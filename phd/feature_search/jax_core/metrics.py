@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
 from omegaconf import DictConfig
+from torch import layer_norm
 
 from .models import MLP
 from .optimizers import EqxOptimizer
@@ -158,6 +159,31 @@ def compute_optimizer_stats(
         beta_flat = beta.ravel()
         metrics[f'optimizer/layer_{i}/beta_mean'] = jnp.mean(beta_flat)
         metrics[f'optimizer/layer_{i}/beta_std'] = jnp.std(beta_flat)
+
+    return metrics
+
+
+def compute_update_stats(
+    model: MLP,
+    update_mean_l1s: Float[Array, '... n_layers'],
+    steps_since_log: int,
+) -> Dict[str, float]:
+    """Compute mean L1 of updates for each model layer.
+
+    Args:
+        model: The model, used to determine layer structure.
+        update_mean_l1s: Accumulated mean L1 values per layer with shape
+            (..., n_trainable_layers) where ... are step dimensions.
+        steps_since_log: Number of steps to average over.
+
+    Returns:
+        Dictionary of metrics with mean L1 per layer.
+    """
+    metrics = {}
+
+    n_frozen_layers = len(model.layers) - update_mean_l1s.shape[-1]
+    for i in range(n_frozen_layers, len(model.layers)):
+        metrics[f'updates/layer_{i}/mean_l1'] = update_mean_l1s[:, i - n_frozen_layers].mean()
 
     return metrics
 

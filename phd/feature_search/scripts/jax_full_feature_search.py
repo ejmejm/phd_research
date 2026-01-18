@@ -167,6 +167,7 @@ class TrainState(eqx.Module):
     log_pruning_stats: bool = eqx.field(static=True)
     log_model_stats: bool = eqx.field(static=True)
     log_optimizer_stats: bool = eqx.field(static=True)
+    log_update_stats: bool = eqx.field(static=True)
     log_feature_matched_optimizer_stats: bool = eqx.field(static=True)
     log_feature_match_stats: bool = eqx.field(static=True)
     
@@ -197,6 +198,7 @@ class TrainState(eqx.Module):
         self.log_pruning_stats = self.cfg.train.get('log_pruning_stats', False)
         self.log_model_stats = self.cfg.train.get('log_model_stats', False)
         self.log_optimizer_stats = self.cfg.train.get('log_optimizer_stats', False)
+        self.log_update_stats = self.cfg.train.get('log_update_stats', False)
         self.log_feature_matched_optimizer_stats = self.cfg.train.get('log_feature_matched_optimizer_stats', False)
         self.log_feature_match_stats = self.cfg.train.get('log_feature_match_stats', False)
 
@@ -208,6 +210,7 @@ class StepStats(eqx.Module):
     baseline_loss: Float[Array, '']
     n_pruned: Int[Array, '']
     n_best_features_pruned: Int[Array, '']
+    update_mean_l1s: Float[Array, 'n_layers']  # Mean L1 of updates per layer (float64)
 
 
 class MetricsBuffer(eqx.Module):
@@ -269,6 +272,12 @@ def train_step(
         repr_updates, repr_optimizer = repr_optimizer.with_update(grads, model)
         updates = eqx.combine(updates, repr_updates)
     
+    # Compute mean L1 of updates per layer (always computed, flag controls logging)
+    # Use float64 for precision in accumulation
+    update_weights = [layer.weight for layer in updates.layers if layer.weight is not None]
+    update_mean_l1s = jnp.array(
+        [jnp.mean(jnp.abs(w)) for w in update_weights], dtype=jnp.float64)
+    
     model = eqx.apply_updates(model, updates)
     if cfg.model.get('use_normalize_and_project', False):
         model = model.with_projected_weights()
@@ -309,7 +318,10 @@ def train_step(
     )
     train_state_updates = {k: v for k, v in train_state_updates.items() if v is not None}
     train_state = tree_replace(train_state, **train_state_updates)
-    step_stats = StepStats(loss, targets, baseline_loss, n_pruned, n_best_features_pruned)
+    step_stats = StepStats(
+        loss, targets, baseline_loss, n_pruned, n_best_features_pruned,
+        update_mean_l1s,
+    )
     
     return train_state, step_stats
 
@@ -348,6 +360,8 @@ def train_multi_step(
         length = n_steps // prune_frequency,
         unroll = TRAIN_LOOP_UNROLL,
     )
+    
+    step_stats = jax.tree.map(lambda arr: arr.reshape((arr.shape[0] * arr.shape[1],) + arr.shape[2:]), step_stats)
     
     return train_state, task, step_stats
 
@@ -395,6 +409,9 @@ def compute_metrics(
         metrics.update(compute_model_stats(train_state.model, task))
     if cfg.train.get('log_optimizer_stats', False):
         metrics.update(compute_optimizer_stats(train_state.optimizer))
+    if cfg.train.get('log_update_stats', False):
+        metrics.update(compute_update_stats(
+            train_state.model, step_stats.update_mean_l1s, steps_since_log))
     if cfg.train.get('log_feature_matched_optimizer_stats', False):
         metrics.update(compute_feature_matched_optimizer_stats(train_state.optimizer, train_state.model, task))
     if cfg.train.get('log_feature_match_stats', False):

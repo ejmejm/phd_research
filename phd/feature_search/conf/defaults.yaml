@@ -68,6 +68,7 @@ train:
   log_model_stats: false # Log model statistics
   log_optimizer_stats: false # Log optimizer statistics
   log_feature_matched_optimizer_stats: false # Log optimizer statistics
+  log_update_stats: false # Log L1 norm of weight updates per layer
   log_feature_match_stats: false # Log feature match statistics (JAX only)
 
 # Optimizer parameters
