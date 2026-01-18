@@ -12,6 +12,7 @@ parameters:
   model.n_frozen_layers: ${eval:${model.use_perfect_features} * ${task.n_core_layers}}
 
   train.total_steps: 20_000_000
+  train.log_update_stats: true
 
   task.input_change_freq: 4_000
   task.max_input_center_change: 0.1

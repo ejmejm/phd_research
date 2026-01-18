@@ -1,5 +1,5 @@
 name: autostep
-project: core_transient_problem_variations_best_tmp_log
+project: core_transient_problem_variations_best
 command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/core_transient_task/problem_variations/base_config.yaml
 algorithm: grid
 
@@ -12,6 +12,7 @@ parameters:
   model.n_frozen_layers: ${eval:${model.use_perfect_features} * ${task.n_core_layers}}
 
   train.total_steps: 20_000_000
+  train.log_update_stats: true
   train.log_optimizer_stats: true
 
   task.input_change_freq: 4_000
