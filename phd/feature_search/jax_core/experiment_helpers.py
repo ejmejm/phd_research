@@ -16,7 +16,7 @@ import optax
 
 from .feature_recycling import CBPTracker
 from .models import MLP
-from .optimizers import EqxOptimizer, optax_idbd, custom_optax_adam
+from .optimizers import EqxOptimizer, optax_idbd, optax_upgd, custom_optax_adam
 from .tasks.geoff import BinaryRegressionTask, CoreTransientBinaryTask, InputChangingGEOFFTask, NonlinearGEOFFTask
 from .tasks.summation import SummationTask
 from .utils import tree_replace
@@ -196,6 +196,15 @@ def prepare_optimizer(
         kwargs['meta_lr'] = kwargs.pop('meta_learning_rate')
         optimizer = optax_idbd(**kwargs)
         return EqxOptimizer(optimizer, model, filter_spec, name='idbd')
+    
+    elif optimizer_name == 'upgd':
+        kwargs = _extract_kwargs(
+            ['learning_rate', 'weight_decay', 'beta_utility', 'sigma'],
+            {'learning_rate': 1e-5, 'weight_decay': 0.001, 'beta_utility': 0.999, 'sigma': 0.001},
+        )
+        kwargs['lr'] = kwargs.pop('learning_rate')
+        optimizer = optax_upgd(**kwargs)
+        return EqxOptimizer(optimizer, model, filter_spec, name='upgd')
         
     else:
         raise ValueError(f'Invalid optimizer type: {optimizer_name}')
