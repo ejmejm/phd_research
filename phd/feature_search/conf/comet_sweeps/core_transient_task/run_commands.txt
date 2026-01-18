@@ -49,3 +49,17 @@ autostep.yaml (60): 50f7c1967712467c8dde51c1c1fef881
 
 sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=02:20:00 launch_comet_agent.sbatch -s 50f7c1967712467c8dde51c1c1fef881
 
+
+### Round 4 ###
+
+
+===== Created sweeps with ids =====
+autostep.yaml (60): 51764309b5854e648123b978dc1c5dba
+sgd.yaml (60): c4d754d167f643ef86995ed75b76c8f3
+sgd_split_step_size.yaml (60): bd99e0e801774ca49af5c5c1e1ac67a2
+
+8 experiments per 5 hour job
+
+sbatch --array=1-8 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=05:00:00 launch_comet_agent.sbatch -s 51764309b5854e648123b978dc1c5dba
+sbatch --array=1-8 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=05:00:00 launch_comet_agent.sbatch -s c4d754d167f643ef86995ed75b76c8f3
+sbatch --array=1-8 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=05:00:00 launch_comet_agent.sbatch -s bd99e0e801774ca49af5c5c1e1ac67a2
