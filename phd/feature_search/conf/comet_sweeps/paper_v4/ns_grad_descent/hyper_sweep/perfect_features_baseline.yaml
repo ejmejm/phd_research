@@ -13,7 +13,7 @@ parameters:
   model.n_frozen_layers: 1
   model.use_perfect_features: true
 
-  train.log_optimizer_stats: true
+  train.log_feature_matched_optimizer_stats: true
   optimizer.name: idbd
   optimizer.autostep: true
 

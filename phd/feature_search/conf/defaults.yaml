@@ -65,8 +65,9 @@ train:
   standardize_cumulants: false # Normalizes targets to mean of 0 and std dev of 1 when true
   log_utility_stats: false # Log utility statistics (PyTorch only)
   log_pruning_stats: false # Log pruning statistics (PyTorch only)
-  log_model_stats: false # Log model statistics (PyTorch only)
-  log_optimizer_stats: false # Log optimizer statistics (PyTorch only)
+  log_model_stats: false # Log model statistics
+  log_optimizer_stats: false # Log optimizer statistics
+  log_feature_matched_optimizer_stats: false # Log optimizer statistics
   log_feature_match_stats: false # Log feature match statistics (JAX only)
 
 # Optimizer parameters

@@ -16,7 +16,7 @@ parameters:
   task.n_stationary_layers: 0
   model.hidden_dim: 5120
   task.flip_rate: "${eval:2**-16}"
-  train.log_optimizer_stats: true
+  train.log_feature_matched_optimizer_stats: true
   optimizer.name: idbd
   feature_recycling.utility_reset_mode: zero
 

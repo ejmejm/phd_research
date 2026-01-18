@@ -14,7 +14,7 @@ spec:
 parameters:
   train.total_steps: 500_000
   train.log_freq: 250
-  train.log_optimizer_stats: true
+  train.log_feature_matched_optimizer_stats: true
 
   optimizer.learning_rate: 
     - ${eval:0.3 / ${model.hidden_dim} ** 0.75}

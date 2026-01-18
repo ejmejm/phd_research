@@ -330,7 +330,7 @@ def run_experiment(
     log_utility_stats = cfg.train.get('log_utility_stats', False)
     log_pruning_stats = cfg.train.get('log_pruning_stats', False)
     log_model_stats = cfg.train.get('log_model_stats', False)
-    log_optimizer_stats = cfg.train.get('log_optimizer_stats', False)
+    log_feature_matched_optimizer_stats = cfg.train.get('log_feature_matched_optimizer_stats', False)
 
     # Initialize accumulators
     cumulant_stats = StandardizationStats(gamma=0.99)
@@ -476,7 +476,7 @@ def run_experiment(
                     metrics['distractor_utility_25th'] = distractor_utilities.quantile(0.25).item() 
                     metrics['distractor_utility_75th'] = distractor_utilities.quantile(0.75).item()
             
-            if log_optimizer_stats and isinstance(optimizer, IDBD):
+            if log_feature_matched_optimizer_stats and isinstance(optimizer, IDBD):
                 states = list(optimizer.state.values())
                 assert len(states) == 1, "There should not be more than one optimizer state!"
                 state = states[0]

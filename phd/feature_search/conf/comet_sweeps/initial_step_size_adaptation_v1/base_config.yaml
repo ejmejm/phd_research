@@ -28,7 +28,7 @@ train:
   log_freq: 2500
   log_utility_stats: false
   log_pruning_stats: true
-  log_optimizer_stats: true
+  log_feature_matched_optimizer_stats: true
   log_model_stats: false
 
 optimizer:

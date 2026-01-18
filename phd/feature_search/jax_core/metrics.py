@@ -145,6 +145,24 @@ def compute_model_stats(
 
 
 def compute_optimizer_stats(
+    optimizer: EqxOptimizer
+) -> Dict[str, float]:
+    """Compute statistics about the model's weights."""
+    assert optimizer.name == 'idbd', "Only supports IDBD optimizer!"
+    metrics = {}
+
+    # Get the beta parameters from each layer
+    beta_leaves = jax.tree.leaves(optimizer.state.beta)
+    n_frozen_layers = len(optimizer.state.beta.layers) - len(beta_leaves)
+    for i, beta in enumerate(beta_leaves, start=n_frozen_layers):
+        beta_flat = beta.ravel()
+        metrics[f'optimizer/layer_{i}/beta_mean'] = jnp.mean(beta_flat)
+        metrics[f'optimizer/layer_{i}/beta_std'] = jnp.std(beta_flat)
+
+    return metrics
+
+
+def compute_feature_matched_optimizer_stats(
     optimizer: EqxOptimizer,
     model: MLP,
     task: NonlinearGEOFFTask,

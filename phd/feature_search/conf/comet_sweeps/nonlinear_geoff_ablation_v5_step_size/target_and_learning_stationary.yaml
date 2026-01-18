@@ -16,7 +16,7 @@ parameters:
   task.n_stationary_layers: 0
   model.hidden_dim: 5120
   task.flip_rate: 0.0
-  train.log_optimizer_stats: true
+  train.log_feature_matched_optimizer_stats: true
   feature_recycling.recycle_rate: 0.0
 
   optimizer.learning_rate: ["${eval:2**-10}", "${eval:2**-12}", "${eval:2**-14}", "${eval:2**-16}", "${eval:2**-18}", "${eval:2**-20}"]

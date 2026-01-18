@@ -167,6 +167,7 @@ class TrainState(eqx.Module):
     log_pruning_stats: bool = eqx.field(static=True)
     log_model_stats: bool = eqx.field(static=True)
     log_optimizer_stats: bool = eqx.field(static=True)
+    log_feature_matched_optimizer_stats: bool = eqx.field(static=True)
     log_feature_match_stats: bool = eqx.field(static=True)
     
     # Non-static
@@ -196,6 +197,7 @@ class TrainState(eqx.Module):
         self.log_pruning_stats = self.cfg.train.get('log_pruning_stats', False)
         self.log_model_stats = self.cfg.train.get('log_model_stats', False)
         self.log_optimizer_stats = self.cfg.train.get('log_optimizer_stats', False)
+        self.log_feature_matched_optimizer_stats = self.cfg.train.get('log_feature_matched_optimizer_stats', False)
         self.log_feature_match_stats = self.cfg.train.get('log_feature_match_stats', False)
 
 
@@ -392,7 +394,9 @@ def compute_metrics(
     if cfg.train.get('log_model_stats', False):
         metrics.update(compute_model_stats(train_state.model, task))
     if cfg.train.get('log_optimizer_stats', False):
-        metrics.update(compute_optimizer_stats(train_state.optimizer, train_state.model, task))
+        metrics.update(compute_optimizer_stats(train_state.optimizer))
+    if cfg.train.get('log_feature_matched_optimizer_stats', False):
+        metrics.update(compute_feature_matched_optimizer_stats(train_state.optimizer, train_state.model, task))
     if cfg.train.get('log_feature_match_stats', False):
         log_perfect_matches = cfg.model.get('n_frozen_layers', 0) > 0
         metrics.update(compute_feature_match_stats(

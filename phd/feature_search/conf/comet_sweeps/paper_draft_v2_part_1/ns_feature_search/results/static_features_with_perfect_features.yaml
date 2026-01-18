@@ -11,7 +11,7 @@ spec:
 parameters:
   train.total_steps: 30_000_000
   train.log_model_stats: true
-  train.log_optimizer_stats: true
+  train.log_feature_matched_optimizer_stats: true
   
   model.hidden_dim: 5120
   model.use_bias: false

@@ -39,7 +39,7 @@ train:
   log_utility_stats: false
   log_pruning_stats: false
   log_model_stats: false
-  log_optimizer_stats: false
+  log_feature_matched_optimizer_stats: false
   log_feature_match_stats: true
 
 optimizer:
