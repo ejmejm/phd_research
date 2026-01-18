@@ -1,0 +1,44 @@
+# @package _global_
+
+defaults:
+  - /full_feature_search
+  - /summation_task
+  - _self_
+
+comet_ml: true
+device: cuda
+jax_jit_cache_dir: ${oc.env:HOME}/scratch/jax_cache
+
+
+model:
+  n_layers: 3
+  hidden_dim: 300
+  activation: linear
+  use_bias: false
+  n_frozen_layers: 0
+  weight_init_method: lecun_uniform
+
+feature_recycling:
+  recycle_rate: 0.0
+
+train:
+  total_steps: 1_000_000
+  log_freq: 2000
+  standardize_cumulants: false
+  log_utility_stats: false
+  log_pruning_stats: false
+  log_model_stats: false
+  log_feature_matched_optimizer_stats: false
+  log_update_stats: false
+  log_feature_match_stats: false
+
+# optimizer:
+#   name: idbd
+#   version: prediction_grads
+#   autostep: true
+#   learning_rate: 8.0
+#   meta_learning_rate: 0.01
+
+representation_optimizer:
+  name: null # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  weight_decay: 0
