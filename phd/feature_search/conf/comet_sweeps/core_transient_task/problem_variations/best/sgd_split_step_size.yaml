@@ -18,7 +18,7 @@ parameters:
   task.max_input_center_change: 0.1
 
   optimizer.name: sgd
-  optimizer.learning_rate: ${eval:0.03125 if ${model.use_perfect_features} else 0.00390625}
+  optimizer.learning_rate: 0.00390625
   
   representation_optimizer.name: sgd
   representation_optimizer.learning_rate: 2.0

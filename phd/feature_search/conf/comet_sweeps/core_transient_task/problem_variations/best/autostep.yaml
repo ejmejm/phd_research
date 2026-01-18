@@ -21,7 +21,7 @@ parameters:
   optimizer.name: idbd
   optimizer.autostep: true
   optimizer.learning_rate: 8.0
-  optimizer.meta_learning_rate: ${eval:0.001953125 if ${model.use_perfect_features} else 0.00390625}
+  optimizer.meta_learning_rate: 0.00390625
   
   model.use_perfect_features: [true, false]
 

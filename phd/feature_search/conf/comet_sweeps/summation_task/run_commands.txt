@@ -24,5 +24,3 @@ sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --me
 sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s 087942b448324355a22b8988abe96f57
 sbatch --array=1-9 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s ad937da726a54061b8b8a1f9f7511da9
 sbatch --array=1-9 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s c1404da18ab7442b85805a04a6464fd4
-
-
