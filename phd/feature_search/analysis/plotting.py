@@ -188,6 +188,9 @@ def plot_learning_curves(
         show_individual_lines: Whether to plot all individual runs in pale colors (default: False)
         line_alpha: Transparency for individual lines (default: 0.3)
     """
+    if len(run_df) == 0:
+        raise ValueError('run_df is empty!')
+    
     # Get full dataset
     plot_df = run_df
     if config_df is not None:
@@ -253,7 +256,14 @@ def plot_learning_curves(
             curr_df = plot_df[plot_df[subplot_col] == val].copy()
         
         # Bin data for mean plot
-        binned_df = bin_df(curr_df, n_bins=n_bins)
+        # Include hue_col and style_col in grouping to preserve distinctions
+        groupby_cols = []
+        if hue_col is not None and hue_col in curr_df.columns:
+            groupby_cols.append(hue_col)
+        if style_col is not None and style_col in curr_df.columns:
+            groupby_cols.append(style_col)
+        
+        binned_df = bin_df(curr_df, n_bins=n_bins, groupby_cols=groupby_cols)
 
         # Show individual runs in pale colors if requested
         if show_individual_lines and 'run_id' in curr_df.columns:

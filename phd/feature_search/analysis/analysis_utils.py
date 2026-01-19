@@ -25,7 +25,7 @@ def t_ci(vals):
     return t_distrib(vals)[1] - np.mean(vals)
 
 
-def bin_df(df, n_bins=10, bin_var='step', zero_start=True, run_key='run_id'):
+def bin_df(df, n_bins=10, bin_var='step', zero_start=True, run_key='run_id', groupby_cols=None):
     if n_bins == -1:
         return df
     
@@ -40,9 +40,19 @@ def bin_df(df, n_bins=10, bin_var='step', zero_start=True, run_key='run_id'):
     # Use dictionary comprehension to create an aggregation dictionary
     agg_dict = {col: 'mean' if col in num_cols else 'first' for col in df.columns}
 
+    # Determine grouping columns
+    if groupby_cols is None:
+        groupby_cols = [run_key, bin_var]
+    else:
+        # Ensure run_key and bin_var are included
+        if run_key not in groupby_cols:
+            groupby_cols = [run_key] + groupby_cols
+        if bin_var not in groupby_cols:
+            groupby_cols = groupby_cols + [bin_var]
+
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', category=FutureWarning)
-        df = df.groupby([run_key, bin_var]).agg(agg_dict)
+        df = df.groupby(groupby_cols).agg(agg_dict)
     df[bin_var] = pd.to_numeric(df[bin_var])
 
     return df.reset_index(drop=True)
