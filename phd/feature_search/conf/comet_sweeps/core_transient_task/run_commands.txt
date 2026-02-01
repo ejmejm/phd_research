@@ -65,7 +65,6 @@ sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --me
 sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 50cacaaca4e44d7bba83dca0107a22aa
 
 
-
 ### Round 2 ###
 
 
@@ -77,3 +76,24 @@ autostep.yaml (30): 63540a59aa7948afa804abd317ba43e8
 
 sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 86778f20f38c46ff95720e9b53def68e
 sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 launch_comet_agent.sbatch -s 63540a59aa7948afa804abd317ba43e8
+
+
+### Round 3 ###
+
+
+===== Created sweeps with ids =====
+autostep.yaml (5): 965d7564a4a74db6909fe40d19d225e5
+autostep_ideal_features.yaml (5): 25f6471320764cc0a42ffb5b61577a06
+input_range_impact.yaml (50): c76dde17316a477eaafda2c9c2274394
+autostep_feature_search.yaml (1125): c9e28e23552b4e9d973bff3efeaabbd2
+feature_search_only.yaml (1125): efc33ff578b841679fd4b389314a38a3
+upgd.yaml (2160): 2ccafe1dd4f54dca84889dafb4758070
+
+? experiments per 12 hour job
+
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 965d7564a4a74db6909fe40d19d225e5
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 25f6471320764cc0a42ffb5b61577a06
+sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s c76dde17316a477eaafda2c9c2274394
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s c9e28e23552b4e9d973bff3efeaabbd2
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s efc33ff578b841679fd4b389314a38a3
+sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 2ccafe1dd4f54dca84889dafb4758070

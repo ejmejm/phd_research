@@ -1,0 +1,18 @@
+name: input_range_impact
+project: stationary_optimizer_comparison
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/core_transient_task/stationary_optimizer_comparison/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.n_frozen_layers: ${eval:${model.use_perfect_features} * ${task.n_core_layers}}
+
+  input_subspace_range: [0.125, 0.25, 0.5, 1.0, 2.0]
+
+  model.use_perfect_features: [true, false]
+
+  seed: [201, 202, 203, 204, 205]

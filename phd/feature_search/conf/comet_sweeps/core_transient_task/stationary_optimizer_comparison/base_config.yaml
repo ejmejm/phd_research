@@ -1,0 +1,63 @@
+# @package _global_
+
+defaults:
+  - /core_transient_binary
+  - _self_
+
+comet_ml: true
+device: cuda
+jax_jit_cache_dir: ${oc.env:HOME}/scratch/jax_cache
+
+
+task:
+  n_outputs: 20
+
+  n_core_layers: 1
+  core_hidden_dim: 20
+  core_sparsity: 0.0
+
+  n_transient_layers: 2
+  transient_hidden_dim: 2048
+  transient_sparsity: 0.9
+  transient_activation_rate: 0.05
+
+  input_change_freq: null
+  input_bounds: [-1.0, 1.0]
+  input_subspace_range: 0.5
+  max_input_center_change: 0.1
+
+
+model:
+  n_layers: 4
+  hidden_dim: 256
+  activation: ltu
+  use_bias: false
+  n_frozen_layers: 0
+  weight_init_method: lecun_uniform
+
+feature_recycling:
+  recycle_rate: 0.0
+  perfect_features_irreplaceable: true
+  incoming_weight_init: ${model.weight_init_method}
+
+train:
+  total_steps: 10_000_000
+  log_freq: 10_000
+  standardize_cumulants: false
+  log_utility_stats: false
+  log_pruning_stats: false
+  log_model_stats: false
+  log_feature_matched_optimizer_stats: false
+  log_feature_match_stats: false
+
+optimizer:
+  name: idbd
+  version: prediction_grads
+  autostep: true
+  learning_rate: 8.0
+  meta_learning_rate: 0.005
+
+representation_optimizer:
+  name: null # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  weight_decay: 0
+  learning_rate: 0.1

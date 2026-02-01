@@ -1,0 +1,14 @@
+name: autostep
+project: stationary_optimizer_comparison
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/core_transient_task/stationary_optimizer_comparison/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  model.n_frozen_layers: ${eval:${model.use_perfect_features} * ${task.n_core_layers}}
+
+  seed: [201, 202, 203, 204, 205]
