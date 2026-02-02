@@ -29,6 +29,7 @@ def optax_idbd(
     autostep: bool = False,
     tau: float = 1e4,
     version: str = 'prediction_grads', # {prediction_grads, loss_grads}
+    shadow_weight_threshold_factor: Optional[float] = None,
 ) -> base.GradientTransformation:
     """Incremental Delta-Bar-Delta optimizer.
     
@@ -41,10 +42,14 @@ def optax_idbd(
         meta_lr: Meta learning rate (default: 0.01)
         init_lr: Initial learning rate (default: 0.01)
         weight_decay: Weight decay (default: 0.0)
-        version: Version of IDBD to use (default: squared_inputs)
+        step_size_decay: Step size decay factor (default: 0.0)
         autostep: Whether to use autostep (default: False)
         tau: Tau parameter for autostep (default: 1e4)
-            
+        version: Version of IDBD to use (default: prediction_grads)
+        shadow_weight_threshold_factor: When a step-size is less than this value times the initial step-size
+            of a given weight, then the step-size will be treated as zero. Only applicable when optimizer is idbd.
+            Default is None, which means no thresholding is applied.
+    
     Returns:
         A :class:`optax.GradientTransformation` object.
     """
@@ -130,6 +135,17 @@ def optax_idbd(
             lambda h_i, a_i, g_i, d_i: h_i * jnp.clip(1 - a_i * d_i, min=0) + a_i * g_i,
             h, alpha, loss_grads, h_decay_term,
         )
+        
+        # Threshold step-sizes for shadow weights
+        if shadow_weight_threshold_factor is not None:
+            alpha = jax.tree.map(
+                lambda a_i: jnp.where(
+                    a_i < shadow_weight_threshold_factor * jnp.exp(init_beta),
+                    jnp.zeros_like(a_i),
+                    a_i,
+                ),
+                alpha,
+            )
         
         # Compute parameter updates
         weight_decay_term = jax.tree.map(

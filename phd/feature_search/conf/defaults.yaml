@@ -82,6 +82,9 @@ optimizer:
   version: prediction_grads # {prediction_grads, loss_grads}, recommend not changing this
   autostep: true
   step_size_decay: 0.0 # Only applicable when autostep is true, uses Swift-TD inspired step-size decay
+  shadow_weight_threshold_factor: null # When a step-size is less than this value times the initial step-size
+                                       # of a given weight, then the step-size will be treated as zero.
+                                       # Only applicable when optimizer is idbd.
 
 # Model parameters
 model:
