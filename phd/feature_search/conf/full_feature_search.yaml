@@ -26,6 +26,7 @@ feature_recycling:
   feature_protection_steps: 0
   incoming_weight_init: ${model.weight_init_method}
   prune_frequency: 4
+  perfect_features_irreplaceable: false
 
 train:
   total_steps: 1_000_000

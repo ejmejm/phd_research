@@ -94,6 +94,13 @@ upgd.yaml (2160): 2ccafe1dd4f54dca84889dafb4758070
 sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 965d7564a4a74db6909fe40d19d225e5
 sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 25f6471320764cc0a42ffb5b61577a06
 sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s c76dde17316a477eaafda2c9c2274394
-sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s c9e28e23552b4e9d973bff3efeaabbd2
-sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s efc33ff578b841679fd4b389314a38a3
-sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 2ccafe1dd4f54dca84889dafb4758070
+sbatch --array=1-35%12 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s c9e28e23552b4e9d973bff3efeaabbd2
+sbatch --array=1-19%7 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s efc33ff578b841679fd4b389314a38a3
+sbatch --array=1-40%20 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=24:00:00 launch_comet_agent.sbatch -s 2ccafe1dd4f54dca84889dafb4758070
+
+Submitted batch job 7967249
+Submitted batch job 7967250
+Submitted batch job 7967251
+Submitted batch job 7967252  11,200 iters/s -> 35 jobs
+Submitted batch job 7967253  21,200 iters/s -> 19 jobs
+Submitted batch job 7967254   9,400 iters/s -> 80 jobs

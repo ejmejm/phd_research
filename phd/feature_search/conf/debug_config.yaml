@@ -1,47 +1,32 @@
 defaults:
-- full_feature_search
-- summation_task
+- comet_sweeps/paper_draft_v2_part_1/base_config
 - _self_
 
 wandb: true
-
-task:
-  change_subset_freq: 200
-  flip_multiplier_freq: null
-
-feature_recycling:
-  recycle_rate: 0.0
-
-model:
-  n_layers: 3
-  hidden_dim: 300
-  activation: linear
-  use_bias: false
-  n_frozen_layers: 0
+comet_ml: false
 
 train:
-  total_steps: 1_000_000
-  log_freq: 500
-  log_optimizer_stats: false
-  log_update_stats: false
+  total_steps: 30_000_000
+  log_model_stats: true
+  log_feature_matched_optimizer_stats: true
+  standardize_cumulants: false
 
-# optimizer:
-#   name: sgd
-#   learning_rate: 0.001
+model:
+  hidden_dim: 5120
+  use_bias: false
 
-# optimizer:
-#   name: idbd
-#   autostep: true
-#   learning_rate: 0.0001
-#   meta_learning_rate: 0.01
+task:
+  flip_rate: ${eval:2**-12}
+
+feature_recycling:
+  utility_reset_mode: median
+  feature_protection_steps: 0
+  recycle_rate: 0.001
+  utility_decay: 0.999
+  initial_step_size_method: constant
 
 optimizer:
-  name: upgd
-  learning_rate: 0.001
-  beta_utility: 0.99
-  sigma: 0.001
-  weight_decay: 0.001
+  learning_rate: ${eval:2**-14}
+  meta_learning_rate: ${eval:2**-5}
 
-seed: [26011701, 26011702, 26011703, 26011704, 26011705]
-
-
+seed: [26020101, 26020102, 26020103, 26020104, 26020105, 26020106, 26020107, 26020108, 26020109, 26020110, 26020111, 26020112, 26020113, 26020114, 26020115, 26020116, 26020117, 26020118, 26020119, 26020120, 26020121, 26020122, 26020123, 26020124, 26020125, 26020126, 26020127, 26020128, 26020129, 26020130]
