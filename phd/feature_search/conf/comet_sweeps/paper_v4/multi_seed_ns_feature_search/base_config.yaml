@@ -1,0 +1,52 @@
+# @package _global_
+
+defaults:
+  - /full_feature_search
+  - _self_
+
+comet_ml: true
+device: cuda
+jax_jit_cache_dir: ${oc.env:HOME}/scratch/jax_cache
+
+model:
+  hidden_dim: 5120
+  use_bias: false
+  n_frozen_layers: 1
+
+task:
+  distractor_chance: 0.0
+  noise_std: 0.0
+  n_stationary_layers: 1
+  flip_rate: ${eval:2**-12}
+
+feature_recycling:
+  use_cbp_utility: true
+  recycle_rate: 0.005
+  utility_decay: 0.99
+  feature_protection_steps: 0
+  prune_frequency: 4
+
+train:
+  total_steps: 8_000_000
+  standardize_cumulants: false
+
+  # Logging parameters
+  log_freq: 20_000
+  log_utility_stats: false
+  log_pruning_stats: false
+  log_model_stats: false
+  log_feature_match_stats: true
+
+optimizer:
+  name: idbd
+  version: prediction_grads
+  autostep: true
+  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
+  meta_learning_rate: 0.005
+
+representation_optimizer:
+  name: null # {null, sgd, sgd_momentum, rmsprop, adam, idbd}
+  weight_decay: 0
+  learning_rate: 0.1
+
+seed: [1101, 1102, 1103, 1104, 1105, 1106, 1107, 1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1117, 1118, 1119, 1120]

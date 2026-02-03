@@ -1,0 +1,30 @@
+name: perfect_features
+project: generalization_paper_v4_multi_seed_ns_feature_search_hyper_sweep
+command: python scripts/jax_multiseed_feature_search.py --config-name=comet_sweeps/paper_v4/multi_seed_ns_feature_search/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.log_feature_matched_optimizer_stats: true
+
+  model.use_perfect_features: true
+  
+  feature_recycling.recycle_rate: 0.0
+  feature_recycling.perfect_features_irreplaceable: true
+
+  optimizer.learning_rate:
+    - "${eval:2**-18}"
+    - "${eval:2**-16}"
+    - "${eval:2**-14}"
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
+  
+  optimizer.meta_learning_rate:
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+    - "${eval:2**-5}"
+    - "${eval:2**-3}"
