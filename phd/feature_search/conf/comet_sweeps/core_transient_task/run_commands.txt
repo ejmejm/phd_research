@@ -104,3 +104,12 @@ Submitted batch job 7967251
 Submitted batch job 7967252  11,200 iters/s -> 35 jobs
 Submitted batch job 7967253  21,200 iters/s -> 19 jobs
 Submitted batch job 7967254   9,400 iters/s -> 80 jobs
+
+
+### Round 4 ###
+
+
+===== Created sweeps with ids =====
+autostep_feature_search.yaml (675): 0d548314c5904131b5147eb47d250b9a
+
+sbatch --array=1-21 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s 0d548314c5904131b5147eb47d250b9a
