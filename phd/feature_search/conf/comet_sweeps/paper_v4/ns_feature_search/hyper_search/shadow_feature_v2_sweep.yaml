@@ -22,8 +22,13 @@ parameters:
 
   optimizer.meta_learning_rate: "${eval:2**-5}"
 
-  optimizer.shadow_weight_threshold_factor: [0.0, 0.01, 0.1, 0.5, 1.0, 1.5, 2.0, 10.0]
+  optimizer.shadow_weight_threshold_factor: [0.0, 0.01, 0.1, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 10.0]
 
-  optimizer.learning_rate: "${eval:2**-14}"
+  optimizer.learning_rate:
+    - "${eval:2**-16}"
+    - "${eval:2**-12}"
+    - "${eval:2**-8}"
+    - "${eval:2**-4}"
+    - "${eval:2**0}"
   
   seed: [1001, 1002, 1003, 1004, 1005]

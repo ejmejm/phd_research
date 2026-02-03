@@ -195,7 +195,7 @@ def prepare_optimizer(
             ],
             {
                 'version': 'prediction_grads', 'weight_decay': 0, 'autostep': True,
-                'step_size_decay': 0.0, 'shadow_weight_threshold_factor': None,
+                'step_size_decay': 0.0, 'shadow_weight_threshold_factor': 0.0,
             },
         )
         kwargs['init_lr'] = kwargs.pop('learning_rate')
