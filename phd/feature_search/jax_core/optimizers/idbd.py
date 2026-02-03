@@ -139,11 +139,7 @@ def optax_idbd(
         # Threshold step-sizes for shadow weights
         if shadow_weight_threshold_factor is not None and shadow_weight_threshold_factor > 0.0:
             alpha = jax.tree.map(
-                lambda a_i: jnp.where(
-                    a_i < shadow_weight_threshold_factor * jnp.exp(init_beta),
-                    jnp.zeros_like(a_i),
-                    a_i,
-                ),
+                lambda a_i: jnp.maximum(0.0, a_i - shadow_weight_threshold_factor * jnp.exp(init_beta)),
                 alpha,
             )
         
