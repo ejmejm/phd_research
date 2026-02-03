@@ -425,7 +425,7 @@ def get_best_ablation_values(
         config_df = config_dfs[sweep_name]
         run_df = run_dfs[sweep_name]
 
-        split_vars = sweep_split_vars[sweep_name] if sweep_split_vars is not None else []
+        split_vars = sweep_split_vars.get(sweep_name, []) if sweep_split_vars is not None else []
         
         if sweep_ablation_vars is not None:
             ablation_vars = sweep_ablation_vars[sweep_name]
@@ -458,7 +458,12 @@ def get_best_ablation_values(
 
         # Calculate mean loss grouped by ablation vars and split vars
         groupby_cols = ablation_vars + split_vars
-        mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].mean()
+        if len(groupby_cols) == 0:
+            # No groupby columns; every row is its own group
+            mean_loss = run_df_filtered[[metric_col]].copy()
+            mean_loss.index = pd.RangeIndex(len(mean_loss))
+        else:
+            mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].mean()
 
         report_str += f"\n=== {sweep_name} ===\n"
 
