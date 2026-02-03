@@ -1,0 +1,29 @@
+name: shadow_feature_v2_sweep
+project: generalization_paper_v4_ns_feature_search_hyper_sweep
+command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/paper_v4/ns_feature_search/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  train.total_steps: 5_000_000
+  train.log_feature_matched_optimizer_stats: true
+
+  model.hidden_dim: 5120
+
+  feature_recycling.utility_reset_mode: median
+  feature_recycling.feature_protection_steps: 0
+  feature_recycling.utility_decay: 0.999
+  feature_recycling.initial_step_size_method: constant
+  feature_recycling.recycle_rate: [0.0001, 0.001, 0.005, 0.01]
+
+  optimizer.meta_learning_rate: "${eval:2**-5}"
+
+  optimizer.shadow_weight_threshold_factor: [0.0, 0.01, 0.1, 0.5, 1.0, 1.5, 2.0, 10.0]
+
+  optimizer.learning_rate: "${eval:2**-14}"
+  
+  seed: [1001, 1002, 1003, 1004, 1005]
