@@ -89,3 +89,15 @@ sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --me
 sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s 05ac7ccdab6042819cd94ab8143ac60f
 sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s aba78049b6d845df9037246a106c4a06
 
+
+### Round 7 ###
+
+
+===== Created sweeps with ids =====
+ideal_features_baseline.yaml (5): e7a50a38499e4f76b0e87208eac4a89f
+learned_features_baseline.yaml (5): 101e352ac243488b8a698ac9bc737d12
+shadow_feature_sweep.yaml (640): 151f7d841b914c03ba91a2eda9baf6ba
+
+120+ experiments per 12 hour job
+
+sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 151f7d841b914c03ba91a2eda9baf6ba
