@@ -11,7 +11,7 @@ spec:
 parameters:
   model.n_frozen_layers: ${eval:${model.use_perfect_features} * ${task.n_core_layers}}
 
-  input_subspace_range: [0.125, 0.25, 0.5, 1.0, 2.0]
+  task.input_subspace_range: [0.125, 0.25, 0.5, 1.0, 2.0]
 
   model.use_perfect_features: [true, false]
 

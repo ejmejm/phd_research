@@ -1,4 +1,4 @@
-name: autostep
+name: upgd
 project: stationary_optimizer_comparison
 command: python scripts/jax_full_feature_search.py --config-name=comet_sweeps/core_transient_task/stationary_optimizer_comparison/base_config.yaml
 algorithm: grid
