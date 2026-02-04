@@ -166,7 +166,10 @@ class CBPTracker(eqx.Module):
 
     @jax.named_call
     def _make_prune_mask(
-        self, feature_stats: FeatureStats, rng: PRNGKeyArray,
+        self,
+        feature_stats: FeatureStats,
+        out_optim_state: Optional[NamedTuple],
+        rng: PRNGKeyArray,
     ) -> Tuple[Bool[Array, 'n_features'], Int[Array, '']]:
         """Returns a boolean mask of which features to prune and the number of features to prune."""
         
@@ -177,6 +180,16 @@ class CBPTracker(eqx.Module):
             eligibility_mask = feature_stats.age > self.maturity_threshold
         else:
             eligibility_mask = jnp.ones(feature_stats.age.shape, dtype=jnp.bool_)
+        
+        # If using IDBD, features with outgoing step-sizes larger than initial are ineligible.
+        # This prevents pruning features that are still actively adapting.
+        if isinstance(out_optim_state, IDBDState):
+            # out_optim_state.beta has shape (out_features, n_features)
+            # A feature is ineligible if any of its outgoing step-sizes exceed the initial
+            max_beta_per_feature = jnp.max(out_optim_state.beta, axis=0)
+            step_size_eligible = max_beta_per_feature <= out_optim_state.init_beta
+            eligibility_mask = eligibility_mask & step_size_eligible
+        
         n_eligible_replacements = jnp.sum(eligibility_mask)
         n_replacements = jnp.minimum(n_available_replacements, n_eligible_replacements)
         
@@ -532,7 +545,7 @@ class CBPTracker(eqx.Module):
         feature_stats = self._compute_new_feature_stats(feature_stats, out_weights, activation_values)
         
         # Get indices to reinitialize (prune mask)
-        prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
+        prune_mask, n_replacements = self._make_prune_mask(feature_stats, out_optim_state, prune_mask_key)
         
         feature_stats = tree_replace(
             feature_stats,
