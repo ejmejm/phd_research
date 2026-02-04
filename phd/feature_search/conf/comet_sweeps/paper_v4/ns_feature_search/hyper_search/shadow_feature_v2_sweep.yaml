@@ -18,7 +18,7 @@ parameters:
   feature_recycling.feature_protection_steps: 0
   feature_recycling.utility_decay: 0.999
   feature_recycling.initial_step_size_method: constant
-  feature_recycling.recycle_rate: [0.0001, 0.001, 0.005, 0.01]
+  feature_recycling.recycle_rate: [0.0001, 0.001, 0.005, 0.01, 0.02]
 
   optimizer.meta_learning_rate: "${eval:2**-5}"
 
