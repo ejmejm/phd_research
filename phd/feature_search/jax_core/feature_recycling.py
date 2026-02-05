@@ -116,26 +116,46 @@ class CBPTracker(eqx.Module):
         self.rng = rng
     
     @jax.named_call
+    def _compute_step_utility(
+        self,
+        out_weights: Float[Array, 'out_features in_features'],
+        activation_values: Float[Array, 'batch_size in_features'],
+        feature_stats: FeatureStats,
+        *,
+        target: Optional[Float[Array, 'batch_size']] = None,
+    ) -> Float[Array, 'in_features']:
+        """Compute step utility for each feature. Subclasses override for different utility definitions.
+
+        Returns:
+            Step utility array of shape (n_features,) for this step.
+        """
+        weight_sums = jnp.sum(jnp.abs(out_weights), axis=0)  # (in_features,)
+        input_magnitudes = jnp.abs(activation_values).mean(axis=0)  # (in_features,)
+        return input_magnitudes * weight_sums
+
+    @jax.named_call
     def _compute_new_feature_stats(
         self,
         feature_stats: FeatureStats,
         weights: Float[Array, 'out_features in_features'],
         input_values: Float[Array, 'batch_size in_features'],
+        *,
+        target: Optional[Float[Array, 'batch_size']] = None,
     ) -> FeatureStats:
         """Update the feature stats for a single given layer."""
         # Age
         age = feature_stats.age + 1
-        
+
         # Replacement accumulator
         n_features = weights.shape[1]
         replacement_accumulator = feature_stats.replacement_accumulator + self.replace_rate * n_features
-        
+
         # Utility
-        weight_sums = jnp.sum(jnp.abs(weights), axis=0) # Shape: (in_features,)
-        input_magnitudes = jnp.abs(input_values).mean(axis=0) # Shape: (in_features,)
-        step_utility = input_magnitudes * weight_sums
+        step_utility = self._compute_step_utility(
+            weights, input_values, feature_stats, target=target
+        )
         utility = (1 - self.decay_rate) * step_utility + self.decay_rate * feature_stats.utility
-        
+
         return FeatureStats(
             age = age,
             utility = utility,
@@ -522,14 +542,17 @@ class CBPTracker(eqx.Module):
         out_optim_state: Optional[NamedTuple] = None,
         *,
         rng: PRNGKeyArray,
+        target: Optional[Float[Array, 'batch_size']] = None,
     ) -> Tuple[FeatureStats, Float[Array, 'n_features in_features'], Float[Array, 'out_features n_features'], Optional[NamedTuple], Optional[NamedTuple], Bool[Array, 'n_features'], Int[Array, ''], Int[Array, '']]:
         assert in_weights.ndim == 2, "Weights must be 2D"
         assert out_weights.ndim == 2, "Weights must be 2D"
-        
+
         in_weight_key, out_weight_key, prune_mask_key = jax.random.split(rng, 3)
-        
+
         # Update feature stats
-        feature_stats = self._compute_new_feature_stats(feature_stats, out_weights, activation_values)
+        feature_stats = self._compute_new_feature_stats(
+            feature_stats, out_weights, activation_values, target=target
+        )
         
         # Get indices to reinitialize (prune mask)
         prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
@@ -567,59 +590,66 @@ class CBPTracker(eqx.Module):
         optimizers: EqxOptimizer | Tuple[EqxOptimizer, ...] | None = None,
         *,
         rng: PRNGKeyArray,
+        targets: Optional[Float[Array, 'batch_size']] = None,
     ) -> Tuple['CBPTracker', eqx.Module, EqxOptimizer, List[Bool[Array, 'n_features']], Float[Array, '']]:
-        """Prune features based on CBP utility and return a mask over the features reset.
-        
+        """Prune features based on the CBP score.
+
         Args:
             model: The full model to prune
             input_values: Pytree matching the structure of model with the input values for each layer
             optimizer: The optimizer optimizing the given model
             filter_spec: Boolean Pytree matching the structure of model with True for prunable layers
-            
+
         Returns:
             The pruned model, optimizer, and a mask over the features reset
         """
-        
         if isinstance(optimizers, EqxOptimizer):
             optimizers = (optimizers,)
             single_optimizer = True
         else:
             single_optimizer = False
-        
+
         leaves, model_structure = jax.tree.flatten_with_path(model)
         weight_paths, weights = zip(*leaves)
         weights = list(weights)
-        
-        optim_layer_states, layer_optim_mapping = self._extract_layer_multi_optim_states(optimizers, weight_paths)
-        
+        optim_layer_states, layer_optim_mapping = self._extract_layer_multi_optim_states(
+            optimizers, weight_paths
+        )
         prune_masks = []
         new_feature_stats = []
         total_n_long_lived = 0
         total_n_pruned = 0
-        
+        indices = list(reversed(range(1, len(weights))))
+
         # Update from the back to the front
-        for i in reversed(range(1, len(weights))):
+        for idx, i in enumerate(indices):
             rng, layer_rng = jax.random.split(rng)
-            
+
             # Extract values needed for the current layer
-            in_weights = weights[i-1] # Shape: (n_features, in_features)
+            in_weights = weights[i - 1] # Shape: (n_features, in_features)
             out_weights = weights[i] # Shape: (out_features, n_features)
-            in_optim_state = optim_layer_states[i-1]
+            in_optim_state = optim_layer_states[i - 1]
             out_optim_state = optim_layer_states[i]
-            activation_values = input_values[i] # Shape: (batch_size, n_features)
-            feature_stats = self.all_feature_stats[i-1]
-            
+            activation_values = input_values[i]  # Shape: (batch_size, n_features)
+            feature_stats = self.all_feature_stats[i - 1]
+
+            layer_target = None
+            if targets is not None and idx == 0:
+                layer_target = jnp.squeeze(targets, axis=-1) if targets.ndim > 1 else targets
+
             # Prune the features
-            feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask, n_long_lived, n_pruned_layer = \
+            feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask, n_long_lived, n_pruned_layer = (
                 self.prune_layer_features(
                     in_weights, out_weights, activation_values,
-                    feature_stats, in_optim_state, out_optim_state, rng=layer_rng,
+                    feature_stats, in_optim_state, out_optim_state,
+                    rng=layer_rng, target=layer_target,
                 )
+            )
             prune_masks.append(prune_mask)
             new_feature_stats.append(feature_stats)
             total_n_long_lived = total_n_long_lived + n_long_lived
             total_n_pruned = total_n_pruned + n_pruned_layer
-            
+
             # Apply the updates to the model and optimizer
             weights[i-1] = in_weights
             weights[i] = out_weights
@@ -651,44 +681,80 @@ class CBPTracker(eqx.Module):
         self,
         model: eqx.Module,
         input_values: eqx.Module,
+        targets: Optional[Float[Array, 'batch_size']] = None,
     ) -> 'CBPTracker':
         """Updates the feature stats based on activation values and returns an updated tracker.
-        
+
         Args:
             model: The full model to update the feature stats for
             input_values: Pytree matching the structure of model with the input values for each layer
-            
+
         Returns:
             The updated tracker
         """
         weights = jax.tree.leaves(model)
         new_feature_stats = []
-        
-        # Update from the back to the front
-        for i in reversed(range(1, len(weights))):
+        indices = list(reversed(range(1, len(weights))))
 
+        # Update from the back to the front
+        for idx, i in enumerate(indices):
             # Extract values needed for the current layer
-            in_weights = weights[i-1] # Shape: (n_features, in_features)
-            out_weights = weights[i] # Shape: (out_features, n_features)
-            activation_values = input_values[i] # Shape: (batch_size, n_features)
-            feature_stats = self.all_feature_stats[i-1]
-            
+            in_weights = weights[i - 1]  # Shape: (n_features, in_features)
+            out_weights = weights[i]  # Shape: (out_features, n_features)
+            activation_values = input_values[i]  # Shape: (batch_size, n_features)
+            feature_stats = self.all_feature_stats[i - 1]
+
             assert in_weights.ndim == 2, "Weights must be 2D"
             assert out_weights.ndim == 2, "Weights must be 2D"
-            
+
+            layer_target = None
+            if targets is not None and idx == 0:
+                layer_target = jnp.squeeze(targets, axis=-1) if targets.ndim > 1 else targets
             # Update feature stats
-            feature_stats = self._compute_new_feature_stats(feature_stats, out_weights, activation_values)
+            feature_stats = self._compute_new_feature_stats(
+                feature_stats, out_weights, activation_values, target=layer_target
+            )
             new_feature_stats.append(feature_stats)
-            
+
             # Apply the updates to the model and optimizer
-            weights[i-1] = in_weights
+            weights[i - 1] = in_weights
             weights[i] = out_weights
-        
-        new_tracker = tree_replace(
-            self, all_feature_stats=new_feature_stats)
-        
+
+        new_tracker = tree_replace(self, all_feature_stats=new_feature_stats)
+
         return new_tracker
     
     
     def get_statistics(self, layer: eqx.Module):
         pass
+
+
+class SignedCBPTracker(CBPTracker):
+    """CBP tracker that uses signed utility: |error + contribution| - |error| per feature.
+
+    We prune the lowest-utility features. Requires targets to be passed to
+    prune_features and update_feature_stats so the output layer receives them.
+    """
+
+    @jax.named_call
+    def _compute_step_utility(
+        self,
+        out_weights: Float[Array, 'out_features in_features'],
+        activation_values: Float[Array, 'batch_size in_features'],
+        feature_stats: FeatureStats,
+        *,
+        target: Optional[Float[Array, 'batch_size']] = None,
+    ) -> Float[Array, 'in_features']:
+        """Signed utility: mean over batch of |error + contribution_j| - |error|."""
+        if target is None:
+            return super()._compute_step_utility(
+                out_weights, activation_values, feature_stats, target=target
+            )
+        contributions = activation_values * out_weights[0]  # (batch_size, n_features)
+        pred = jnp.sum(contributions, axis=1)
+        target_error = target - pred
+        return jnp.mean(
+            jnp.abs(target_error[:, None] + contributions)
+            - jnp.abs(target_error)[:, None],
+            axis=0,
+        )

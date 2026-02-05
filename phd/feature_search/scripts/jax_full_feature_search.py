@@ -21,7 +21,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
     StandardizationStats,
     rng_from_string,
 )
-from phd.feature_search.jax_core.feature_recycling import CBPTracker
+from phd.feature_search.jax_core.feature_recycling import CBPTracker, SignedCBPTracker
 from phd.feature_search.jax_core.metrics import *
 from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizers import EqxOptimizer
@@ -95,14 +95,15 @@ def prepare_components(cfg: DictConfig):
     
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:
-        cbp_tracker = CBPTracker(
+        cbp_cls = SignedCBPTracker if cfg.feature_recycling.get('use_signed_utility', False) else CBPTracker
+        cbp_tracker = cbp_cls(
             model = model,
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
             incoming_weight_init = cfg.feature_recycling.incoming_weight_init,
-            filter_spec = None, # Don't forget to add if doing more than 2 layers
+            filter_spec = None,  # Don't forget to add if doing more than 2 layers
             rng = rng_from_string(rng, 'cbp_tracker'),
         )
     else:
@@ -299,11 +300,11 @@ def train_step(
             pre_prune_model = model
             if repr_optimizer is not None:
                 cbp_tracker, model, (optimizer, repr_optimizer), prune_masks, long_lived_frac = train_state.cbp_tracker.prune_features(
-                    model, param_inputs, (optimizer, repr_optimizer), rng=cbp_key)
+                    model, param_inputs, (optimizer, repr_optimizer), rng=cbp_key, targets=targets)
             else:
                 cbp_tracker, model, optimizer, prune_masks, long_lived_frac = train_state.cbp_tracker.prune_features(
-                    model, param_inputs, optimizer, rng=cbp_key)
-                
+                    model, param_inputs, optimizer, rng=cbp_key, targets=targets)
+
             if cfg.train.get('log_pruning_stats', False):
                 assert task is not None, "Task is required for logging pruning stats!"
                 assert len(prune_masks) == 1, "There should only be one prune mask!"
@@ -312,7 +313,8 @@ def train_step(
                 n_best_features_pruned = compute_n_best_features_pruned(pre_prune_model, prune_mask, task)
                 
         else:
-            cbp_tracker = train_state.cbp_tracker.update_feature_stats(model, param_inputs)
+            cbp_tracker = train_state.cbp_tracker.update_feature_stats(
+                model, param_inputs, targets=targets)
     
     # Update state
     train_state_updates = dict(
@@ -430,7 +432,7 @@ def compute_metrics(
         log_perfect_matches = cfg.model.get('n_frozen_layers', 0) > 0
         metrics.update(compute_feature_match_stats(
             train_state.model, task, log_perfect_matches))
-        
+    
     metrics.update({
         'optimizer/init_lr': jax.block_until_ready(jnp.exp(train_state.optimizer.state.init_beta)),
     })
