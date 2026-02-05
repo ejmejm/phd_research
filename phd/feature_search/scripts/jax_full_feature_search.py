@@ -211,6 +211,8 @@ class StepStats(eqx.Module):
     n_pruned: Int[Array, '']
     n_best_features_pruned: Int[Array, '']
     update_mean_l1s: Float[Array, 'n_layers']  # Mean L1 of updates per layer (float64)
+    raw_effective_step_size: Float[Array, '']  # IDBD autostep only; nan otherwise
+    long_lived_frac: Float[Array, '']  # Fraction of pruned features with age > 0.5/recycle_rate; nan when no prune
 
 
 class MetricsBuffer(eqx.Module):
@@ -266,6 +268,12 @@ def train_step(
         updates, optimizer = optimizer.with_update((grads, output_grads), model)
     else:
         updates, optimizer = optimizer.with_update(grads, model)
+
+    # Collect raw_effective_step_size for logging (IDBD autostep only)
+    if cfg.optimizer.name == 'idbd' and cfg.optimizer.get('autostep', False):
+        raw_effective_step_size = jax.tree.leaves(optimizer.state.raw_effective_step_size)[0].squeeze()
+    else:
+        raw_effective_step_size = jnp.nan
     
     if repr_optimizer is not None:
         # TODO: Set breakpoint to make sure updates are combined correctly
@@ -285,14 +293,15 @@ def train_step(
     # CBP resets
     n_pruned = 0
     n_best_features_pruned = 0
+    long_lived_frac = jnp.nan
     if train_state.cbp_tracker is not None:
         if do_prune:
             pre_prune_model = model
             if repr_optimizer is not None:
-                cbp_tracker, model, (optimizer, repr_optimizer), prune_masks = train_state.cbp_tracker.prune_features(
+                cbp_tracker, model, (optimizer, repr_optimizer), prune_masks, long_lived_frac = train_state.cbp_tracker.prune_features(
                     model, param_inputs, (optimizer, repr_optimizer), rng=cbp_key)
             else:
-                cbp_tracker, model, optimizer, prune_masks = train_state.cbp_tracker.prune_features(
+                cbp_tracker, model, optimizer, prune_masks, long_lived_frac = train_state.cbp_tracker.prune_features(
                     model, param_inputs, optimizer, rng=cbp_key)
                 
             if cfg.train.get('log_pruning_stats', False):
@@ -320,7 +329,7 @@ def train_step(
     train_state = tree_replace(train_state, **train_state_updates)
     step_stats = StepStats(
         loss, targets, baseline_loss, n_pruned, n_best_features_pruned,
-        update_mean_l1s,
+        update_mean_l1s, raw_effective_step_size, long_lived_frac,
     )
     
     return train_state, step_stats
@@ -403,6 +412,9 @@ def compute_metrics(
             'pruning_stats/n_pruned': step_stats.n_pruned.sum(),
             'pruning_stats/n_best_features_pruned': step_stats.n_best_features_pruned.sum(),
         })
+    # Fraction of pruned features that were long-lived (age > 0.5 / recycle_rate)
+    if train_state.cbp_tracker is not None and cfg.feature_recycling.get('recycle_rate', 0) > 0:
+        metrics['long_lived_frac'] = jax.block_until_ready(jnp.nanmean(step_stats.long_lived_frac))
     if cfg.train.get('log_utility_stats', False):
         raise NotImplementedError("Utility stats are not implemented yet!")
     if cfg.train.get('log_model_stats', False):
@@ -418,7 +430,17 @@ def compute_metrics(
         log_perfect_matches = cfg.model.get('n_frozen_layers', 0) > 0
         metrics.update(compute_feature_match_stats(
             train_state.model, task, log_perfect_matches))
-    
+        
+    metrics.update({
+        'optimizer/init_lr': jax.block_until_ready(jnp.exp(train_state.optimizer.state.init_beta)),
+    })
+    # Log raw_effective_step_size min/max over steps in this log batch (IDBD autostep)
+    if cfg.optimizer.name == 'idbd' and cfg.optimizer.get('autostep', False):
+        res = step_stats.raw_effective_step_size  # shape (n_steps,) after stack/reshape
+        metrics['optimizer/raw_effective_step_size_min'] = jax.block_until_ready(jnp.nanmin(res))
+        metrics['optimizer/raw_effective_step_size_max'] = jax.block_until_ready(jnp.nanmax(res))
+        metrics['optimizer/raw_effective_step_size_mean'] = jax.block_until_ready(jnp.nanmean(res))
+
     return metrics_buffer, metrics
 
 

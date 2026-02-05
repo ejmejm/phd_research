@@ -522,7 +522,7 @@ class CBPTracker(eqx.Module):
         out_optim_state: Optional[NamedTuple] = None,
         *,
         rng: PRNGKeyArray,
-    ) -> Tuple[FeatureStats, Optional[EqxOptimizer], Array]:
+    ) -> Tuple[FeatureStats, Float[Array, 'n_features in_features'], Float[Array, 'out_features n_features'], Optional[NamedTuple], Optional[NamedTuple], Bool[Array, 'n_features'], Int[Array, ''], Int[Array, '']]:
         assert in_weights.ndim == 2, "Weights must be 2D"
         assert out_weights.ndim == 2, "Weights must be 2D"
         
@@ -533,6 +533,12 @@ class CBPTracker(eqx.Module):
         
         # Get indices to reinitialize (prune mask)
         prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
+        
+        # Fraction of pruned features with age > 0.5 / recycle_rate (long-lived)
+        age_threshold = 0.5 / self.replace_rate
+        long_lived_mask = (feature_stats.age.astype(jnp.float32) > age_threshold) & prune_mask
+        n_long_lived = jnp.sum(long_lived_mask)
+        n_pruned_layer = jnp.sum(prune_mask)
         
         feature_stats = tree_replace(
             feature_stats,
@@ -552,7 +558,7 @@ class CBPTracker(eqx.Module):
         in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
         out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
         
-        return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask
+        return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask, n_long_lived, n_pruned_layer
         
     def prune_features(
         self,
@@ -561,7 +567,7 @@ class CBPTracker(eqx.Module):
         optimizers: EqxOptimizer | Tuple[EqxOptimizer, ...] | None = None,
         *,
         rng: PRNGKeyArray,
-    ) -> Tuple['CBPTracker', eqx.Module, EqxOptimizer, List[Bool[Array, 'n_features']]]:
+    ) -> Tuple['CBPTracker', eqx.Module, EqxOptimizer, List[Bool[Array, 'n_features']], Float[Array, '']]:
         """Prune features based on CBP utility and return a mask over the features reset.
         
         Args:
@@ -588,6 +594,8 @@ class CBPTracker(eqx.Module):
         
         prune_masks = []
         new_feature_stats = []
+        total_n_long_lived = 0
+        total_n_pruned = 0
         
         # Update from the back to the front
         for i in reversed(range(1, len(weights))):
@@ -602,13 +610,15 @@ class CBPTracker(eqx.Module):
             feature_stats = self.all_feature_stats[i-1]
             
             # Prune the features
-            feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask = \
+            feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask, n_long_lived, n_pruned_layer = \
                 self.prune_layer_features(
                     in_weights, out_weights, activation_values,
                     feature_stats, in_optim_state, out_optim_state, rng=layer_rng,
                 )
             prune_masks.append(prune_mask)
             new_feature_stats.append(feature_stats)
+            total_n_long_lived = total_n_long_lived + n_long_lived
+            total_n_pruned = total_n_pruned + n_pruned_layer
             
             # Apply the updates to the model and optimizer
             weights[i-1] = in_weights
@@ -623,6 +633,9 @@ class CBPTracker(eqx.Module):
         
         prune_masks = prune_masks[::-1]
         
+        long_lived_frac = (total_n_long_lived.astype(jnp.float32) /
+                          jnp.maximum(total_n_pruned.astype(jnp.float32), 1.0))
+        
         new_tracker = tree_replace(
             self,
             all_feature_stats = new_feature_stats,
@@ -632,7 +645,7 @@ class CBPTracker(eqx.Module):
         if single_optimizer:
             optimizers = optimizers[0]
         
-        return new_tracker, model, optimizers, prune_masks
+        return new_tracker, model, optimizers, prune_masks, long_lived_frac
     
     def update_feature_stats(
         self,

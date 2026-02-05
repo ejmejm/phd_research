@@ -1,0 +1,36 @@
+defaults:
+- comet_sweeps/paper_draft_v2_part_1/base_config
+- _self_
+
+wandb: true
+comet_ml: false
+project: eliminate_step_size
+
+train:
+  total_steps: 5_000_000
+  log_freq: 10_000
+  log_model_stats: true
+  log_feature_matched_optimizer_stats: true
+  log_optimizer_stats: true
+  standardize_cumulants: false
+
+model:
+  hidden_dim: 5120
+  use_bias: false
+
+task:
+  flip_rate: ${eval:2**-12}
+
+feature_recycling:
+  utility_reset_mode: median
+  feature_protection_steps: 0
+  recycle_rate: 0.01
+  utility_decay: 0.999
+  initial_step_size_method: constant
+
+optimizer:
+  learning_rate: ${eval:2**-14}
+  meta_learning_rate: ${eval:2**-5}
+  auto_set_init_step_size: false
+
+seed: [26020101, 26020102, 26020103, 26020104, 26020105, 26020106, 26020107, 26020108, 26020109, 26020110, 26020111, 26020112, 26020113, 26020114, 26020115, 26020116, 26020117, 26020118, 26020119, 26020120]

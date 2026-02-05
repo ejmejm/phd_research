@@ -19,6 +19,7 @@ class IDBDState(NamedTuple):
     beta: base.Updates
     h: base.Updates
     v: Optional[base.Updates] = None
+    raw_effective_step_size: Optional[base.Updates] = None  # For logging (autostep only)
 
 
 def optax_idbd(
@@ -28,8 +29,9 @@ def optax_idbd(
     step_size_decay: float = 0.0,
     autostep: bool = False,
     tau: float = 1e4,
-    version: str = 'prediction_grads', # {prediction_grads, loss_grads}
+    version: str = 'prediction_grads',  # {prediction_grads, loss_grads}
     shadow_weight_threshold_factor: float = 0.0,
+    auto_set_init_step_size: bool = True,
 ) -> base.GradientTransformation:
     """Incremental Delta-Bar-Delta optimizer.
     
@@ -48,6 +50,8 @@ def optax_idbd(
         version: Version of IDBD to use (default: prediction_grads)
         shadow_weight_threshold_factor: When a step-size is less than this value times the initial step-size
             of a given weight, then the step-size will be treated as zero. Only applicable when optimizer is idbd.
+        auto_set_init_step_size: When True (and autostep is True), reset init_beta each step based on
+            remaining learning rate and input term. When False, keep init_beta unchanged.
     
     Returns:
         A :class:`optax.GradientTransformation` object.
@@ -85,12 +89,14 @@ def optax_idbd(
         v = None
         if autostep:
             v = jax.tree.map(lambda x: jnp.zeros_like(x), params)
-        
-        return IDBDState(init_beta=init_beta, beta=beta, h=h, v=v)
+        # Same structure as in update (per-param vector); avoids None so scan carry is fixed
+        raw_effective_step_size = jax.tree.map(
+            lambda x: jnp.zeros(x.shape[0], dtype=x.dtype), params)
+        return IDBDState(init_beta=init_beta, beta=beta, h=h, v=v, raw_effective_step_size=raw_effective_step_size)
 
     def update_fn(updates, state, params):
         loss_grads, prediction_grads = updates
-        init_beta, beta, h, v = state
+        init_beta, beta, h, v, _ = state
         
         # Try square of loss grads version of this as fisher approximation of hessian
         if version == 'loss_grads':
@@ -130,8 +136,23 @@ def optax_idbd(
                 beta, h, v, loss_grads, h_decay_term,
             )
             alpha, beta, v, raw_effective_step_size = tree_unzip(results, 4)
+            
+            if auto_set_init_step_size:
+                # Automatically set the initial step-size for new features
+                # TODO: I still need to set the new initial step-sizes when there is a reset based on how much
+                # extra learning space is available, not just the total amount possible and evenly dividing that.
+                # For now, equally diving it but multiplying by 0.5 to leave some buffer room.
+                remaining_learning_rate = 1.0 - jax.tree.leaves(raw_effective_step_size)[0]  # (out, 1)
+                input_term = jax.tree.leaves(h_decay_term)[0]
+                n_inputs_per_node = input_term.shape[1]
+                reset_step_size = 1.0 / n_inputs_per_node * (1.0 / jnp.mean(input_term)) * 0.5
+                init_beta = jnp.log(reset_step_size)
+            # else: keep init_beta from state unchanged
         
         else:
+            # Keep same pytree structure as autostep so scan carry is fixed
+            raw_effective_step_size = jax.tree.map(
+                lambda x: jnp.zeros(x.shape[0], dtype=x.dtype), params)
             beta = jax.tree.map(
                 lambda b_i, g_i, h_i: b_i + meta_lr * g_i * h_i,
                 beta, prediction_grads, h,
@@ -159,8 +180,8 @@ def optax_idbd(
             alpha, loss_grads, weight_decay_term,
         )
         
-        # Update state
-        state = IDBDState(init_beta=init_beta, beta=beta, h=h, v=v)
+        # Update state (raw_effective_step_size always same structure for fixed scan carry)
+        state = IDBDState(init_beta=init_beta, beta=beta, h=h, v=v, raw_effective_step_size=raw_effective_step_size)
         
         return param_updates, state
 
