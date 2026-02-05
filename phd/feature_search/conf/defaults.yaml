@@ -52,9 +52,11 @@ feature_recycling:
   feature_protection_steps: 100 # Number of steps a new feature is immune to pruning
   prune_frequency: 1 # Features are only pruned every nth step, though stats are updated every step (JAX ONLY)
   utility_reset_mode: median # {median, zero} whether reset features should have their utility reset to zero or the median utility of the layer
-  initial_step_size_method: constant # {constant, mean, median} method used to set the step size of new features
+  initial_step_size_method: constant # {constant, mean, median, generate_and_test} method used to set the step size of new features
                                      # constant will be the value set by the optimizer, and mean/median will take
                                      # the mean/median of the step sizes of other features in the same layer
+  init_step_size_lambda: 1.0  # generate_and_test: step-size for updating global init beta
+  init_step_size_gamma: 1.0   # generate_and_test: age discount (recent features preferred when < 1)
   incoming_weight_init: lecun_uniform # {lecun_uniform, binary}
 
 # Train parameters

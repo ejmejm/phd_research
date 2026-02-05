@@ -27,6 +27,9 @@ feature_recycling:
   recycle_rate: 0.01
   utility_decay: 0.999
   initial_step_size_method: constant
+  # generate_and_test mode: step-size for updating global init beta (lambda), age discount (gamma)
+  init_step_size_lambda: 1.0
+  init_step_size_gamma: 1.0
 
 optimizer:
   learning_rate: ${eval:2**-14}

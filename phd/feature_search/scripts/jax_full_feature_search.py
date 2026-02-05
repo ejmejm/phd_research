@@ -96,16 +96,21 @@ def prepare_components(cfg: DictConfig):
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:
         cbp_cls = SignedCBPTracker if cfg.feature_recycling.get('use_signed_utility', False) else CBPTracker
-        cbp_tracker = cbp_cls(
+        cbp_kwargs = dict(
             model = model,
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
+            init_step_size_lambda = cfg.feature_recycling.get('init_step_size_lambda', 1.0),
+            init_step_size_gamma = cfg.feature_recycling.get('init_step_size_gamma', 1.0),
             incoming_weight_init = cfg.feature_recycling.incoming_weight_init,
             filter_spec = None,  # Don't forget to add if doing more than 2 layers
             rng = rng_from_string(rng, 'cbp_tracker'),
         )
+        if cfg.feature_recycling.initial_step_size_method == 'generate_and_test':
+            cbp_kwargs['origin_initial_step_size'] = cfg.optimizer.learning_rate
+        cbp_tracker = cbp_cls(**cbp_kwargs)
     else:
         cbp_tracker = None
         
@@ -436,6 +441,10 @@ def compute_metrics(
     metrics.update({
         'optimizer/init_lr': jax.block_until_ready(jnp.exp(train_state.optimizer.state.init_beta)),
     })
+    if train_state.cbp_tracker is not None and train_state.cbp_tracker.global_init_beta:
+        metrics['optimizer/global_init_lr'] = jax.block_until_ready(
+            jnp.exp(train_state.cbp_tracker.global_init_beta[0])
+        )
     # Log raw_effective_step_size min/max over steps in this log batch (IDBD autostep)
     if cfg.optimizer.name == 'idbd' and cfg.optimizer.get('autostep', False):
         res = step_stats.raw_effective_step_size  # shape (n_steps,) after stack/reshape

@@ -28,6 +28,7 @@ class FeatureStats(eqx.Module):
     age: Int[Array, 'n_features']
     utility: Float[Array, 'n_features']
     replacement_accumulator: Float[Array, '']
+    init_beta: Float[Array, 'n_features']  # Initial beta when feature was (re)created; used in generate_and_test
 
 
 class CBPTracker(eqx.Module):
@@ -40,30 +41,44 @@ class CBPTracker(eqx.Module):
     initial_step_size_method: str = eqx.field(static=True)
     maturity_threshold: int = eqx.field(static=True)
     decay_rate: float = eqx.field(static=True)
-    
+    init_step_size_lambda: float = eqx.field(static=True)
+    init_step_size_gamma: float = eqx.field(static=True)
+
     # Non-static
     replace_rate: float
-    all_feature_stats: List[FeatureStats] # Pytree with FeatureStats for leaves
+    all_feature_stats: List[FeatureStats]  # Pytree with FeatureStats for leaves
+    global_init_beta: List[Float[Array, '']]  # One scalar per layer; used in generate_and_test
     rng: PRNGKeyArray
-    
+
     def __init__(
         self,
         model: eqx.Module,
         replace_rate: float = 1e-4,
         decay_rate: float = 0.99,
-        maturity_threshold: int = -1, # -1 means no maturity threshold
-        incoming_weight_init: str = 'lecun_uniform', # {'lecun_uniform', 'kaiming_uniform', 'binary'}
-        outgoing_weight_init: str = 'zeros', # {'zeros', 'lecun_uniform', 'kaiming_uniform'}
-        utility_reset_mode: str = 'median', # {'median', 'zero'}
-        initial_step_size_method: str = 'constant', # {'constant', 'mean', 'median'}
+        maturity_threshold: int = -1,  # -1 means no maturity threshold
+        incoming_weight_init: str = 'lecun_uniform',  # {'lecun_uniform', 'kaiming_uniform', 'binary'}
+        outgoing_weight_init: str = 'zeros',  # {'zeros', 'lecun_uniform', 'kaiming_uniform'}
+        utility_reset_mode: str = 'median',  # {'median', 'zero'}
+        initial_step_size_method: str = 'constant',  # {'constant', 'mean', 'median', 'generate_and_test'}
+        init_step_size_lambda: float = 1.0,
+        init_step_size_gamma: float = 1.0,
+        origin_initial_step_size: Optional[float] = None,
         filter_spec: Optional[PyTree] = None,
         rng: Optional[PRNGKeyArray] = None,
     ):
         assert utility_reset_mode in {'median', 'zero'}
         assert incoming_weight_init in {'lecun_uniform', 'kaiming_uniform', 'binary'}
         assert outgoing_weight_init in {'zeros', 'kaiming_uniform'}
-        assert initial_step_size_method in {'constant', 'mean', 'median'}
-        
+        assert initial_step_size_method in {'constant', 'mean', 'median', 'generate_and_test'}
+        if initial_step_size_method == 'generate_and_test':
+            assert origin_initial_step_size is not None, "origin_initial_step_size required for generate_and_test"
+
+        origin_init_beta = (
+            jnp.log(origin_initial_step_size)
+            if initial_step_size_method == 'generate_and_test'
+            else jnp.array(0.0, dtype=jnp.float32)
+        )
+
         if incoming_weight_init == 'kaiming_uniform':
             logger.warning(
                 "Kaiming uniform weight initialization is deprecated in the JAX implementation."
@@ -99,10 +114,12 @@ class CBPTracker(eqx.Module):
                 age = jnp.zeros(weight_arr.shape[1], dtype=jnp.int32),
                 utility = jnp.zeros(weight_arr.shape[1], dtype=jnp.float32),
                 replacement_accumulator = jnp.array(0.0, dtype=jnp.float32),
+                init_beta = jnp.full(weight_arr.shape[1], origin_init_beta, dtype=jnp.float32),
             )
             for weight_arr in weights
         ]
-        
+
+        self.global_init_beta = [jnp.array(origin_init_beta, dtype=jnp.float32) for _ in weights]
         self.incoming_weight_init = incoming_weight_init
         self.outgoing_weight_init = outgoing_weight_init
         self.utility_reset_mode = utility_reset_mode
@@ -110,7 +127,9 @@ class CBPTracker(eqx.Module):
         self.maturity_threshold = maturity_threshold
         self.replace_rate = replace_rate
         self.decay_rate = decay_rate
-        
+        self.init_step_size_lambda = init_step_size_lambda
+        self.init_step_size_gamma = init_step_size_gamma
+
         if rng is None:
             rng = jax.random.PRNGKey(random.randint(0, 2**31))
         self.rng = rng
@@ -160,6 +179,7 @@ class CBPTracker(eqx.Module):
             age = age,
             utility = utility,
             replacement_accumulator = replacement_accumulator,
+            init_beta = feature_stats.init_beta,
         )
     
     @partial(jax.jit, static_argnames=('n_replacements',))
@@ -215,9 +235,30 @@ class CBPTracker(eqx.Module):
         prune_mask = prune_mask & eligibility_mask
         
         return prune_mask, n_replacements
+
+    @jax.named_call
+    def _update_global_init_beta(
+        self,
+        feature_stats: FeatureStats,
+        global_init_beta: Float[Array, ''],
+    ) -> Float[Array, '']:
+        """Update global initial beta from utility- and age-weighted average of per-feature init_beta."""
+        weights = (self.init_step_size_gamma ** feature_stats.age.astype(jnp.float32)) * feature_stats.utility
+        total = jnp.sum(weights) + EPSILON
+        weights = weights / total
+        target_beta = jnp.sum(feature_stats.init_beta * weights)
+        return (
+            (1.0 - self.init_step_size_lambda) * global_init_beta
+            + self.init_step_size_lambda * target_beta
+        ).astype(jnp.float32)
     
     @jax.named_call
-    def _reset_feature_stats(self, feature_stats: FeatureStats, prune_mask: Bool[Array, 'n_features']):
+    def _reset_feature_stats(
+        self,
+        feature_stats: FeatureStats,
+        prune_mask: Bool[Array, 'n_features'],
+        init_beta_after_reset: Optional[Float[Array, 'n_features']] = None,
+    ):
         """Resets the feature stats for the given layer and indices."""
         age = jnp.where(prune_mask, 0, feature_stats.age)
 
@@ -228,11 +269,17 @@ class CBPTracker(eqx.Module):
         else:
             raise ValueError(f"Invalid utility reset mode: {self.utility_reset_mode}")
         utility = jnp.where(prune_mask, reset_val, feature_stats.utility)
-        
+
+        init_beta = (
+            init_beta_after_reset
+            if init_beta_after_reset is not None
+            else feature_stats.init_beta
+        )
         return tree_replace(
             feature_stats,
             age = age,
             utility = utility,
+            init_beta = init_beta,
         )
     
     @jax.named_call
@@ -274,39 +321,50 @@ class CBPTracker(eqx.Module):
         self,
         optim_layer_state: Optional[NamedTuple],
         prune_mask: Bool[Array, 'n_features'],
+        new_init_beta: Optional[Float[Array, 'n_features']] = None,
     ) -> Optional[NamedTuple]:
         """Reset the optimizer state for the weights that output features at the given indices."""
         if optim_layer_state is None:
             return None
-        
+
         if isinstance(optim_layer_state, IDBDState):
             mean_beta = jnp.mean(optim_layer_state.beta)
             median_beta = jnp.median(optim_layer_state.beta)
-        
-        prune_mask = jnp.expand_dims(prune_mask, 1)
-        
+
+        prune_mask_exp = jnp.expand_dims(prune_mask, 1)
+
         new_vals = []
         for i, value in enumerate(optim_layer_state):
             if value.ndim == 2:
-                new_vals.append(jnp.where(prune_mask, 0, value))
+                new_vals.append(jnp.where(prune_mask_exp, 0, value))
             else:
                 logger.warning(
                     f"Not resetting optimizer state for field `{optim_layer_state._fields[i]}` because ndim != 2 "
                     f"(not linear weights), ndim: {value.ndim}"
                 )
                 new_vals.append(value)
-        
+
         if isinstance(optim_layer_state, IDBDState):
             beta_idx = optim_layer_state._fields.index('beta')
             if self.initial_step_size_method == 'constant':
-                new_vals[beta_idx] = jnp.where(prune_mask, optim_layer_state.init_beta, new_vals[beta_idx])
+                new_vals[beta_idx] = jnp.where(
+                    prune_mask_exp, optim_layer_state.init_beta, new_vals[beta_idx]
+                )
             elif self.initial_step_size_method == 'mean':
-                new_vals[beta_idx] = jnp.where(prune_mask, mean_beta, new_vals[beta_idx])
+                new_vals[beta_idx] = jnp.where(prune_mask_exp, mean_beta, new_vals[beta_idx])
             elif self.initial_step_size_method == 'median':
-                new_vals[beta_idx] = jnp.where(prune_mask, median_beta, new_vals[beta_idx])
+                new_vals[beta_idx] = jnp.where(prune_mask_exp, median_beta, new_vals[beta_idx])
+            elif self.initial_step_size_method == 'generate_and_test' and new_init_beta is not None:
+                new_vals[beta_idx] = jnp.where(
+                    prune_mask_exp,
+                    jnp.expand_dims(new_init_beta, 1),
+                    new_vals[beta_idx],
+                )
             else:
-                raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
-        
+                raise ValueError(
+                    f'Invalid initial step-size method: {self.initial_step_size_method}'
+                )
+
         return optim_layer_state.__class__(*new_vals)
     
     @jax.named_call
@@ -314,42 +372,53 @@ class CBPTracker(eqx.Module):
         self,
         optim_layer_state: Optional[NamedTuple],
         prune_mask: Bool[Array, 'n_features'],
+        new_init_beta: Optional[Float[Array, 'n_features']] = None,
     ) -> Optional[NamedTuple]:
         """Reset the optimizer state for the weights that take in features at the given indices."""
         if optim_layer_state is None:
             return None
-        
+
         # Get mean and median beta per output unit
         # Use mean/median per output unit because different units may be moving
         # at different rates.
         if isinstance(optim_layer_state, IDBDState):
             mean_betas = jnp.mean(optim_layer_state.beta, axis=1, keepdims=True)
             median_betas = jnp.median(optim_layer_state.beta, axis=1, keepdims=True)
-        
-        prune_mask = jnp.expand_dims(prune_mask, 0)
-        
+
+        prune_mask_exp = jnp.expand_dims(prune_mask, 0)
+
         new_vals = []
         for i, value in enumerate(optim_layer_state):
             if value.ndim == 2:
-                new_vals.append(jnp.where(prune_mask, 0, value))
+                new_vals.append(jnp.where(prune_mask_exp, 0, value))
             else:
                 logger.warning(
                     f"Not resetting optimizer state for field `{optim_layer_state._fields[i]}` because ndim != 2 "
                     f"(not linear weights), ndim: {value.ndim}"
                 )
                 new_vals.append(value)
-        
+
         if isinstance(optim_layer_state, IDBDState):
             beta_idx = optim_layer_state._fields.index('beta')
             if self.initial_step_size_method == 'constant':
-                new_vals[beta_idx] = jnp.where(prune_mask, optim_layer_state.init_beta, new_vals[beta_idx])
+                new_vals[beta_idx] = jnp.where(
+                    prune_mask_exp, optim_layer_state.init_beta, new_vals[beta_idx]
+                )
             elif self.initial_step_size_method == 'mean':
-                new_vals[beta_idx] = jnp.where(prune_mask, mean_betas, new_vals[beta_idx])
+                new_vals[beta_idx] = jnp.where(prune_mask_exp, mean_betas, new_vals[beta_idx])
             elif self.initial_step_size_method == 'median':
-                new_vals[beta_idx] = jnp.where(prune_mask, median_betas, new_vals[beta_idx])
+                new_vals[beta_idx] = jnp.where(prune_mask_exp, median_betas, new_vals[beta_idx])
+            elif self.initial_step_size_method == 'generate_and_test' and new_init_beta is not None:
+                new_vals[beta_idx] = jnp.where(
+                    prune_mask_exp,
+                    jnp.expand_dims(new_init_beta, 0),
+                    new_vals[beta_idx],
+                )
             else:
-                raise ValueError(f'Invalid initial step-size method: {self.initial_step_size_method}')
-        
+                raise ValueError(
+                    f'Invalid initial step-size method: {self.initial_step_size_method}'
+                )
+
         return optim_layer_state.__class__(*new_vals)
     
     # TODO: Make sure the logic here still works when the number of layers is not the same as
@@ -538,50 +607,93 @@ class CBPTracker(eqx.Module):
         out_weights: Float[Array, 'out_features n_features'],
         activation_values: Float[Array, 'batch_size n_features'],
         feature_stats: FeatureStats,
+        layer_global_init_beta: Float[Array, ''],
         in_optim_state: Optional[NamedTuple] = None,
         out_optim_state: Optional[NamedTuple] = None,
         *,
         rng: PRNGKeyArray,
         target: Optional[Float[Array, 'batch_size']] = None,
-    ) -> Tuple[FeatureStats, Float[Array, 'n_features in_features'], Float[Array, 'out_features n_features'], Optional[NamedTuple], Optional[NamedTuple], Bool[Array, 'n_features'], Int[Array, ''], Int[Array, '']]:
+    ) -> Tuple[FeatureStats, Float[Array, 'n_features in_features'], Float[Array, 'out_features n_features'], Optional[NamedTuple], Optional[NamedTuple], Bool[Array, 'n_features'], Int[Array, ''], Int[Array, ''], Float[Array, '']]:
         assert in_weights.ndim == 2, "Weights must be 2D"
         assert out_weights.ndim == 2, "Weights must be 2D"
 
-        in_weight_key, out_weight_key, prune_mask_key = jax.random.split(rng, 3)
+        in_weight_key, out_weight_key, prune_mask_key, sample_key = jax.random.split(rng, 4)
 
         # Update feature stats
         feature_stats = self._compute_new_feature_stats(
             feature_stats, out_weights, activation_values, target=target
         )
-        
+
+        # Update global init beta (generate_and_test): pull towards init_beta of high-utility, recent features
+        updated_layer_global_init_beta = jnp.where(
+            self.initial_step_size_method == 'generate_and_test',
+            self._update_global_init_beta(feature_stats, layer_global_init_beta),
+            layer_global_init_beta,
+        )
+
         # Get indices to reinitialize (prune mask)
         prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
-        
+
         # Fraction of pruned features with age > 0.5 / recycle_rate (long-lived)
         age_threshold = 0.5 / self.replace_rate
         long_lived_mask = (feature_stats.age.astype(jnp.float32) > age_threshold) & prune_mask
         n_long_lived = jnp.sum(long_lived_mask)
         n_pruned_layer = jnp.sum(prune_mask)
-        
+
         feature_stats = tree_replace(
             feature_stats,
             replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
         )
-        
-        # TODO: Step through manually to make sure weights are reset as expected
-    
-        # Reset stats for those features
-        feature_stats = self._reset_feature_stats(feature_stats, prune_mask)
-        
+
+        # Sample new init_beta for pruned features (generate_and_test): uniform in [global - 1, global + 1]
+        n_features = feature_stats.utility.shape[0]
+        sampled_betas = jax.random.uniform(
+            sample_key,
+            (n_features,),
+            minval = updated_layer_global_init_beta - 0.5,
+            maxval = updated_layer_global_init_beta + 0.5,
+            dtype = jnp.float32,
+        )
+        init_beta_after_reset = jnp.where(
+            prune_mask,
+            sampled_betas,
+            feature_stats.init_beta,
+        )
+        init_beta_for_reset = (
+            init_beta_after_reset if self.initial_step_size_method == 'generate_and_test' else None
+        )
+
+        # Reset stats for those features (and set init_beta for pruned when generate_and_test)
+        feature_stats = self._reset_feature_stats(
+            feature_stats, prune_mask, init_beta_after_reset=init_beta_for_reset
+        )
+
         # Reinit input and output weights for given features
         in_weights = self._reinit_input_weights(in_weights, prune_mask, in_weight_key)
         out_weights = self._reinit_output_weights(out_weights, prune_mask, out_weight_key)
-        
+
         # Reinit optimizer input and output weight states for given features
-        in_optim_state = self._reset_input_optim_state(in_optim_state, prune_mask)
-        out_optim_state = self._reset_output_optim_state(out_optim_state, prune_mask)
-        
-        return feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask, n_long_lived, n_pruned_layer
+        new_init_beta_for_optim = (
+            init_beta_after_reset if self.initial_step_size_method == 'generate_and_test' else None
+        )
+        in_optim_state = self._reset_input_optim_state(
+            in_optim_state, prune_mask, new_init_beta=new_init_beta_for_optim
+        )
+        out_optim_state = self._reset_output_optim_state(
+            out_optim_state, prune_mask, new_init_beta=new_init_beta_for_optim
+        )
+
+        return (
+            feature_stats,
+            in_weights,
+            out_weights,
+            in_optim_state,
+            out_optim_state,
+            prune_mask,
+            n_long_lived,
+            n_pruned_layer,
+            updated_layer_global_init_beta,
+        )
         
     def prune_features(
         self,
@@ -617,6 +729,7 @@ class CBPTracker(eqx.Module):
         )
         prune_masks = []
         new_feature_stats = []
+        new_global_init_beta = list(self.global_init_beta)
         total_n_long_lived = 0
         total_n_pruned = 0
         indices = list(reversed(range(1, len(weights))))
@@ -626,25 +739,41 @@ class CBPTracker(eqx.Module):
             rng, layer_rng = jax.random.split(rng)
 
             # Extract values needed for the current layer
-            in_weights = weights[i - 1] # Shape: (n_features, in_features)
-            out_weights = weights[i] # Shape: (out_features, n_features)
+            in_weights = weights[i - 1]  # Shape: (n_features, in_features)
+            out_weights = weights[i]  # Shape: (out_features, n_features)
             in_optim_state = optim_layer_states[i - 1]
             out_optim_state = optim_layer_states[i]
             activation_values = input_values[i]  # Shape: (batch_size, n_features)
             feature_stats = self.all_feature_stats[i - 1]
+            layer_global_init_beta = self.global_init_beta[i - 1]
 
             layer_target = None
             if targets is not None and idx == 0:
                 layer_target = jnp.squeeze(targets, axis=-1) if targets.ndim > 1 else targets
 
             # Prune the features
-            feature_stats, in_weights, out_weights, in_optim_state, out_optim_state, prune_mask, n_long_lived, n_pruned_layer = (
-                self.prune_layer_features(
-                    in_weights, out_weights, activation_values,
-                    feature_stats, in_optim_state, out_optim_state,
-                    rng=layer_rng, target=layer_target,
-                )
+            (
+                feature_stats,
+                in_weights,
+                out_weights,
+                in_optim_state,
+                out_optim_state,
+                prune_mask,
+                n_long_lived,
+                n_pruned_layer,
+                updated_layer_global_init_beta,
+            ) = self.prune_layer_features(
+                in_weights,
+                out_weights,
+                activation_values,
+                feature_stats,
+                layer_global_init_beta,
+                in_optim_state,
+                out_optim_state,
+                rng=layer_rng,
+                target=layer_target,
             )
+            new_global_init_beta[i - 1] = updated_layer_global_init_beta
             prune_masks.append(prune_mask)
             new_feature_stats.append(feature_stats)
             total_n_long_lived = total_n_long_lived + n_long_lived
@@ -662,13 +791,14 @@ class CBPTracker(eqx.Module):
             optimizers, optim_layer_states, layer_optim_mapping)
         
         prune_masks = prune_masks[::-1]
-        
+
         long_lived_frac = (total_n_long_lived.astype(jnp.float32) /
                           jnp.maximum(total_n_pruned.astype(jnp.float32), 1.0))
-        
+
         new_tracker = tree_replace(
             self,
             all_feature_stats = new_feature_stats,
+            global_init_beta = new_global_init_beta,
             rng = rng,
         )
         
@@ -694,6 +824,7 @@ class CBPTracker(eqx.Module):
         """
         weights = jax.tree.leaves(model)
         new_feature_stats = []
+        new_global_init_beta = list(self.global_init_beta)
         indices = list(reversed(range(1, len(weights))))
 
         # Update from the back to the front
@@ -714,13 +845,23 @@ class CBPTracker(eqx.Module):
             feature_stats = self._compute_new_feature_stats(
                 feature_stats, out_weights, activation_values, target=layer_target
             )
+            # Update global init beta (generate_and_test)
+            new_global_init_beta[i - 1] = jnp.where(
+                self.initial_step_size_method == 'generate_and_test',
+                self._update_global_init_beta(feature_stats, self.global_init_beta[i - 1]),
+                self.global_init_beta[i - 1],
+            )
             new_feature_stats.append(feature_stats)
 
             # Apply the updates to the model and optimizer
             weights[i - 1] = in_weights
             weights[i] = out_weights
 
-        new_tracker = tree_replace(self, all_feature_stats=new_feature_stats)
+        new_tracker = tree_replace(
+            self,
+            all_feature_stats = new_feature_stats,
+            global_init_beta = new_global_init_beta,
+        )
 
         return new_tracker
     

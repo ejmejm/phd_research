@@ -366,16 +366,21 @@ def prepare_components(cfg: DictConfig):
     
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:
-        cbp_tracker = CBPTracker(
+        cbp_kwargs = dict(
             model = model,
             replace_rate = cfg.feature_recycling.recycle_rate,
             decay_rate = cfg.feature_recycling.utility_decay,
             maturity_threshold = cfg.feature_recycling.feature_protection_steps,
             initial_step_size_method = cfg.feature_recycling.initial_step_size_method,
+            init_step_size_lambda = cfg.feature_recycling.get('init_step_size_lambda', 1.0),
+            init_step_size_gamma = cfg.feature_recycling.get('init_step_size_gamma', 1.0),
             incoming_weight_init = cfg.feature_recycling.incoming_weight_init,
-            filter_spec = None, # Don't forget to add if doing more than 2 layers
+            filter_spec = None,  # Don't forget to add if doing more than 2 layers
             rng = rng_from_string(rng, 'cbp_tracker'),
         )
+        if cfg.feature_recycling.initial_step_size_method == 'generate_and_test':
+            cbp_kwargs['origin_initial_step_size'] = cfg.optimizer.learning_rate
+        cbp_tracker = CBPTracker(**cbp_kwargs)
     else:
         cbp_tracker = None
         
