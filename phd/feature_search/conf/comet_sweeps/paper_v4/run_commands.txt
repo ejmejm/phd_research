@@ -101,3 +101,32 @@ shadow_feature_sweep.yaml (640): 151f7d841b914c03ba91a2eda9baf6ba
 120+ experiments per 12 hour job
 
 sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 151f7d841b914c03ba91a2eda9baf6ba
+
+
+### Round 8 ###
+
+
+===== Created sweeps with ids =====
+perfect_features.yaml (20): 755a5388803c4041bfd657856a7364f5
+standard_feature_search.yaml (320): 77828d4151ee4f638ab86e263a451dc4
+
+sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 755a5388803c4041bfd657856a7364f5
+sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 77828d4151ee4f638ab86e263a451dc4
+
+
+### Round 9 ###
+
+
+===== Created sweeps with ids =====
+shadow_feature_v2_sweep.yaml (1250): 3523cef4676e4c899db7539b351a9b9c
+
+sbatch --array=1-12 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=12:00:00 launch_comet_agent.sbatch -s 3523cef4676e4c899db7539b351a9b9c
+
+
+### Round 10 ###
+
+
+===== Created sweeps with ids =====
+small_random_weight_init.yaml (80): bc36f749f8a84215b56ed83228ba9247
+
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=03:30:00 launch_comet_agent.sbatch -s bc36f749f8a84215b56ed83228ba9247
