@@ -30,6 +30,10 @@ feature_recycling:
   # generate_and_test mode: step-size for updating global init beta (lambda), age discount (gamma)
   init_step_size_lambda: 1.0
   init_step_size_gamma: 1.0
+  # If true, don't prune features with step-size greater than their initial step-size
+  protect_growing_step_sizes: false
+  # If true, prune a fixed fraction of eligible features each step instead of total features
+  prune_eligible_fraction: false
 
 optimizer:
   learning_rate: ${eval:2**-14}

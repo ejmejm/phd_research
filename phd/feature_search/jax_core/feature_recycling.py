@@ -43,6 +43,8 @@ class CBPTracker(eqx.Module):
     decay_rate: float = eqx.field(static=True)
     init_step_size_lambda: float = eqx.field(static=True)
     init_step_size_gamma: float = eqx.field(static=True)
+    protect_growing_step_sizes: bool = eqx.field(static=True)
+    prune_eligible_fraction: bool = eqx.field(static=True)
 
     # Non-static
     replace_rate: float
@@ -63,6 +65,8 @@ class CBPTracker(eqx.Module):
         init_step_size_lambda: float = 1.0,
         init_step_size_gamma: float = 1.0,
         origin_initial_step_size: Optional[float] = None,
+        protect_growing_step_sizes: bool = False,
+        prune_eligible_fraction: bool = False,
         filter_spec: Optional[PyTree] = None,
         rng: Optional[PRNGKeyArray] = None,
     ):
@@ -129,6 +133,8 @@ class CBPTracker(eqx.Module):
         self.decay_rate = decay_rate
         self.init_step_size_lambda = init_step_size_lambda
         self.init_step_size_gamma = init_step_size_gamma
+        self.protect_growing_step_sizes = protect_growing_step_sizes
+        self.prune_eligible_fraction = prune_eligible_fraction
 
         if rng is None:
             rng = jax.random.PRNGKey(random.randint(0, 2**31))
@@ -161,13 +167,22 @@ class CBPTracker(eqx.Module):
         *,
         target: Optional[Float[Array, 'batch_size']] = None,
     ) -> FeatureStats:
-        """Update the feature stats for a single given layer."""
+        """Update the feature stats for a single given layer.
+        
+        Note: replacement_accumulator increment is handled in prune_layer_features
+        when prune_eligible_fraction is True, since it requires the full eligibility mask.
+        """
         # Age
         age = feature_stats.age + 1
 
-        # Replacement accumulator
+        # Replacement accumulator (only increment here if using total features)
         n_features = weights.shape[1]
-        replacement_accumulator = feature_stats.replacement_accumulator + self.replace_rate * n_features
+        if self.prune_eligible_fraction:
+            # Increment handled in prune_layer_features where we have full eligibility
+            replacement_accumulator = feature_stats.replacement_accumulator
+        else:
+            # Increment based on total number of features (original behavior)
+            replacement_accumulator = feature_stats.replacement_accumulator + self.replace_rate * n_features
 
         # Utility
         step_utility = self._compute_step_utility(
@@ -206,19 +221,47 @@ class CBPTracker(eqx.Module):
 
     @jax.named_call
     def _make_prune_mask(
-        self, feature_stats: FeatureStats, rng: PRNGKeyArray,
-    ) -> Tuple[Bool[Array, 'n_features'], Int[Array, '']]:
-        """Returns a boolean mask of which features to prune and the number of features to prune."""
+        self,
+        feature_stats: FeatureStats,
+        rng: PRNGKeyArray,
+        out_optim_state: Optional[NamedTuple] = None,
+    ) -> Tuple[Bool[Array, 'n_features'], Int[Array, ''], Int[Array, '']]:
+        """Returns a boolean mask of which features to prune and the number of features to prune.
         
-        # Determine which features are eligible for replacement, and which to replace
-        n_available_replacements = feature_stats.replacement_accumulator.astype(jnp.int32)
+        Args:
+            feature_stats: Feature statistics including utility and age.
+            rng: Random key for tie-breaking.
+            out_optim_state: Optional optimizer state for the output weights (used when
+                protect_growing_step_sizes is True to exclude features with step-sizes
+                greater than their initial step-size).
         
+        Returns:
+            prune_mask: Boolean mask of which features to prune.
+            n_replacements: Number of features to prune this step.
+            n_eligible: Number of eligible features (for accumulator increment).
+        """
+        
+        # Determine which features are eligible for replacement
         if self.maturity_threshold > 0:
             eligibility_mask = feature_stats.age > self.maturity_threshold
         else:
             eligibility_mask = jnp.ones(feature_stats.age.shape, dtype=jnp.bool_)
-        n_eligible_replacements = jnp.sum(eligibility_mask)
-        n_replacements = jnp.minimum(n_available_replacements, n_eligible_replacements)
+        
+        # Exclude features with step-sizes greater than their initial step-size
+        if self.protect_growing_step_sizes and out_optim_state is not None:
+            if isinstance(out_optim_state, IDBDState):
+                # out_optim_state.beta has shape (out_features, n_features)
+                # Take mean beta per feature (across output units)
+                mean_beta_per_feature = jnp.mean(out_optim_state.beta, axis=0)
+                # Compare with init_beta from feature_stats (per-feature)
+                step_size_not_growing = mean_beta_per_feature <= feature_stats.init_beta
+                eligibility_mask = eligibility_mask & step_size_not_growing
+        
+        n_eligible = jnp.sum(eligibility_mask)
+        
+        # Determine number of replacements from accumulator
+        n_available_replacements = feature_stats.replacement_accumulator.astype(jnp.int32)
+        n_replacements = jnp.minimum(n_available_replacements, n_eligible)
         
         # Compute the threshold for pruning
         # Perturb the utility to avoid ties
@@ -234,7 +277,7 @@ class CBPTracker(eqx.Module):
         prune_mask = jnp.where(filtered_utility < utility_threshold, True, False)
         prune_mask = prune_mask & eligibility_mask
         
-        return prune_mask, n_replacements
+        return prune_mask, n_replacements, n_eligible
 
     @jax.named_call
     def _update_global_init_beta(
@@ -346,19 +389,35 @@ class CBPTracker(eqx.Module):
 
         if isinstance(optim_layer_state, IDBDState):
             beta_idx = optim_layer_state._fields.index('beta')
+            init_beta_idx = optim_layer_state._fields.index('init_beta')
             if self.initial_step_size_method == 'constant':
                 new_vals[beta_idx] = jnp.where(
                     prune_mask_exp, optim_layer_state.init_beta, new_vals[beta_idx]
                 )
+                # Restore init_beta (was zeroed in loop above)
+                new_vals[init_beta_idx] = jnp.where(
+                    prune_mask_exp, optim_layer_state.init_beta, new_vals[init_beta_idx]
+                )
             elif self.initial_step_size_method == 'mean':
                 new_vals[beta_idx] = jnp.where(prune_mask_exp, mean_beta, new_vals[beta_idx])
+                # Update init_beta to the actual reset value
+                new_vals[init_beta_idx] = jnp.where(prune_mask_exp, mean_beta, new_vals[init_beta_idx])
             elif self.initial_step_size_method == 'median':
                 new_vals[beta_idx] = jnp.where(prune_mask_exp, median_beta, new_vals[beta_idx])
+                # Update init_beta to the actual reset value
+                new_vals[init_beta_idx] = jnp.where(prune_mask_exp, median_beta, new_vals[init_beta_idx])
             elif self.initial_step_size_method == 'generate_and_test' and new_init_beta is not None:
+                reset_beta_exp = jnp.expand_dims(new_init_beta, 1)
                 new_vals[beta_idx] = jnp.where(
                     prune_mask_exp,
-                    jnp.expand_dims(new_init_beta, 1),
+                    reset_beta_exp,
                     new_vals[beta_idx],
+                )
+                # Update init_beta to the actual reset value
+                new_vals[init_beta_idx] = jnp.where(
+                    prune_mask_exp,
+                    reset_beta_exp,
+                    new_vals[init_beta_idx],
                 )
             else:
                 raise ValueError(
@@ -400,19 +459,35 @@ class CBPTracker(eqx.Module):
 
         if isinstance(optim_layer_state, IDBDState):
             beta_idx = optim_layer_state._fields.index('beta')
+            init_beta_idx = optim_layer_state._fields.index('init_beta')
             if self.initial_step_size_method == 'constant':
                 new_vals[beta_idx] = jnp.where(
                     prune_mask_exp, optim_layer_state.init_beta, new_vals[beta_idx]
                 )
+                # Restore init_beta (was zeroed in loop above)
+                new_vals[init_beta_idx] = jnp.where(
+                    prune_mask_exp, optim_layer_state.init_beta, new_vals[init_beta_idx]
+                )
             elif self.initial_step_size_method == 'mean':
                 new_vals[beta_idx] = jnp.where(prune_mask_exp, mean_betas, new_vals[beta_idx])
+                # Update init_beta to the actual reset value
+                new_vals[init_beta_idx] = jnp.where(prune_mask_exp, mean_betas, new_vals[init_beta_idx])
             elif self.initial_step_size_method == 'median':
                 new_vals[beta_idx] = jnp.where(prune_mask_exp, median_betas, new_vals[beta_idx])
+                # Update init_beta to the actual reset value
+                new_vals[init_beta_idx] = jnp.where(prune_mask_exp, median_betas, new_vals[init_beta_idx])
             elif self.initial_step_size_method == 'generate_and_test' and new_init_beta is not None:
+                reset_beta_exp = jnp.expand_dims(new_init_beta, 0)
                 new_vals[beta_idx] = jnp.where(
                     prune_mask_exp,
-                    jnp.expand_dims(new_init_beta, 0),
+                    reset_beta_exp,
                     new_vals[beta_idx],
+                )
+                # Update init_beta to the actual reset value
+                new_vals[init_beta_idx] = jnp.where(
+                    prune_mask_exp,
+                    reset_beta_exp,
+                    new_vals[init_beta_idx],
                 )
             else:
                 raise ValueError(
@@ -632,7 +707,9 @@ class CBPTracker(eqx.Module):
         )
 
         # Get indices to reinitialize (prune mask)
-        prune_mask, n_replacements = self._make_prune_mask(feature_stats, prune_mask_key)
+        prune_mask, n_replacements, n_eligible = self._make_prune_mask(
+            feature_stats, prune_mask_key, out_optim_state
+        )
 
         # Fraction of pruned features with age > 0.5 / recycle_rate (long-lived)
         age_threshold = 0.5 / self.replace_rate
@@ -640,32 +717,64 @@ class CBPTracker(eqx.Module):
         n_long_lived = jnp.sum(long_lived_mask)
         n_pruned_layer = jnp.sum(prune_mask)
 
+        # Update replacement accumulator
+        if self.prune_eligible_fraction:
+            # Increment based on eligible features (full eligibility mask)
+            accumulator_increment = self.replace_rate * n_eligible.astype(jnp.float32)
+            new_accumulator = feature_stats.replacement_accumulator + accumulator_increment - n_replacements
+        else:
+            # Increment already done in _compute_new_feature_stats, just decrement
+            new_accumulator = feature_stats.replacement_accumulator - n_replacements
         feature_stats = tree_replace(
             feature_stats,
-            replacement_accumulator = feature_stats.replacement_accumulator - n_replacements,
+            replacement_accumulator = new_accumulator,
         )
 
-        # Sample new init_beta for pruned features (generate_and_test): uniform in [global - 1, global + 1]
+        # Compute the reset beta value based on the initial_step_size_method
         n_features = feature_stats.utility.shape[0]
-        sampled_betas = jax.random.uniform(
-            sample_key,
-            (n_features,),
-            minval = updated_layer_global_init_beta - 0.5,
-            maxval = updated_layer_global_init_beta + 0.5,
-            dtype = jnp.float32,
-        )
+        if self.initial_step_size_method == 'generate_and_test':
+            # Sample new init_beta for pruned features: uniform in [global - 0.5, global + 0.5]
+            reset_beta_value = jax.random.uniform(
+                sample_key,
+                (n_features,),
+                minval = updated_layer_global_init_beta - 0.5,
+                maxval = updated_layer_global_init_beta + 0.5,
+                dtype = jnp.float32,
+            )
+        elif self.initial_step_size_method == 'median' and out_optim_state is not None:
+            if isinstance(out_optim_state, IDBDState):
+                reset_beta_value = jnp.full(
+                    n_features, jnp.median(out_optim_state.beta), dtype=jnp.float32
+                )
+            else:
+                reset_beta_value = feature_stats.init_beta
+        elif self.initial_step_size_method == 'mean' and out_optim_state is not None:
+            if isinstance(out_optim_state, IDBDState):
+                reset_beta_value = jnp.full(
+                    n_features, jnp.mean(out_optim_state.beta), dtype=jnp.float32
+                )
+            else:
+                reset_beta_value = feature_stats.init_beta
+        elif self.initial_step_size_method == 'constant' and out_optim_state is not None:
+            if isinstance(out_optim_state, IDBDState):
+                # Use mean of out_optim_state.init_beta as representative value
+                reset_beta_value = jnp.full(
+                    n_features, jnp.mean(out_optim_state.init_beta), dtype=jnp.float32
+                )
+            else:
+                reset_beta_value = feature_stats.init_beta
+        else:
+            reset_beta_value = feature_stats.init_beta
+
         init_beta_after_reset = jnp.where(
             prune_mask,
-            sampled_betas,
+            reset_beta_value,
             feature_stats.init_beta,
         )
-        init_beta_for_reset = (
-            init_beta_after_reset if self.initial_step_size_method == 'generate_and_test' else None
-        )
 
-        # Reset stats for those features (and set init_beta for pruned when generate_and_test)
+        # Reset stats for those features (update init_beta to actual reset value)
         feature_stats = self._reset_feature_stats(
-            feature_stats, prune_mask, init_beta_after_reset=init_beta_for_reset
+            feature_stats, prune_mask, init_beta_after_reset=init_beta_after_reset
         )
 
         # Reinit input and output weights for given features

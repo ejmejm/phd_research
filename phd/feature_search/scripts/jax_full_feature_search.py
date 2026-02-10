@@ -105,6 +105,8 @@ def prepare_components(cfg: DictConfig):
             init_step_size_lambda = cfg.feature_recycling.get('init_step_size_lambda', 1.0),
             init_step_size_gamma = cfg.feature_recycling.get('init_step_size_gamma', 1.0),
             incoming_weight_init = cfg.feature_recycling.incoming_weight_init,
+            protect_growing_step_sizes = cfg.feature_recycling.get('protect_growing_step_sizes', False),
+            prune_eligible_fraction = cfg.feature_recycling.get('prune_eligible_fraction', False),
             filter_spec = None,  # Don't forget to add if doing more than 2 layers
             rng = rng_from_string(rng, 'cbp_tracker'),
         )
@@ -438,8 +440,11 @@ def compute_metrics(
         metrics.update(compute_feature_match_stats(
             train_state.model, task, log_perfect_matches))
     
+    # init_beta is now per-weight; log mean of last layer's init_beta as summary
+    init_beta_leaves = jax.tree.leaves(train_state.optimizer.state.init_beta)
+    init_beta_last = init_beta_leaves[-1] if init_beta_leaves else jnp.array(0.0)
     metrics.update({
-        'optimizer/init_lr': jax.block_until_ready(jnp.exp(train_state.optimizer.state.init_beta)),
+        'optimizer/init_lr': jax.block_until_ready(jnp.exp(jnp.mean(init_beta_last))),
     })
     if train_state.cbp_tracker is not None and train_state.cbp_tracker.global_init_beta:
         metrics['optimizer/global_init_lr'] = jax.block_until_ready(

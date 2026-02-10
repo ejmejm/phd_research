@@ -82,8 +82,10 @@ def optax_idbd(
                     "independent, then this will probably cause a silent bug."
                 )
         
-        init_beta = jnp.log(init_lr)
-        beta = jax.tree.map(lambda x: jnp.full_like(x, init_beta), params)
+        init_beta_scalar = jnp.log(init_lr)
+        # init_beta is per-weight to track actual reset values when using median/mean step-size init
+        init_beta = jax.tree.map(lambda x: jnp.full_like(x, init_beta_scalar), params)
+        beta = jax.tree.map(lambda x: jnp.full_like(x, init_beta_scalar), params)
         h = jax.tree.map(lambda x: jnp.zeros_like(x), params)
         
         v = None
@@ -146,7 +148,8 @@ def optax_idbd(
                 input_term = jax.tree.leaves(h_decay_term)[0]
                 n_inputs_per_node = input_term.shape[1]
                 reset_step_size = 1.0 / n_inputs_per_node * (1.0 / jnp.mean(input_term)) * 0.5
-                init_beta = jnp.log(reset_step_size)
+                reset_beta_scalar = jnp.log(reset_step_size)
+                init_beta = jax.tree.map(lambda b: jnp.full_like(b, reset_beta_scalar), beta)
             # else: keep init_beta from state unchanged
         
         else:
@@ -206,8 +209,10 @@ def categorical_optax_idbd(
     """
 
     def init_fn(params):
-        init_beta = jnp.log(init_lr)
-        beta = jax.tree.map(lambda x: jnp.full_like(x, init_beta), params)
+        init_beta_scalar = jnp.log(init_lr)
+        # init_beta is per-weight to track actual reset values when using median/mean step-size init
+        init_beta = jax.tree.map(lambda x: jnp.full_like(x, init_beta_scalar), params)
+        beta = jax.tree.map(lambda x: jnp.full_like(x, init_beta_scalar), params)
         h = jax.tree.map(jnp.zeros_like, params)
         v = jax.tree.map(jnp.zeros_like, params) if autostep else None
         return IDBDState(init_beta=init_beta, beta=beta, h=h, v=v)
