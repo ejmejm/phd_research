@@ -4,7 +4,7 @@ from typing import NamedTuple, Optional
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array 
+from jaxtyping import Array, Float
 from optax._src import base
 
 from phd.feature_search.jax_core.utils import tree_unzip
@@ -20,6 +20,7 @@ class IDBDState(NamedTuple):
     h: base.Updates
     v: Optional[base.Updates] = None
     raw_effective_step_size: Optional[base.Updates] = None  # For logging (autostep only)
+    global_beta: Optional[Array] = None  # Learned global initial step-size (in log space)
 
 
 def optax_idbd(
@@ -32,6 +33,10 @@ def optax_idbd(
     version: str = 'prediction_grads',  # {prediction_grads, loss_grads}
     shadow_weight_threshold_factor: float = 0.0,
     auto_set_init_step_size: bool = True,
+    learn_global_init_beta: bool = False,
+    global_beta_selection: str = 'top_k',  # {'top_k', 'exp_weight'}
+    global_beta_top_k_frac: float = 0.1,  # Use top 10% closest
+    global_beta_exp_decay: float = 2.0,  # Decay rate for exponential weighting
 ) -> base.GradientTransformation:
     """Incremental Delta-Bar-Delta optimizer.
     
@@ -40,8 +45,7 @@ def optax_idbd(
     to parameters and maintains separate learning rates for each parameter.
     
     Args:
-        params: Iterable of parameters to optimize
-        meta_lr: Meta learning rate (default: 0.01)
+        meta_lr: Meta learning rate (default: 0.005)
         init_lr: Initial learning rate (default: 0.01)
         weight_decay: Weight decay (default: 0.0)
         step_size_decay: Step size decay factor (default: 0.0)
@@ -52,6 +56,12 @@ def optax_idbd(
             of a given weight, then the step-size will be treated as zero. Only applicable when optimizer is idbd.
         auto_set_init_step_size: When True (and autostep is True), reset init_beta each step based on
             remaining learning rate and input term. When False, keep init_beta unchanged.
+        learn_global_init_beta: When True, learn a global initial step-size using IDBD by aggregating
+            updates from weights with similar step-sizes.
+        global_beta_selection: Method for selecting/weighting weights for global beta update.
+            'top_k' selects top fraction closest to global_beta, 'exp_weight' uses exponential weighting.
+        global_beta_top_k_frac: Fraction of weights to use when global_beta_selection='top_k'.
+        global_beta_exp_decay: Decay rate for exponential weighting when global_beta_selection='exp_weight'.
     
     Returns:
         A :class:`optax.GradientTransformation` object.
@@ -94,11 +104,18 @@ def optax_idbd(
         # Same structure as in update (per-param vector); avoids None so scan carry is fixed
         raw_effective_step_size = jax.tree.map(
             lambda x: jnp.zeros(x.shape[0], dtype=x.dtype), params)
-        return IDBDState(init_beta=init_beta, beta=beta, h=h, v=v, raw_effective_step_size=raw_effective_step_size)
+        
+        # Initialize global_beta for learned global initial step-size
+        global_beta = jnp.array(init_beta_scalar) if learn_global_init_beta else None
+        
+        return IDBDState(
+            init_beta=init_beta, beta=beta, h=h, v=v,
+            raw_effective_step_size=raw_effective_step_size, global_beta=global_beta
+        )
 
     def update_fn(updates, state, params):
         loss_grads, prediction_grads = updates
-        init_beta, beta, h, v, _ = state
+        init_beta, beta, h, v, _, global_beta = state
         
         # Try square of loss grads version of this as fisher approximation of hessian
         if version == 'loss_grads':
@@ -162,6 +179,56 @@ def optax_idbd(
             )
             alpha = jax.tree.map(jnp.exp, beta)
         
+        # Update global_beta using IDBD with aggregated gradients from nearby weights
+        if learn_global_init_beta and global_beta is not None:
+            # Flatten all arrays for easier processing
+            beta_flat = jnp.concatenate([b.flatten() for b in jax.tree.leaves(beta)])
+            h_flat = jnp.concatenate([h_i.flatten() for h_i in jax.tree.leaves(h)])
+            loss_grads_flat = jnp.concatenate([g.flatten() for g in jax.tree.leaves(loss_grads)])
+            
+            # Compute distance from global_beta
+            beta_distance = jnp.abs(beta_flat - global_beta)
+            
+            if global_beta_selection == 'top_k':
+                # Select top k% weights with smallest distance
+                n_weights = beta_flat.shape[0]
+                k = jnp.maximum(1, jnp.int32(global_beta_top_k_frac * n_weights))
+                # Get threshold: k-th smallest distance
+                threshold = jnp.sort(beta_distance)[k - 1]
+                selection_mask = beta_distance <= threshold
+                selection_weights = selection_mask.astype(jnp.float32)
+                selection_weights = selection_weights / jnp.sum(selection_weights)
+            else:  # exp_weight
+                # Weight by exp(-decay * distance)
+                selection_weights = jnp.exp(-global_beta_exp_decay * beta_distance)
+                selection_weights = selection_weights / jnp.sum(selection_weights)
+            
+            if autostep:
+                # For autostep: average of exp(meta_lr * h * loss_grads / v)
+                v_flat = jnp.concatenate([v_i.flatten() for v_i in jax.tree.leaves(v)])
+                # Compute per-weight multiplicative update factors
+                update_factors = jnp.where(
+                    v_flat > 0,
+                    jnp.exp(meta_lr * h_flat * loss_grads_flat / v_flat),
+                    1.0,
+                )
+                avg_update_factor = jnp.sum(selection_weights * update_factors)
+                
+                # Compute effective step size for selected weights
+                h_decay_flat = jnp.concatenate([d.flatten() for d in jax.tree.leaves(h_decay_term)])
+                alpha_flat = jnp.concatenate([a.flatten() for a in jax.tree.leaves(alpha)])
+                weighted_effective = jnp.sum(selection_weights * alpha_flat * h_decay_flat)
+                effective_step_size = jnp.maximum(weighted_effective, 1.0)
+                
+                # Update global_beta
+                global_alpha = jnp.exp(global_beta) * avg_update_factor / effective_step_size
+                global_beta = jnp.log(global_alpha)
+            else:
+                # For non-autostep: average of meta_lr * g * h
+                updates_flat = meta_lr * loss_grads_flat * h_flat
+                avg_update = jnp.sum(selection_weights * updates_flat)
+                global_beta = global_beta + avg_update
+        
         # Update gradient trace (h)
         h = jax.tree.map(
             lambda h_i, a_i, g_i, d_i: h_i * jnp.clip(1 - a_i * d_i, min=0) + a_i * g_i,
@@ -184,7 +251,10 @@ def optax_idbd(
         )
         
         # Update state (raw_effective_step_size always same structure for fixed scan carry)
-        state = IDBDState(init_beta=init_beta, beta=beta, h=h, v=v, raw_effective_step_size=raw_effective_step_size)
+        state = IDBDState(
+            init_beta=init_beta, beta=beta, h=h, v=v,
+            raw_effective_step_size=raw_effective_step_size, global_beta=global_beta
+        )
         
         return param_updates, state
 

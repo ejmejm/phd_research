@@ -61,7 +61,7 @@ class CBPTracker(eqx.Module):
         incoming_weight_init: str = 'lecun_uniform',  # {'lecun_uniform', 'kaiming_uniform', 'binary'}
         outgoing_weight_init: str = 'zeros',  # {'zeros', 'lecun_uniform', 'kaiming_uniform'}
         utility_reset_mode: str = 'median',  # {'median', 'zero'}
-        initial_step_size_method: str = 'constant',  # {'constant', 'mean', 'median', 'generate_and_test'}
+        initial_step_size_method: str = 'constant',  # {'constant', 'mean', 'median', 'generate_and_test', 'learned'}
         init_step_size_lambda: float = 1.0,
         init_step_size_gamma: float = 1.0,
         origin_initial_step_size: Optional[float] = None,
@@ -73,7 +73,7 @@ class CBPTracker(eqx.Module):
         assert utility_reset_mode in {'median', 'zero'}
         assert incoming_weight_init in {'lecun_uniform', 'kaiming_uniform', 'binary'}
         assert outgoing_weight_init in {'zeros', 'kaiming_uniform'}
-        assert initial_step_size_method in {'constant', 'mean', 'median', 'generate_and_test'}
+        assert initial_step_size_method in {'constant', 'mean', 'median', 'generate_and_test', 'learned'}
         if initial_step_size_method == 'generate_and_test':
             assert origin_initial_step_size is not None, "origin_initial_step_size required for generate_and_test"
 
@@ -419,6 +419,19 @@ class CBPTracker(eqx.Module):
                     reset_beta_exp,
                     new_vals[init_beta_idx],
                 )
+            elif self.initial_step_size_method == 'learned' and new_init_beta is not None:
+                reset_beta_exp = jnp.expand_dims(new_init_beta, 1)
+                new_vals[beta_idx] = jnp.where(
+                    prune_mask_exp,
+                    reset_beta_exp,
+                    new_vals[beta_idx],
+                )
+                # Update init_beta to the actual reset value
+                new_vals[init_beta_idx] = jnp.where(
+                    prune_mask_exp,
+                    reset_beta_exp,
+                    new_vals[init_beta_idx],
+                )
             else:
                 raise ValueError(
                     f'Invalid initial step-size method: {self.initial_step_size_method}'
@@ -477,6 +490,19 @@ class CBPTracker(eqx.Module):
                 # Update init_beta to the actual reset value
                 new_vals[init_beta_idx] = jnp.where(prune_mask_exp, median_betas, new_vals[init_beta_idx])
             elif self.initial_step_size_method == 'generate_and_test' and new_init_beta is not None:
+                reset_beta_exp = jnp.expand_dims(new_init_beta, 0)
+                new_vals[beta_idx] = jnp.where(
+                    prune_mask_exp,
+                    reset_beta_exp,
+                    new_vals[beta_idx],
+                )
+                # Update init_beta to the actual reset value
+                new_vals[init_beta_idx] = jnp.where(
+                    prune_mask_exp,
+                    reset_beta_exp,
+                    new_vals[init_beta_idx],
+                )
+            elif self.initial_step_size_method == 'learned' and new_init_beta is not None:
                 reset_beta_exp = jnp.expand_dims(new_init_beta, 0)
                 new_vals[beta_idx] = jnp.where(
                     prune_mask_exp,
@@ -741,6 +767,14 @@ class CBPTracker(eqx.Module):
                 maxval = updated_layer_global_init_beta + 0.5,
                 dtype = jnp.float32,
             )
+        elif self.initial_step_size_method == 'learned' and out_optim_state is not None:
+            if isinstance(out_optim_state, IDBDState) and out_optim_state.global_beta is not None:
+                # Use the learned global_beta from the optimizer, with no randomness
+                reset_beta_value = jnp.full(
+                    (n_features,), out_optim_state.global_beta, dtype=jnp.float32
+                )
+            else:
+                reset_beta_value = feature_stats.init_beta
         elif self.initial_step_size_method == 'median' and out_optim_state is not None:
             if isinstance(out_optim_state, IDBDState):
                 reset_beta_value = jnp.full(
@@ -783,7 +817,9 @@ class CBPTracker(eqx.Module):
 
         # Reinit optimizer input and output weight states for given features
         new_init_beta_for_optim = (
-            init_beta_after_reset if self.initial_step_size_method == 'generate_and_test' else None
+            init_beta_after_reset
+            if self.initial_step_size_method in {'generate_and_test', 'learned'}
+            else None
         )
         in_optim_state = self._reset_input_optim_state(
             in_optim_state, prune_mask, new_init_beta=new_init_beta_for_optim

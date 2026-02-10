@@ -192,12 +192,15 @@ def prepare_optimizer(
             [
                 'learning_rate', 'meta_learning_rate', 'weight_decay', 'autostep',
                 'step_size_decay', 'version', 'shadow_weight_threshold_factor',
-                'auto_set_init_step_size',
+                'auto_set_init_step_size', 'learn_global_init_beta',
+                'global_beta_selection', 'global_beta_top_k_frac', 'global_beta_exp_decay',
             ],
             {
                 'version': 'prediction_grads', 'weight_decay': 0, 'autostep': True,
                 'step_size_decay': 0.0, 'shadow_weight_threshold_factor': 0.0,
-                'auto_set_init_step_size': True,
+                'auto_set_init_step_size': False, 'learn_global_init_beta': False,
+                'global_beta_selection': 'top_k', 'global_beta_top_k_frac': 0.1,
+                'global_beta_exp_decay': 2.0,
             },
         )
         kwargs['init_lr'] = kwargs.pop('learning_rate')

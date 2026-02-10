@@ -39,5 +39,11 @@ optimizer:
   learning_rate: ${eval:2**-14}
   meta_learning_rate: ${eval:2**-5}
   auto_set_init_step_size: false
+  
+  # Learn global initial step-size using IDBD (for use with initial_step_size_method: learned)
+  learn_global_init_beta: false
+  global_beta_selection: 'top_k'  # {'top_k', 'exp_weight'}
+  global_beta_top_k_frac: 0.1
+  global_beta_exp_decay: 2.0
 
 seed: [26020101, 26020102, 26020103, 26020104, 26020105, 26020106, 26020107, 26020108, 26020109, 26020110, 26020111, 26020112, 26020113, 26020114, 26020115, 26020116, 26020117, 26020118, 26020119, 26020120]

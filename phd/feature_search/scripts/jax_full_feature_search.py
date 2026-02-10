@@ -446,10 +446,22 @@ def compute_metrics(
     metrics.update({
         'optimizer/init_lr': jax.block_until_ready(jnp.exp(jnp.mean(init_beta_last))),
     })
-    if train_state.cbp_tracker is not None and train_state.cbp_tracker.global_init_beta:
-        metrics['optimizer/global_init_lr'] = jax.block_until_ready(
-            jnp.exp(train_state.cbp_tracker.global_init_beta[0])
-        )
+    
+    # Only log optimizer/init_global_lr if cbp_tracker.initial_step_size_method == 'generate_and_test'
+    # or if it's 'learned' (and required conditions hold), using the same metric name.
+    if train_state.cbp_tracker is not None:
+        method = getattr(train_state.cbp_tracker, "initial_step_size_method", None)
+        if method == "generate_and_test" and train_state.cbp_tracker.global_init_beta:
+            metrics['optimizer/init_global_lr'] = jax.block_until_ready(
+                jnp.exp(train_state.cbp_tracker.global_init_beta[0])
+            )
+        elif (
+            method == "learned"
+            and cfg.optimizer.name == "idbd"
+        ):
+            metrics['optimizer/init_global_lr'] = jax.block_until_ready(
+                jnp.exp(train_state.optimizer.state.global_beta)
+            )
     # Log raw_effective_step_size min/max over steps in this log batch (IDBD autostep)
     if cfg.optimizer.name == 'idbd' and cfg.optimizer.get('autostep', False):
         res = step_stats.raw_effective_step_size  # shape (n_steps,) after stack/reshape
