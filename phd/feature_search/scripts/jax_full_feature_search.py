@@ -21,7 +21,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
     StandardizationStats,
     rng_from_string,
 )
-from phd.feature_search.jax_core.feature_recycling import CBPTracker, SignedCBPTracker
+from phd.feature_search.jax_core.feature_recycling import CBPTracker, CostCBPTracker
 from phd.feature_search.jax_core.metrics import *
 from phd.feature_search.jax_core.models import MLP
 from phd.feature_search.jax_core.optimizers import EqxOptimizer
@@ -95,7 +95,7 @@ def prepare_components(cfg: DictConfig):
     
     # Initialize CBP tracker
     if cfg.feature_recycling.use_cbp_utility:
-        cbp_cls = SignedCBPTracker if cfg.feature_recycling.get('use_signed_utility', False) else CBPTracker
+        cbp_cls = CostCBPTracker if cfg.feature_recycling.get('use_signed_utility', False) else CBPTracker
         cbp_kwargs = dict(
             model = model,
             replace_rate = cfg.feature_recycling.recycle_rate,
@@ -424,8 +424,12 @@ def compute_metrics(
     # Fraction of pruned features that were long-lived (age > 0.5 / recycle_rate)
     if train_state.cbp_tracker is not None and cfg.feature_recycling.get('recycle_rate', 0) > 0:
         metrics['long_lived_frac'] = jax.block_until_ready(jnp.nanmean(step_stats.long_lived_frac))
-    if cfg.train.get('log_utility_stats', False):
-        raise NotImplementedError("Utility stats are not implemented yet!")
+    if cfg.train.get('log_utility_stats', False) and train_state.cbp_tracker is not None:
+        utility = train_state.cbp_tracker.all_feature_stats[0].utility
+        cost_trace = None
+        if hasattr(train_state.cbp_tracker, 'get_bias_corrected_cost_trace'):
+            cost_trace = train_state.cbp_tracker.get_bias_corrected_cost_trace(0)
+        metrics.update(compute_cbp_stats(train_state.model, task, utility, cost_trace))
     if cfg.train.get('log_model_stats', False):
         metrics.update(compute_model_stats(train_state.model, task))
     if cfg.train.get('log_optimizer_stats', False):

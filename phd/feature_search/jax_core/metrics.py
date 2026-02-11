@@ -233,6 +233,43 @@ def compute_feature_matched_optimizer_stats(
     return metrics
 
 
+def compute_cbp_stats(
+    model: MLP,
+    task: NonlinearGEOFFTask,
+    utility: Float[Array, 'n_features'],
+    cost_trace: Optional[Float[Array, 'out_features n_features']] = None,
+) -> Dict[str, float]:
+    """Compute CBP utility and cost trace statistics, split by perfect/imperfect feature match."""
+    assert len(model.layers) == 2, "Only supports two-layer learning networks!"
+
+    metrics = {}
+
+    # Feature matching to split perfect vs imperfect
+    learning_net_weights = model.layers[0].weight
+    target_net_weights = task.weights[0].T
+    feature_diffs, _ = compute_feature_diff_matrix(
+        learning_net_weights, target_net_weights, include_negative_features=True)
+    best_match_diffs = feature_diffs.min(axis=1)
+    perfect_match_mask = best_match_diffs < 1e-7
+    imperfect_match_mask = ~perfect_match_mask
+    n_perfect = jnp.maximum(jnp.sum(perfect_match_mask), 1)
+    n_imperfect = jnp.maximum(jnp.sum(imperfect_match_mask), 1)
+
+    # Utility stats
+    metrics['cbp/utility_mean'] = jnp.mean(utility)
+    metrics['cbp/utility_perfect_mean'] = jnp.sum(utility * perfect_match_mask) / n_perfect
+    metrics['cbp/utility_imperfect_mean'] = jnp.sum(utility * imperfect_match_mask) / n_imperfect
+
+    # Cost trace stats (bias-corrected, aggregated per-feature)
+    if cost_trace is not None:
+        per_feature_cost = jnp.mean(cost_trace, axis=0)  # (n_features,)
+        metrics['cbp/cost_trace_mean'] = jnp.mean(per_feature_cost)
+        metrics['cbp/cost_trace_perfect_mean'] = jnp.sum(per_feature_cost * perfect_match_mask) / n_perfect
+        metrics['cbp/cost_trace_imperfect_mean'] = jnp.sum(per_feature_cost * imperfect_match_mask) / n_imperfect
+
+    return metrics
+
+
 # TODO: Fix this function. Consider the negative feature case and stop comparing output weights.
 def compute_n_best_features_pruned(
     model: MLP,

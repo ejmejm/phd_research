@@ -265,6 +265,7 @@ class CBPTracker(eqx.Module):
         
         # Compute the threshold for pruning
         # Perturb the utility to avoid ties
+        # TODO: Try using bias corrected utility here
         perturbed_utility = feature_stats.utility + \
             jax.random.uniform(rng, feature_stats.utility.shape, minval=-EPSILON, maxval=EPSILON)
         filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
@@ -979,6 +980,13 @@ class CBPTracker(eqx.Module):
         pass
 
 
+class CostTraceStats(eqx.Module):
+    """Per-layer state for tracking the cost trace of outgoing weight parameters."""
+    input_magnitude_trace: Float[Array, 'n_features']
+    cost_trace: Float[Array, 'out_features n_features']
+    prev_out_weights: Float[Array, 'out_features n_features']
+
+
 class SignedCBPTracker(CBPTracker):
     """CBP tracker that uses signed utility: |error + contribution| - |error| per feature.
 
@@ -1008,3 +1016,170 @@ class SignedCBPTracker(CBPTracker):
             - jnp.abs(target_error)[:, None],
             axis=0,
         )
+
+
+class CostCBPTracker(SignedCBPTracker):
+    """Signed CBP tracker with per-parameter cost trace.
+
+    Tracks the cost of each outgoing weight parameter as:
+        cost_trace = trace(|delta_w| * bias_corrected(trace(|input_activation|)))
+
+    The input magnitude trace and cost trace use the same decay factor as the utility.
+    """
+
+    all_cost_trace_stats: List[CostTraceStats]
+
+    def __init__(self, model, **kwargs):
+        filter_spec = kwargs.get('filter_spec', None)
+        super().__init__(model, **kwargs)
+
+        filtered_model = eqx.filter(model, filter_spec) if filter_spec is not None else model
+        all_weights = jax.tree.leaves(eqx.filter(filtered_model, lambda x: isinstance(x, Array)))
+
+        self.all_cost_trace_stats = [
+            CostTraceStats(
+                input_magnitude_trace=jnp.zeros(all_weights[k + 1].shape[1], dtype=jnp.float32),
+                cost_trace=jnp.zeros(all_weights[k + 1].shape, dtype=jnp.float32),
+                prev_out_weights=all_weights[k + 1],
+            )
+            for k in range(len(all_weights) - 1)
+        ]
+
+    def _update_cost_trace_for_layer(
+        self,
+        cost_stat: CostTraceStats,
+        out_weights: Float[Array, 'out_features n_features'],
+        activation_values: Float[Array, 'batch_size n_features'],
+        age: Int[Array, 'n_features'],
+    ) -> CostTraceStats:
+        """Update cost trace stats for a single layer.
+
+        Args:
+            cost_stat: Current cost trace state for this layer.
+            out_weights: Current outgoing weights (post-optimizer, pre-pruning).
+            activation_values: Activation values for the features in this layer.
+            age: Current feature ages (before the +1 increment in feature stats update).
+        """
+        # Instantaneous absolute weight change
+        delta_w = jnp.abs(out_weights - cost_stat.prev_out_weights)
+
+        # Update input magnitude trace
+        input_mag = jnp.abs(activation_values).mean(axis=0)  # (n_features,)
+        new_input_mag_trace = (
+            self.decay_rate * cost_stat.input_magnitude_trace
+            + (1 - self.decay_rate) * input_mag
+        )
+
+        # Bias-correct input magnitude trace using age + 1
+        # (age will be incremented by 1 during the concurrent feature stats update)
+        age_plus_1 = (age + 1).astype(jnp.float32)
+        correction = 1.0 - self.decay_rate ** age_plus_1
+        correction = jnp.maximum(correction, EPSILON)
+        bc_input_mag = new_input_mag_trace / correction
+
+        # Update cost trace: trace of |delta_w| * bias_corrected(|input|)
+        new_cost_trace = (
+            self.decay_rate * cost_stat.cost_trace
+            + (1 - self.decay_rate) * delta_w * bc_input_mag[None, :]
+        )
+
+        return CostTraceStats(
+            input_magnitude_trace=new_input_mag_trace,
+            cost_trace=new_cost_trace,
+            prev_out_weights=out_weights,
+        )
+
+    def prune_features(
+        self,
+        model: eqx.Module,
+        input_values: eqx.Module,
+        optimizers: EqxOptimizer | Tuple[EqxOptimizer, ...] | None = None,
+        *,
+        rng: PRNGKeyArray,
+        targets: Optional[Float[Array, 'batch_size']] = None,
+    ) -> Tuple['CostCBPTracker', eqx.Module, EqxOptimizer, List[Bool[Array, 'n_features']], Float[Array, '']]:
+        # Save current weights (post-optimizer, pre-pruning)
+        all_weights = jax.tree.leaves(model)
+        indices = list(reversed(range(1, len(all_weights))))
+
+        # Pre-compute cost trace updates before pruning modifies weights
+        updated_cost_stats = []
+        for idx, i in enumerate(indices):
+            cost_stat = self.all_cost_trace_stats[i - 1]
+            out_weights = all_weights[i]
+            activation_values = input_values[i]
+            feature_stats = self.all_feature_stats[i - 1]
+
+            updated = self._update_cost_trace_for_layer(
+                cost_stat, out_weights, activation_values, feature_stats.age
+            )
+            updated_cost_stats.append(updated)
+
+        # Delegate pruning to parent
+        new_tracker, new_model, new_optimizers, prune_masks, long_lived_frac = super().prune_features(
+            model, input_values, optimizers, rng=rng, targets=targets
+        )
+
+        # Post-pruning: reset cost traces for pruned features & store post-pruning weights
+        new_weights = jax.tree.leaves(new_model)
+
+        new_cost_trace_stats = []
+        for idx, i in enumerate(indices):
+            updated = updated_cost_stats[idx]
+            prune_mask = prune_masks[i - 1]
+
+            new_input_mag_trace = jnp.where(prune_mask, 0.0, updated.input_magnitude_trace)
+            new_cost_trace = jnp.where(prune_mask[None, :], 0.0, updated.cost_trace)
+
+            new_cost_trace_stats.append(CostTraceStats(
+                input_magnitude_trace=new_input_mag_trace,
+                cost_trace=new_cost_trace,
+                prev_out_weights=new_weights[i],
+            ))
+
+        new_tracker = tree_replace(new_tracker, all_cost_trace_stats=new_cost_trace_stats)
+        return new_tracker, new_model, new_optimizers, prune_masks, long_lived_frac
+
+    def update_feature_stats(
+        self,
+        model: eqx.Module,
+        input_values: eqx.Module,
+        targets: Optional[Float[Array, 'batch_size']] = None,
+    ) -> 'CostCBPTracker':
+        all_weights = jax.tree.leaves(model)
+        indices = list(reversed(range(1, len(all_weights))))
+
+        new_cost_trace_stats = []
+        for idx, i in enumerate(indices):
+            cost_stat = self.all_cost_trace_stats[i - 1]
+            out_weights = all_weights[i]
+            activation_values = input_values[i]
+            feature_stats = self.all_feature_stats[i - 1]
+
+            updated = self._update_cost_trace_for_layer(
+                cost_stat, out_weights, activation_values, feature_stats.age
+            )
+            # No pruning, so prev_out_weights = current weights
+            new_cost_trace_stats.append(updated)
+
+        # Delegate feature stats update to parent
+        new_tracker = super().update_feature_stats(model, input_values, targets=targets)
+        new_tracker = tree_replace(new_tracker, all_cost_trace_stats=new_cost_trace_stats)
+        return new_tracker
+
+    def get_bias_corrected_cost_trace(
+        self, layer_idx: int,
+    ) -> Float[Array, 'out_features n_features']:
+        """Get the bias-corrected cost trace for a layer.
+
+        Args:
+            layer_idx: Index into all_cost_trace_stats / all_feature_stats.
+
+        Returns:
+            Bias-corrected cost trace of shape (out_features, n_features).
+        """
+        cost_stat = self.all_cost_trace_stats[layer_idx]
+        age = self.all_feature_stats[layer_idx].age
+        correction = 1.0 - self.decay_rate ** age.astype(jnp.float32)
+        correction = jnp.maximum(correction, EPSILON)
+        return cost_stat.cost_trace / correction[None, :]

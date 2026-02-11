@@ -12,6 +12,7 @@ train:
   log_model_stats: true
   log_feature_matched_optimizer_stats: true
   log_optimizer_stats: true
+  log_utility_stats: true
   standardize_cumulants: false
 
 model:
@@ -34,6 +35,7 @@ feature_recycling:
   protect_growing_step_sizes: false
   # If true, prune a fixed fraction of eligible features each step instead of total features
   prune_eligible_fraction: false
+  use_signed_utility: true
 
 optimizer:
   learning_rate: ${eval:2**-14}
