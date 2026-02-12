@@ -265,7 +265,6 @@ class CBPTracker(eqx.Module):
         
         # Compute the threshold for pruning
         # Perturb the utility to avoid ties
-        # TODO: Try using bias corrected utility here
         perturbed_utility = feature_stats.utility + \
             jax.random.uniform(rng, feature_stats.utility.shape, minval=-EPSILON, maxval=EPSILON)
         filtered_utility = jnp.where(eligibility_mask, perturbed_utility, jnp.inf)
@@ -286,7 +285,7 @@ class CBPTracker(eqx.Module):
         feature_stats: FeatureStats,
         global_init_beta: Float[Array, ''],
     ) -> Float[Array, '']:
-        """Update global initial beta from utility- and age-weighted average of per-feature init_beta."""
+        """Update global initial beta from utility and age-weighted average of per-feature init_beta."""
         weights = (self.init_step_size_gamma ** feature_stats.age.astype(jnp.float32)) * feature_stats.utility
         total = jnp.sum(weights) + EPSILON
         weights = weights / total
@@ -1089,6 +1088,40 @@ class CostCBPTracker(SignedCBPTracker):
             prev_out_weights=out_weights,
         )
 
+    @jax.named_call
+    def _update_global_init_beta_with_cost(
+        self,
+        feature_stats: FeatureStats,
+        global_init_beta: Float[Array, ''],
+        cost_trace_stats: CostTraceStats,
+    ) -> Float[Array, '']:
+        """Update global init beta, weighting by utility / bias_corrected_cost instead of just utility.
+
+        Features with age=0 are excluded: they were just pruned/created and have
+        cost_trace=0, which would cause division by near-zero and hyper-bias the
+        weights towards newly created features. At age >= 1, both utility and
+        cost_trace have received at least one real update.
+        """
+        # Per-feature bias-corrected cost (mean over out_features)
+        correction = 1.0 - self.decay_rate ** feature_stats.age.astype(jnp.float32)
+        correction = jnp.maximum(correction, EPSILON)
+        bc_cost = jnp.mean(cost_trace_stats.cost_trace, axis=0) / correction  # (n_features,)
+
+        # Exclude age=0 features: cost_trace is reset to 0 on pruning, so
+        # including them would divide utility by near-zero
+        mature_mask = (feature_stats.age > 0).astype(jnp.float32)
+
+        # Weight by utility / cost * gamma^age (only for mature features)
+        utility_per_cost = feature_stats.utility / (bc_cost + EPSILON)
+        weights = mature_mask * (self.init_step_size_gamma ** feature_stats.age.astype(jnp.float32)) * utility_per_cost
+        total = jnp.sum(weights) + EPSILON
+        weights = weights / total
+        target_beta = jnp.sum(feature_stats.init_beta * weights)
+        return (
+            (1.0 - self.init_step_size_lambda) * global_init_beta
+            + self.init_step_size_lambda * target_beta
+        ).astype(jnp.float32)
+
     def prune_features(
         self,
         model: eqx.Module,
@@ -1137,7 +1170,21 @@ class CostCBPTracker(SignedCBPTracker):
                 prev_out_weights=new_weights[i],
             ))
 
-        new_tracker = tree_replace(new_tracker, all_cost_trace_stats=new_cost_trace_stats)
+        # Recompute global_init_beta with cost-aware weights (replaces parent's utility-only version)
+        new_global_init_beta = list(new_tracker.global_init_beta)
+        if self.initial_step_size_method == 'generate_and_test':
+            for idx, i in enumerate(indices):
+                new_global_init_beta[i - 1] = self._update_global_init_beta_with_cost(
+                    new_tracker.all_feature_stats[idx],
+                    self.global_init_beta[i - 1],
+                    new_cost_trace_stats[idx],
+                )
+
+        new_tracker = tree_replace(
+            new_tracker,
+            all_cost_trace_stats=new_cost_trace_stats,
+            global_init_beta=new_global_init_beta,
+        )
         return new_tracker, new_model, new_optimizers, prune_masks, long_lived_frac
 
     def update_feature_stats(
@@ -1164,7 +1211,22 @@ class CostCBPTracker(SignedCBPTracker):
 
         # Delegate feature stats update to parent
         new_tracker = super().update_feature_stats(model, input_values, targets=targets)
-        new_tracker = tree_replace(new_tracker, all_cost_trace_stats=new_cost_trace_stats)
+
+        # Recompute global_init_beta with cost-aware weights
+        new_global_init_beta = list(new_tracker.global_init_beta)
+        if self.initial_step_size_method == 'generate_and_test':
+            for idx, i in enumerate(indices):
+                new_global_init_beta[i - 1] = self._update_global_init_beta_with_cost(
+                    new_tracker.all_feature_stats[idx],
+                    self.global_init_beta[i - 1],
+                    new_cost_trace_stats[idx],
+                )
+
+        new_tracker = tree_replace(
+            new_tracker,
+            all_cost_trace_stats=new_cost_trace_stats,
+            global_init_beta=new_global_init_beta,
+        )
         return new_tracker
 
     def get_bias_corrected_cost_trace(

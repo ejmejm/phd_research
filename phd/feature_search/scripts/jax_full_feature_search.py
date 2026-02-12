@@ -429,6 +429,7 @@ def compute_metrics(
         cost_trace = None
         if hasattr(train_state.cbp_tracker, 'get_bias_corrected_cost_trace'):
             cost_trace = train_state.cbp_tracker.get_bias_corrected_cost_trace(0)
+        # cost_trace = train_state.cbp_tracker.all_cost_trace_stats[0].cost_trace
         metrics.update(compute_cbp_stats(train_state.model, task, utility, cost_trace))
     if cfg.train.get('log_model_stats', False):
         metrics.update(compute_model_stats(train_state.model, task))
