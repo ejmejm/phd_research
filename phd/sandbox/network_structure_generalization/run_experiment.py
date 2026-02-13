@@ -16,6 +16,15 @@ from models import build_model, count_params
 
 UNROLL_STEPS = 4
 
+
+def stack_pytrees(pytrees):
+    """Stack a list of pytrees into a single pytree with a leading batch dimension."""
+    treedef = jax.tree.structure(pytrees[0])
+    all_leaves = [jax.tree.leaves(pytree) for pytree in pytrees]
+    stacked_leaves = [jnp.stack(xs) for xs in zip(*all_leaves)]
+    return jax.tree.unflatten(treedef, stacked_leaves)
+
+
 DEFAULT_SWITCH_FREQ = {
     'mnist': 1000,
     'cifar100': 200,
@@ -52,8 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--total_steps', type=int, default=100_000)
     parser.add_argument('--log_interval', type=int, default=200)
 
-    # Seed
-    parser.add_argument('--seed', type=int, default=None)
+    # Seed (accepts one or more values; vmapped when multiple)
+    parser.add_argument('--seed', type=int, nargs='+', default=None)
 
     # MLflow
     parser.add_argument('--mlflow', action='store_true')
@@ -87,47 +96,49 @@ class StepMetrics(eqx.Module):
     correct: jax.Array
 
 
-def init_experiment(args: argparse.Namespace) -> Tuple[TrainState, int, int]:
-    """Initialize model, optimizer, data stream, and training state."""
-    seed = args.seed if args.seed is not None else np.random.randint(0, 1_000_000_000)
-    key = random.PRNGKey(seed)
+def init_experiment(args: argparse.Namespace) -> Tuple[TrainState, int]:
+    """Initialize per-seed models, optimizers, data streams, and stack into a batched TrainState."""
+    seeds = args.seed
 
-    # Load dataset
+    # Load dataset once (shared across seeds)
     all_images, samples_per_class, num_classes, image_shape = load_dataset(args.dataset)
 
-    # Create data stream
-    key, stream_key = random.split(key)
-    stream = ContinualClassStream(
-        all_images=all_images,
-        samples_per_class=samples_per_class,
-        num_classes=num_classes,
-        image_shape=image_shape,
-        switch_freq=args.switch_freq,
-        allow_resampling=args.allow_resampling,
-        key=stream_key,
-    )
+    train_states = []
+    for seed in seeds:
+        key = random.PRNGKey(seed)
 
-    # Build model
-    key, model_key = random.split(key)
-    model = build_model(args, image_shape, key=model_key)
-    n_params = count_params(model)
-    print(f'Model: {args.model}, Params: {n_params}')
+        key, stream_key = random.split(key)
+        stream = ContinualClassStream(
+            all_images=all_images,
+            samples_per_class=samples_per_class,
+            num_classes=num_classes,
+            image_shape=image_shape,
+            switch_freq=args.switch_freq,
+            allow_resampling=args.allow_resampling,
+            key=stream_key,
+        )
 
-    # Optimizer
-    optimizer = optax.rmsprop(args.learning_rate)
-    optimizer_state = optimizer.init(eqx.filter(model, eqx.is_array))
+        key, model_key = random.split(key)
+        model = build_model(args, image_shape, key=model_key)
 
-    train_state = TrainState(
-        optimizer=optimizer,
-        log_interval=args.log_interval,
-        model=model,
-        optimizer_state=optimizer_state,
-        stream=stream,
-        rng=key,
-        step=jnp.array(0),
-    )
+        optimizer = optax.rmsprop(args.learning_rate)
+        optimizer_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
-    return train_state, seed, n_params
+        train_states.append(TrainState(
+            optimizer=optimizer,
+            log_interval=args.log_interval,
+            model=model,
+            optimizer_state=optimizer_state,
+            stream=stream,
+            rng=key,
+            step=jnp.array(0),
+        ))
+
+    n_params = count_params(train_states[0].model)
+    print(f'Model: {args.model}, Params: {n_params}, Seeds: {seeds}')
+
+    batched_state = stack_pytrees(train_states)
+    return batched_state, n_params
 
 
 def train_step(train_state: TrainState, _) -> Tuple[TrainState, StepMetrics]:
@@ -170,9 +181,9 @@ def train_step(train_state: TrainState, _) -> Tuple[TrainState, StepMetrics]:
 
 def log_metrics(metrics: StepMetrics, step: int, use_mlflow: bool = True
                 ) -> Tuple[float, float]:
-    """Aggregate scan-batch metrics and optionally log to MLflow."""
+    """Aggregate scan-batch metrics (mean over seeds and steps) and log to MLflow."""
     mean_loss = float(metrics.loss.mean())
-    mean_acc = float(metrics.correct.mean())
+    mean_acc = float(metrics.correct.astype(jnp.float32).mean())
     if use_mlflow:
         mlflow.log_metrics({'loss': mean_loss, 'accuracy': mean_acc}, step=step)
     return mean_loss, mean_acc
@@ -180,11 +191,10 @@ def log_metrics(metrics: StepMetrics, step: int, use_mlflow: bool = True
 
 def train(train_state: TrainState, num_steps: int, use_mlflow: bool = False
           ) -> Tuple[TrainState, list, list]:
-    """Outer training loop with jax.lax.scan inner loop."""
+    """Outer training loop with vmapped jax.lax.scan inner loop."""
     log_interval = train_state.log_interval
     num_scans = num_steps // log_interval
 
-    @jax.jit
     def scan_steps(state: TrainState) -> Tuple[TrainState, StepMetrics]:
         return jax.lax.scan(
             train_step,
@@ -193,15 +203,18 @@ def train(train_state: TrainState, num_steps: int, use_mlflow: bool = False
             unroll=UNROLL_STEPS,
         )
 
+    vmapped_scan = jax.jit(jax.vmap(scan_steps))
+
     all_losses = []
     all_accuracies = []
     pbar = tqdm(total=num_steps, desc='Training')
 
     for _ in range(num_scans):
-        train_state, metrics = scan_steps(train_state)
+        train_state, metrics = vmapped_scan(train_state)
 
+        # metrics.loss: (n_seeds, log_interval) — mean over both dims
         mean_loss, mean_acc = log_metrics(
-            metrics, step=int(train_state.step.item()), use_mlflow=use_mlflow)
+            metrics, step=int(train_state.step[0].item()), use_mlflow=use_mlflow)
         all_losses.append(mean_loss)
         all_accuracies.append(mean_acc)
 
@@ -214,17 +227,24 @@ def train(train_state: TrainState, num_steps: int, use_mlflow: bool = False
 
 def main():
     args = parse_args()
-    train_state, seed, n_params = init_experiment(args)
+
+    # Normalize seeds to list
+    if args.seed is None:
+        args.seed = [np.random.randint(0, 1_000_000_000)]
+    elif isinstance(args.seed, int):
+        args.seed = [args.seed]
+
+    train_state, n_params = init_experiment(args)
 
     if args.mlflow:
         mlflow.set_experiment(args.project)
         mlflow.start_run()
-        mlflow.log_params({**vars(args), 'seed': seed, 'num_params': n_params})
+        mlflow.log_params({**vars(args), 'num_params': n_params})
 
     train_state, all_losses, all_accuracies = train(
         train_state, args.total_steps, use_mlflow=args.mlflow)
 
-    # Compute final metrics
+    # Compute final metrics (already averaged over seeds)
     average_loss = float(np.mean(all_losses))
     n_tail = max(1, len(all_losses) // 10)
     asymptotic_loss = float(np.mean(all_losses[-n_tail:]))
