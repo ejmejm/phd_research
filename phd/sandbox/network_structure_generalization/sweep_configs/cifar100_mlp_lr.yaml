@@ -1,0 +1,15 @@
+experiment: network-structure-generalization
+sweep_name: cifar100_mlp_lr
+output_dir: outputs
+optuna_storage: sqlite:///outputs/optuna.db
+mlflow_storage: sqlite:///outputs/mlruns.db
+command: python run_experiment.py --mlflow --dataset cifar100 --model mlp
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+parameters:
+  --learning_rate: [0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03]
+  --seed: [1, 2, 3, 4, 5]
