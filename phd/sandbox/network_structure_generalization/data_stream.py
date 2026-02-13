@@ -1,20 +1,12 @@
 from typing import Tuple
 
-import equinox as eqx
-import jax
-import jax.numpy as jnp
-from jax import random
 import numpy as np
 
 
-def tree_replace(tree: eqx.Module, **kwargs) -> eqx.Module:
-    """Replaces field values of an eqx.Module immutably."""
-    values = [kwargs[k] for k in kwargs]
-    return eqx.tree_at(lambda x: [getattr(x, k) for k in kwargs], tree, values)
-
-
-def load_dataset(name: str) -> Tuple[jax.Array, jax.Array, int, tuple]:
+def load_dataset(name: str) -> Tuple[np.ndarray, np.ndarray, int, tuple]:
     """Load and preprocess a dataset, grouping images by class.
+
+    All data stays on CPU as numpy arrays.
 
     Returns:
         all_images: Float array (num_classes, max_per_class, *image_shape)
@@ -53,98 +45,66 @@ def load_dataset(name: str) -> Tuple[jax.Array, jax.Array, int, tuple]:
         all_images[c, :n] = class_images
         samples_per_class[c] = n
 
-    return jnp.array(all_images), jnp.array(samples_per_class), num_classes, image_shape
+    return all_images, samples_per_class, num_classes, image_shape
 
 
-class ContinualClassStream(eqx.Module):
-    """JAX-traceable data stream for continual binary classification.
+class ContinualClassStream:
+    """CPU-side data stream for continual binary classification.
 
-    At each step, samples one image from one of two active classes and returns
-    a binary label (0 or 1). Class pairs switch every `switch_freq` steps.
+    Samples images from pairs of classes that switch every `switch_freq` steps.
+    All data stays on CPU; use `sample_batch` to get a numpy batch that can be
+    transferred to GPU for one scan cycle.
     """
 
-    # Static (compile-time constants)
-    num_classes: int = eqx.field(static=True)
-    switch_freq: int = eqx.field(static=True)
-    allow_resampling: bool = eqx.field(static=True)
-    image_shape: tuple = eqx.field(static=True)
-
-    # Data (constant after init)
-    all_images: jax.Array
-    samples_per_class: jax.Array
-
-    # Dynamic (updated each step)
-    step: jax.Array
-    rng: jax.Array
-    current_pair: jax.Array
-    used_classes: jax.Array
-
     def __init__(self, all_images, samples_per_class, num_classes, image_shape,
-                 switch_freq, allow_resampling, *, key):
+                 switch_freq, allow_resampling, seed):
+        self.all_images = all_images            # numpy, shared across streams
+        self.samples_per_class = samples_per_class
         self.num_classes = num_classes
+        self.image_shape = image_shape
         self.switch_freq = switch_freq
         self.allow_resampling = allow_resampling
-        self.image_shape = image_shape
-        self.all_images = all_images
-        self.samples_per_class = samples_per_class
-        self.step = jnp.array(0)
-        self.rng = key
-        self.current_pair = jnp.array([0, 1])  # placeholder, overwritten on first step
-        self.used_classes = jnp.zeros(num_classes, dtype=bool)
+        self.rng = np.random.default_rng(seed)
+        self.step = 0
+        self.current_pair = None
+        self.used_classes = np.zeros(num_classes, dtype=bool)
 
-    def _draw_new_pair(self, key):
+    def _draw_new_pair(self):
         """Draw a new pair of classes to present."""
         if self.allow_resampling:
-            pair = jax.random.choice(key, self.num_classes, (2,), replace=False)
-            return pair, self.used_classes
+            self.current_pair = self.rng.choice(self.num_classes, 2, replace=False)
         else:
             available = ~self.used_classes
-            n_available = available.sum()
-            should_reset = n_available < 2
-            new_used = jnp.where(should_reset,
-                                 jnp.zeros(self.num_classes, dtype=bool),
-                                 self.used_classes)
-            available = jnp.where(should_reset,
-                                  jnp.ones(self.num_classes, dtype=bool),
-                                  available)
-            weights = available.astype(jnp.float32)
-            pair = jax.random.choice(key, self.num_classes, (2,),
-                                     replace=False, p=weights / weights.sum())
-            new_used = new_used.at[pair[0]].set(True)
-            new_used = new_used.at[pair[1]].set(True)
-            return pair, new_used
+            if available.sum() < 2:
+                self.used_classes[:] = False
+                available = ~self.used_classes
+            weights = available.astype(np.float64)
+            self.current_pair = self.rng.choice(
+                self.num_classes, 2, replace=False, p=weights / weights.sum())
+            self.used_classes[self.current_pair[0]] = True
+            self.used_classes[self.current_pair[1]] = True
 
-    def sample(self):
-        """Sample one (image, label) pair and return updated stream.
+    def sample_batch(self, batch_size):
+        """Sample a batch of (images, labels) on CPU for one scan cycle.
 
         Returns:
-            new_stream: Updated ContinualClassStream
-            (image, label): Sampled image and binary label (0 or 1)
+            images: numpy array (batch_size, *image_shape)
+            labels: numpy array (batch_size,) with values 0 or 1
         """
-        key, switch_key, class_key, img_key = jax.random.split(self.rng, 4)
+        images = np.empty((batch_size, *self.image_shape), dtype=np.float32)
+        labels = np.empty(batch_size, dtype=np.int32)
 
-        should_switch = (self.step % self.switch_freq == 0)
+        for i in range(batch_size):
+            if self.step % self.switch_freq == 0:
+                self._draw_new_pair()
 
-        # Compute candidate new pair (always computed; only used if switching)
-        new_pair, new_used = self._draw_new_pair(switch_key)
-        current_pair = jnp.where(should_switch, new_pair, self.current_pair)
-        used_classes = jnp.where(should_switch, new_used, self.used_classes)
+            which = self.rng.integers(2)
+            class_idx = self.current_pair[which]
+            n_samples = self.samples_per_class[class_idx]
+            img_idx = self.rng.integers(n_samples)
 
-        # Pick one of the two active classes uniformly
-        which = jax.random.randint(class_key, (), 0, 2)
-        class_idx = current_pair[which]
+            images[i] = self.all_images[class_idx, img_idx]
+            labels[i] = which
+            self.step += 1
 
-        # Sample a random image from that class
-        n_samples = self.samples_per_class[class_idx]
-        img_idx = jax.random.randint(img_key, (), 0, n_samples)
-        image = self.all_images[class_idx, img_idx]
-
-        new_stream = tree_replace(
-            self,
-            step=self.step + 1,
-            rng=key,
-            current_pair=current_pair,
-            used_classes=used_classes,
-        )
-
-        return new_stream, (image, which)
+        return images, labels

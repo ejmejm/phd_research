@@ -1,5 +1,5 @@
 import argparse
-from typing import Tuple
+from typing import List, Tuple
 
 import equinox as eqx
 import jax
@@ -80,13 +80,10 @@ def parse_args() -> argparse.Namespace:
 class TrainState(eqx.Module):
     # Static
     optimizer: optax.GradientTransformation = eqx.field(static=True)
-    log_interval: int = eqx.field(static=True)
 
     # Dynamic
     model: eqx.Module
     optimizer_state: optax.OptState
-    stream: ContinualClassStream
-    rng: jax.Array
     step: jax.Array
 
 
@@ -96,28 +93,28 @@ class StepMetrics(eqx.Module):
     correct: jax.Array
 
 
-def init_experiment(args: argparse.Namespace) -> Tuple[TrainState, int]:
-    """Initialize per-seed models, optimizers, data streams, and stack into a batched TrainState."""
+def init_experiment(args: argparse.Namespace
+                    ) -> Tuple[TrainState, List[ContinualClassStream], int]:
+    """Initialize per-seed models/optimizers and CPU-side data streams."""
     seeds = args.seed
 
-    # Load dataset once (shared across seeds)
+    # Load dataset once on CPU (shared across all streams)
     all_images, samples_per_class, num_classes, image_shape = load_dataset(args.dataset)
 
+    streams = []
     train_states = []
     for seed in seeds:
-        key = random.PRNGKey(seed)
-
-        key, stream_key = random.split(key)
-        stream = ContinualClassStream(
+        streams.append(ContinualClassStream(
             all_images=all_images,
             samples_per_class=samples_per_class,
             num_classes=num_classes,
             image_shape=image_shape,
             switch_freq=args.switch_freq,
             allow_resampling=args.allow_resampling,
-            key=stream_key,
-        )
+            seed=seed,
+        ))
 
+        key = random.PRNGKey(seed)
         key, model_key = random.split(key)
         model = build_model(args, image_shape, key=model_key)
 
@@ -126,11 +123,8 @@ def init_experiment(args: argparse.Namespace) -> Tuple[TrainState, int]:
 
         train_states.append(TrainState(
             optimizer=optimizer,
-            log_interval=args.log_interval,
             model=model,
             optimizer_state=optimizer_state,
-            stream=stream,
-            rng=key,
             step=jnp.array(0),
         ))
 
@@ -138,15 +132,12 @@ def init_experiment(args: argparse.Namespace) -> Tuple[TrainState, int]:
     print(f'Model: {args.model}, Params: {n_params}, Seeds: {seeds}')
 
     batched_state = stack_pytrees(train_states)
-    return batched_state, n_params
+    return batched_state, streams, n_params
 
 
-def train_step(train_state: TrainState, _) -> Tuple[TrainState, StepMetrics]:
-    """Single training step for jax.lax.scan."""
-    key, _ = random.split(train_state.rng)
-
-    # Sample from data stream
-    new_stream, (image, label) = train_state.stream.sample()
+def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
+    """Single training step for jax.lax.scan. Data is provided via scan xs."""
+    image, label = data
 
     # Forward + backward
     def loss_fn(model):
@@ -168,11 +159,8 @@ def train_step(train_state: TrainState, _) -> Tuple[TrainState, StepMetrics]:
 
     new_state = TrainState(
         optimizer=train_state.optimizer,
-        log_interval=train_state.log_interval,
         model=new_model,
         optimizer_state=new_opt_state,
-        stream=new_stream,
-        rng=key,
         step=train_state.step + 1,
     )
 
@@ -189,19 +177,14 @@ def log_metrics(metrics: StepMetrics, step: int, use_mlflow: bool = True
     return mean_loss, mean_acc
 
 
-def train(train_state: TrainState, num_steps: int, use_mlflow: bool = False
+def train(train_state: TrainState, num_steps: int, log_interval: int,
+          streams: List[ContinualClassStream], use_mlflow: bool = False
           ) -> Tuple[TrainState, list, list]:
-    """Outer training loop with vmapped jax.lax.scan inner loop."""
-    log_interval = train_state.log_interval
+    """Outer training loop: pre-sample data on CPU, train on GPU via vmapped scan."""
     num_scans = num_steps // log_interval
 
-    def scan_steps(state: TrainState) -> Tuple[TrainState, StepMetrics]:
-        return jax.lax.scan(
-            train_step,
-            state,
-            length=log_interval,
-            unroll=UNROLL_STEPS,
-        )
+    def scan_steps(state, data):
+        return jax.lax.scan(train_step, state, data, unroll=UNROLL_STEPS)
 
     vmapped_scan = jax.jit(jax.vmap(scan_steps))
 
@@ -210,7 +193,12 @@ def train(train_state: TrainState, num_steps: int, use_mlflow: bool = False
     pbar = tqdm(total=num_steps, desc='Training')
 
     for _ in range(num_scans):
-        train_state, metrics = vmapped_scan(train_state)
+        # Pre-sample one cycle of data on CPU per seed
+        batch = [stream.sample_batch(log_interval) for stream in streams]
+        images = jnp.array(np.stack([b[0] for b in batch]))  # (n_seeds, log_interval, *img)
+        labels = jnp.array(np.stack([b[1] for b in batch]))  # (n_seeds, log_interval)
+
+        train_state, metrics = vmapped_scan(train_state, (images, labels))
 
         # metrics.loss: (n_seeds, log_interval) — mean over both dims
         mean_loss, mean_acc = log_metrics(
@@ -234,7 +222,7 @@ def main():
     elif isinstance(args.seed, int):
         args.seed = [args.seed]
 
-    train_state, n_params = init_experiment(args)
+    train_state, streams, n_params = init_experiment(args)
 
     if args.mlflow:
         mlflow.set_experiment(args.project)
@@ -242,7 +230,8 @@ def main():
         mlflow.log_params({**vars(args), 'num_params': n_params})
 
     train_state, all_losses, all_accuracies = train(
-        train_state, args.total_steps, use_mlflow=args.mlflow)
+        train_state, args.total_steps, args.log_interval,
+        streams, use_mlflow=args.mlflow)
 
     # Compute final metrics (already averaged over seeds)
     average_loss = float(np.mean(all_losses))
