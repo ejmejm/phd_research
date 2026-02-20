@@ -4,8 +4,6 @@ import equinox as eqx
 from jaxtyping import PyTree
 import optax
 
-from phd.feature_search.jax_core.utils import tree_replace
-
 
 class EqxOptimizer(eqx.Module):
     name: str = eqx.field(static=True)
@@ -41,4 +39,4 @@ class EqxOptimizer(eqx.Module):
             model = eqx.filter(model, self.filter_spec)
         
         updates, new_state = self.optimizer.update(grads, self.state, model)
-        return updates, tree_replace(self, state=new_state)
+        return updates, eqx.tree_at(lambda x: x.state, self, new_state)
