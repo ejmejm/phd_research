@@ -1,0 +1,61 @@
+# @package _global_
+
+defaults:
+  - /full_feature_search
+  - _self_
+
+comet_ml: true
+device: cuda
+jax_jit_cache_dir: ${oc.env:HOME}/scratch/jax_cache
+
+seed: [26022301, 26022302, 26022303, 26022304, 26022305, 26022306, 26022307, 26022308, 26022309, 26022310, 26022311, 26022312, 26022313, 26022314, 26022315, 26022316, 26022317, 26022318, 26022319, 26022320, 26022321, 26022322, 26022323, 26022324, 26022325, 26022326, 26022327, 26022328, 26022329, 26022330]
+
+train:
+  total_steps: 8_000_000
+  standardize_cumulants: false
+
+  # Logging parameters
+  log_freq: 20_000
+  log_model_stats: false
+  log_feature_matched_optimizer_stats: true
+  log_optimizer_stats: true
+  log_utility_stats: false
+
+model:
+  hidden_dim: 5120
+  use_bias: false
+  n_frozen_layers: 1
+
+task:
+  flip_rate: ${eval:2**-12}
+  distractor_chance: 0.0
+  noise_std: 0.0
+  n_stationary_layers: 1
+
+feature_recycling:
+  use_cbp_utility: true
+  utility_decay: 0.999
+  feature_protection_steps: 0
+  prune_frequency: 4
+
+  utility_reset_mode: median
+  initial_step_size_method: constant # mean
+  init_step_size_lambda: 1.0
+  init_step_size_gamma: 1.0
+  protect_growing_step_sizes: false
+  prune_eligible_fraction: false
+
+  use_signed_utility: false
+  recycle_rate: 0.01
+
+optimizer:
+  name: idbd
+  version: prediction_grads
+  autostep: true
+  learning_rate: ${eval:0.03 / ${model.hidden_dim} ** 0.75}
+  meta_learning_rate: 0.005
+  auto_set_init_step_size: false
+  shadow_weight_threshold_factor: 0.0
+
+representation_optimizer:
+  name: null # {null, sgd, sgd_momentum, rmsprop, adam, idbd}

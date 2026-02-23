@@ -1,0 +1,30 @@
+name: mean_initial_step_size
+project: eliminate_step_size
+command: python scripts/jax_multiseed_feature_search.py --config-name=comet_sweeps/eliminate_step_size/base_config.yaml
+algorithm: grid
+
+spec:
+  metric: cumulative_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  optimizer.name: idbd
+  optimizer.autostep: true
+  optimizer.meta_learning_rate: "${eval:2**-5}"
+  optimizer.learning_rate:
+    - "${eval:2**-21}"
+    - "${eval:2**-19}"
+    - "${eval:2**-17}"
+    - "${eval:2**-15}"
+    - "${eval:2**-13}"
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+    - "${eval:2**-5}"
+    - "${eval:2**-3}"
+    - "${eval:2**-1}"
+    - "${eval:2**1}"
+    - "${eval:2**3}"
+  
+  feature_recycling.initial_step_size_method: [constant, mean]
