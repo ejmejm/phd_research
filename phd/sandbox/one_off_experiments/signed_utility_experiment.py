@@ -1,4 +1,6 @@
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # Parameters
@@ -41,6 +43,8 @@ utility_traces = np.zeros(n_inputs)
 utility_history = np.zeros((n_examples, n_inputs))
 correlation_traces = np.zeros(n_inputs)
 correlation_history = np.zeros((n_examples, n_inputs))
+contribution_traces = np.zeros(n_inputs)
+contribution_history = np.zeros((n_examples, n_inputs))
 
 for t in range(n_examples):
     x = X[t]
@@ -62,7 +66,14 @@ for t in range(n_examples):
     # Compute correlation trace for each input (x[i] * y_star)
     correlation_traces = correlation_traces * trace_decay + x * y_star * (1 - trace_decay)
     correlation_history[t] = correlation_traces.copy()
-    
+
+    # Compute contribution utility trace: EMA of |x[i] * w[i]|
+    contribution_traces = (
+        contribution_traces * trace_decay
+        + np.abs(x * w_idbd) * (1 - trace_decay)
+    )
+    contribution_history[t] = contribution_traces.copy()
+
     # Update beta (log learning rates)
     beta += theta * delta * x * h
     
@@ -136,20 +147,19 @@ errors_lms_smooth = np.convolve(errors_lms, np.ones(window)/window, mode='valid'
 
 ax1.plot(errors_idbd_smooth, label='IDBD', linewidth=1.5)
 ax1.plot(errors_lms_smooth, label='LMS', linewidth=1.5)
-ax1.axvline(n_train, color='gray', linestyle='--', alpha=0.5, label='Test period starts')
 ax1.set_xlabel('Examples')
 ax1.set_ylabel('Mean Squared Error (smoothed)')
 ax1.set_title('Tracking Performance: IDBD vs LMS')
 ax1.legend()
 ax1.grid(True, alpha=0.3)
 
-# Plot 2: Learning rates over time
+# Plot 2: Step-sizes over time
 time_steps = np.arange(0, n_examples, 100) / 1000
 ax2.plot(time_steps, alpha_history_idbd[:, 0], label='Relevant input', linewidth=2)
 ax2.plot(time_steps, alpha_history_idbd[:, 10], label='Irrelevant input', linewidth=2)
 ax2.set_xlabel('Time Steps (1000s of Examples)')
-ax2.set_ylabel('Learning Rate (α)')
-ax2.set_title('Evolution of Learning Rates under IDBD')
+ax2.set_ylabel('Step-size (α)')
+ax2.set_title('Evolution of Step-sizes under IDBD')
 ax2.legend()
 ax2.grid(True, alpha=0.3)
 
@@ -168,31 +178,47 @@ ax3.plot([], [], color='blue', alpha=0.6, linewidth=2, label='Relevant inputs (1
 ax3.plot([], [], color='red', alpha=0.6, linewidth=2, label='Irrelevant inputs (6-20)')
 
 ax3.set_xlabel('Examples')
-ax3.set_ylabel('Utility Trace')
-ax3.set_title('Evolution of Input Utility Traces (decay=0.01)')
+ax3.set_ylabel('Signed Utility Trace')
+ax3.set_title('Evolution of Signed Utility Traces (decay=0.01)')
 ax3.legend()
 ax3.grid(True, alpha=0.3)
 ax3.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
 
-# Plot 4: Absolute Correlation traces over time
+# Plot 4: Contribution utility traces over time (EMA of |x[i] * w[i]|)
 for i in range(n_inputs):
     if i < n_relevant:
-        # Relevant inputs: blue
-        ax4.plot(time_axis, np.abs(correlation_history[:, i]), color='blue', alpha=0.3, linewidth=1)
+        ax4.plot(time_axis, contribution_history[:, i], color='blue', alpha=0.3, linewidth=1)
     else:
-        # Irrelevant inputs: red
-        ax4.plot(time_axis, np.abs(correlation_history[:, i]), color='red', alpha=0.2, linewidth=0.8)
+        ax4.plot(time_axis, contribution_history[:, i], color='red', alpha=0.2, linewidth=0.8)
 
-# Add dummy lines for legend
 ax4.plot([], [], color='blue', alpha=0.6, linewidth=2, label='Relevant inputs (1-5)')
 ax4.plot([], [], color='red', alpha=0.6, linewidth=2, label='Irrelevant inputs (6-20)')
-
 ax4.set_xlabel('Examples')
-ax4.set_ylabel('Absolute Correlation Trace')
-ax4.set_title('Evolution of Absolute Input-Target Correlation Traces (decay=0.01)')
+ax4.set_ylabel('Contribution Utility Trace')
+ax4.set_title('Evolution of Contribution Utility Traces (decay=0.01)')
 ax4.legend()
 ax4.grid(True, alpha=0.3)
 ax4.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
 
+# Plot 5: Absolute Correlation traces over time (commented out for now)
+# for i in range(n_inputs):
+#     if i < n_relevant:
+#         # Relevant inputs: blue
+#         ax5.plot(time_axis, np.abs(correlation_history[:, i]), color='blue', alpha=0.3, linewidth=1)
+#     else:
+#         # Irrelevant inputs: red
+#         ax5.plot(time_axis, np.abs(correlation_history[:, i]), color='red', alpha=0.2, linewidth=0.8)
+#
+# # Add dummy lines for legend
+# ax5.plot([], [], color='blue', alpha=0.6, linewidth=2, label='Relevant inputs (1-5)')
+# ax5.plot([], [], color='red', alpha=0.6, linewidth=2, label='Irrelevant inputs (6-20)')
+#
+# ax5.set_xlabel('Examples')
+# ax5.set_ylabel('Absolute Correlation Trace')
+# ax5.set_title('Evolution of Absolute Input-Target Correlation Traces (decay=0.01)')
+# ax5.legend()
+# ax5.grid(True, alpha=0.3)
+# ax5.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
+
 plt.tight_layout()
-plt.show()
+plt.savefig('signed_utility_results.png', dpi=150)
