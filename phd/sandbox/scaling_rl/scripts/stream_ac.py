@@ -238,7 +238,9 @@ def run_multiseed_experiment(
         )
 
         metrics = metrics_fn(train_states, step_stats)
-        metrics = {k: np.asarray(v).mean(axis=0) for k, v in metrics.items()}
+        metrics_np = {k: np.asarray(v) for k, v in metrics.items()}
+        metrics = {k: v.mean(axis=0) for k, v in metrics_np.items()}
+        metrics.update({f'{k}_std': v.std(axis=0) for k, v in metrics_np.items()})
         all_metrics.append(metrics)
         log_metrics(metrics, cfg, step=int(train_states.step[0]))
 

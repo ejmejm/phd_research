@@ -1,0 +1,35 @@
+defaults:
+- _self_
+
+device: cuda
+jax_jit_cache_dir: ${oc.env:HOME}/scratch/jax_cache
+project: scaling_rl
+
+seed: [0, 1, 2, 3, 4, 5]
+
+train:
+  total_steps: 1_000_000
+  log_freq: 10_000
+
+env:
+  name: CartPole-v1
+
+# Model shared by actor and critic (output dim set automatically per network)
+model:
+  hidden_dim: 64
+  n_layers: 2           # includes output layer; n_layers=2 means one hidden + output
+  activation: tanh
+  weight_init_method: lecun_uniform
+
+stream_ac:
+  lr: 1.0
+  gamma: 0.99
+  lamda: 0.8
+  kappa_policy: 3.0
+  kappa_value: 2.0
+  entropy_coeff: 0.01
+
+# Logging backends (set at most one to true)
+comet_ml: false
+wandb: false
+mlflow: false
