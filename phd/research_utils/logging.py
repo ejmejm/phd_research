@@ -54,15 +54,19 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
     if config and config.get('mlflow', False):
         import mlflow
         
-        if os.environ.get('MLFLOW_TRACKING_URI'):
-            if config.get('mlflow_tracking_uri') is not None:
+        if config.get('mlflow_tracking_uri'):
+            if os.environ.get('MLFLOW_TRACKING_URI') is not None:
                 logger.warning(
-                    f"MLFLOW_TRACKING_URI is set in the environment, "
-                    f"using it instead of config value: {config.get('mlflow_tracking_uri')}"
+                    f"MLFLOW_TRACKING_URI is set in both the environment and the config, "
+                    f"using the config value instead of the environment value"
                 )
+            mlflow.set_tracking_uri(config.get('mlflow_tracking_uri'))
+        elif os.environ.get('MLFLOW_TRACKING_URI'):
             mlflow.set_tracking_uri(os.environ.get('MLFLOW_TRACKING_URI'))
         else:
             mlflow.set_tracking_uri(config.get('mlflow_tracking_uri', MLFLOW_DEFAULT_TRACKING_URI))
+            
+        print(f'MLFLOW_TRACKING_URI: {mlflow.get_tracking_uri()}')
         
         if os.environ.get('MLFLOW_RUN_ID') is None:
             mlflow.set_experiment(project)

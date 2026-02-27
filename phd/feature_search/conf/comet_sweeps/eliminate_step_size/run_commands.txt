@@ -1,0 +1,29 @@
+
+### Round 1 ###
+
+
+===== Created sweeps with ids =====
+ideal_features.yaml (42): 4bc9a05d374d4348bd4d48590cbec4aa
+mean_initial_step_size.yaml (26): 8b25dd5def2b4139a0f259d6d7592fb4
+utility_type.yaml (84): 13e00abfec434096940cb2d3f5ef2754
+shadow_features.yaml (875): f5629a8e2ea547d2969317bb5f38f33d
+
+10 experiments per 2 hour job
+60 experiments per 12 hour job
+
+sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=02:00:00 launch_comet_agent.sbatch -s 4bc9a05d374d4348bd4d48590cbec4aa
+sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=02:00:00 launch_comet_agent.sbatch -s 8b25dd5def2b4139a0f259d6d7592fb4
+sbatch --array=1-9 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=02:00:00 launch_comet_agent.sbatch -s 13e00abfec434096940cb2d3f5ef2754
+sbatch --array=1-16%8 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=12:00:00 launch_comet_agent.sbatch -s f5629a8e2ea547d2969317bb5f38f33d
+
+
+
+
+sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --gpus-per-node=1 --mem=8G --time=02:00:00 launch_comet_agent.sbatch -s 4bc9a05d374d4348bd4d48590cbec4aa
+sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --gpus-per-node=1 --mem=8G --time=02:00:00 launch_comet_agent.sbatch -s 8b25dd5def2b4139a0f259d6d7592fb4
+sbatch --array=1-9 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --gpus-per-node=1 --mem=8G --time=02:00:00 launch_comet_agent.sbatch -s 13e00abfec434096940cb2d3f5ef2754
+
+
+sbatch --array=3-4 --gpus-per-node=1 --cpus-per-task=2 --mem=8G --time=03:00:00 launch_comet_agent.sbatch -s 4bc9a05d374d4348bd4d48590cbec4aa
+sbatch --array=3-3 --gpus-per-node=1 --cpus-per-task=2 --mem=8G --time=03:00:00 launch_comet_agent.sbatch -s 8b25dd5def2b4139a0f259d6d7592fb4
+sbatch --array=4-7 --gpus-per-node=1 --cpus-per-task=2 --mem=8G --time=03:00:00 launch_comet_agent.sbatch -s 13e00abfec434096940cb2d3f5ef2754
