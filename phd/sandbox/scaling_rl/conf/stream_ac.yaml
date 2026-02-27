@@ -15,11 +15,12 @@ env:
   name: CartPole-v1
 
 # Model shared by actor and critic (output dim set automatically per network)
+# Architecture: Linear → LayerNorm → activation per hidden layer; plain Linear output
 model:
   hidden_dim: 64
-  n_layers: 2           # includes output layer; n_layers=2 means one hidden + output
-  activation: tanh
-  weight_init_method: lecun_uniform
+  n_layers: 2                     # includes output layer; n_layers=2 means one hidden + output
+  activation: leaky_relu          # hidden-layer activation: leaky_relu | relu | tanh | sigmoid
+  weight_init_method: sparse      # sparse (90% sparsity, zero biases) | lecun_uniform
 
 stream_ac:
   lr: 1.0

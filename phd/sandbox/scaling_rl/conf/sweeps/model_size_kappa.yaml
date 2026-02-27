@@ -1,5 +1,5 @@
 experiment: scaling_rl
-sweep_name: model_size_kappa
+sweep_name: model_size_kappa_3
 command: python scripts/stream_ac.py
 
 optuna_storage: sqlite:///output/optuna.db
@@ -18,13 +18,13 @@ spec:
 # receives the same swept value as kappa_policy without appearing as a second sweep axis.
 parameters:
   mlflow: true
-  model.n_layers: 2
+  model.n_layers: 2 # [2, 3]
   seed:
     type: atomic
     value: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
   model.hidden_dim: [32, 64, 128, 256, 512]
-  stream_ac.kappa_policy: [0.5, 1.0, 2.0, 4.0, 8.0]
+  stream_ac.kappa_policy: [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
   stream_ac.kappa_value:
     type: atomic
     value: "${stream_ac.kappa_policy}"

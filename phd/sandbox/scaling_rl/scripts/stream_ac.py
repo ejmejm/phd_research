@@ -4,13 +4,11 @@ StreamAC experiment with JAX CartPole.
 Single script supporting multiple seeds via jax.vmap.
 Algorithm: StreamAC + ObGD (online, per-step actor-critic with eligibility traces).
 
-Reference implementations (PyTorch):
-  phd/streaming_rl/core/obgd.py
-  phd/streaming_rl/core/algorithms/stream_ac.py
+Reference: https://github.com/mohmdelsayed/streaming-drl
 """
 from functools import partial
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 import equinox as eqx
 import gymnax
@@ -22,10 +20,11 @@ import numpy as np
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from phd.feature_search.jax_core.experiment_helpers import rng_from_string, set_seed
-from phd.feature_search.jax_core.models import MLP
+from phd.feature_search.jax_core.experiment_helpers import rng_from_string
 from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import finish_experiment, init_experiment, log_metrics
+from phd.sandbox.scaling_rl.core.models import StreamACNet
+from phd.sandbox.scaling_rl.core.normalizers import ObsNormalizer, RewardScaler
 from phd.sandbox.scaling_rl.core.optimizers import ObGDOptimizer
 from phd.sandbox.scaling_rl.core.utils import configure_jax, stack_pytrees
 
@@ -42,24 +41,40 @@ class TrainState(eqx.Module):
     cfg: DictConfig = eqx.field(static=True)
 
     # Networks
-    actor: MLP
-    critic: MLP
+    actor: StreamACNet
+    critic: StreamACNet
 
     # Optimizers
     actor_optimizer: ObGDOptimizer
     critic_optimizer: ObGDOptimizer
 
+    # Online normalizers
+    obs_normalizer: ObsNormalizer
+    reward_scaler: RewardScaler
+
     # Mutable scalars
     step: Int[Array, '']
-    episode_return: Float[Array, '']  # Accumulates reward for the current episode
+    episode_return: Float[Array, '']  # Accumulates raw reward for the current episode
     rng: PRNGKeyArray
 
-    def __init__(self, cfg, actor, critic, actor_optimizer, critic_optimizer, rng):
+    def __init__(
+        self,
+        cfg,
+        actor,
+        critic,
+        actor_optimizer,
+        critic_optimizer,
+        obs_normalizer,
+        reward_scaler,
+        rng,
+    ):
         self.cfg = cfg
         self.actor = actor
         self.critic = critic
         self.actor_optimizer = actor_optimizer
         self.critic_optimizer = critic_optimizer
+        self.obs_normalizer = obs_normalizer
+        self.reward_scaler = reward_scaler
         self.step = jnp.int32(0)
         self.episode_return = jnp.float32(0.0)
         self.rng = rng
@@ -83,12 +98,15 @@ def train_step(
     env,
     env_params,
 ) -> Tuple[TrainState, Any, Float[Array, 'obs_dim'], StepStats]:
-    """One environment step: sample action, update networks, auto-reset."""
+    """One environment step: normalize obs/reward, update networks, auto-reset."""
     cfg = train_state.cfg
     rng, action_key, step_key, reset_key = jax.random.split(train_state.rng, 4)
 
+    # ---- Observation normalization ----
+    norm_obs, obs_normalizer = train_state.obs_normalizer.update_and_normalize(obs)
+
     # ---- Action selection (categorical policy) ----
-    logits, _ = train_state.actor(obs)
+    logits = train_state.actor(norm_obs)
     action = jax.random.categorical(action_key, logits)
 
     # ---- Environment step ----
@@ -101,17 +119,21 @@ def train_step(
         lambda r, n: jnp.where(done, r, n), reset_env_state, next_env_state,
     )
 
+    # ---- Normalize next_obs and scale reward ----
+    norm_next_obs, obs_normalizer = obs_normalizer.update_and_normalize(next_obs)
+    scaled_reward, reward_scaler = train_state.reward_scaler.update_and_scale(reward, done)
+
     # ---- TD error (stop-gradient through both value estimates) ----
-    v_s = jax.lax.stop_gradient(train_state.critic(obs)[0].squeeze())
-    v_next = jax.lax.stop_gradient(train_state.critic(next_obs)[0].squeeze())
-    td_target = reward + cfg.stream_ac.gamma * v_next * (1.0 - done.astype(jnp.float32))
+    v_s = jax.lax.stop_gradient(train_state.critic(norm_obs).squeeze())
+    v_next = jax.lax.stop_gradient(train_state.critic(norm_next_obs).squeeze())
+    td_target = scaled_reward + cfg.stream_ac.gamma * v_next * (1.0 - done.astype(jnp.float32))
     delta = td_target - v_s
 
     # ---- Actor update ----
     entropy_coeff = cfg.stream_ac.entropy_coeff
 
     def actor_loss_fn(actor):
-        logits_, _ = actor(obs)
+        logits_ = actor(norm_obs)
         log_probs = jax.nn.log_softmax(logits_)
         log_prob_a = log_probs[action]
         probs = jax.nn.softmax(logits_)
@@ -126,7 +148,7 @@ def train_step(
 
     # ---- Critic update ----
     def critic_loss_fn(critic):
-        return -critic(obs)[0].squeeze()  # Gradient of -V(s); ObGD scales by δ
+        return -critic(norm_obs).squeeze()  # Gradient of -V(s); ObGD scales by δ
 
     critic_grads = jax.grad(critic_loss_fn)(train_state.critic)
     critic_updates, new_critic_optimizer = train_state.critic_optimizer.with_update(
@@ -134,9 +156,8 @@ def train_step(
     )
     new_critic = eqx.apply_updates(train_state.critic, critic_updates)
 
-    # ---- Episode return tracking ----
+    # ---- Episode return tracking (raw reward, for monitoring) ----
     episode_return = train_state.episode_return + reward
-    # Emit the completed return, then reset accumulator on done
     completed_return = jnp.where(done, episode_return, jnp.nan)
     episode_return = jnp.where(done, jnp.float32(0.0), episode_return)
 
@@ -146,6 +167,8 @@ def train_step(
         critic=new_critic,
         actor_optimizer=new_actor_optimizer,
         critic_optimizer=new_critic_optimizer,
+        obs_normalizer=obs_normalizer,
+        reward_scaler=reward_scaler,
         step=train_state.step + 1,
         episode_return=episode_return,
         rng=rng,
@@ -217,7 +240,7 @@ def run_multiseed_experiment(
     env_states,
     obss: Float[Array, 'n_seeds obs_dim'],
     show_progress: bool = True,
-) -> Tuple[TrainState, StepStats]:
+) -> Tuple[TrainState, list]:
     """Python-level loop: call train_fn (vmapped over seeds), then log metrics."""
     sequence_length = cfg.train.log_freq
     train_cycles = cfg.train.total_steps // sequence_length
@@ -267,28 +290,31 @@ def prepare_experiment(cfg: DictConfig, seed: int):
     obs_dim = env.obs_shape[0]
     n_actions = env.num_actions
 
-    actor = MLP(
+    actor = StreamACNet(
         input_dim=obs_dim,
         output_dim=n_actions,
         n_layers=cfg.model.n_layers,
         hidden_dim=cfg.model.hidden_dim,
-        weight_init_method=cfg.model.weight_init_method,
         activation=cfg.model.activation,
+        weight_init_method=cfg.model.weight_init_method,
         key=rng_from_string(rng, 'actor'),
     )
-    critic = MLP(
+    critic = StreamACNet(
         input_dim=obs_dim,
         output_dim=1,
         n_layers=cfg.model.n_layers,
         hidden_dim=cfg.model.hidden_dim,
-        weight_init_method=cfg.model.weight_init_method,
         activation=cfg.model.activation,
+        weight_init_method=cfg.model.weight_init_method,
         key=rng_from_string(rng, 'critic'),
     )
 
     sa = cfg.stream_ac
     actor_optimizer = ObGDOptimizer(actor, lr=sa.lr, gamma=sa.gamma, lamda=sa.lamda, kappa=sa.kappa_policy)
     critic_optimizer = ObGDOptimizer(critic, lr=sa.lr, gamma=sa.gamma, lamda=sa.lamda, kappa=sa.kappa_value)
+
+    obs_normalizer = ObsNormalizer(obs_dim=obs_dim)
+    reward_scaler = RewardScaler(gamma=sa.gamma)
 
     obs, env_state = env.reset(rng_from_string(rng, 'env_reset'), env_params)
 
@@ -298,6 +324,8 @@ def prepare_experiment(cfg: DictConfig, seed: int):
         critic=critic,
         actor_optimizer=actor_optimizer,
         critic_optimizer=critic_optimizer,
+        obs_normalizer=obs_normalizer,
+        reward_scaler=reward_scaler,
         rng=rng_from_string(rng, 'train'),
     )
     return train_state, env_state, obs, env, env_params
