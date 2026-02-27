@@ -127,11 +127,14 @@ def train_step(
     norm_obs, obs_normalizer = train_state.obs_normalizer.update_and_normalize(proc_obs)
 
     # ---- Action selection ----
-    # TODO: add continuous (Gaussian) policy branch here when train_state.is_continuous=True.
-    #   Sample raw_action ~ N(mean, std), apply tanh squashing scaled by train_state.action_scale,
-    #   and replace actor_loss_fn below with the squashed-Gaussian log-prob + entropy loss.
-    logits = train_state.actor(norm_obs)
-    action = jax.random.categorical(action_key, logits)
+    if train_state.is_continuous:
+        raw_out = train_state.actor(norm_obs)
+        mu, pre_std = jnp.split(raw_out, 2)
+        std = jax.nn.softplus(pre_std)
+        action = mu + std * jax.random.normal(action_key, shape=mu.shape)
+    else:
+        logits = train_state.actor(norm_obs)
+        action = jax.random.categorical(action_key, logits)
 
     # ---- Environment step ----
     next_obs, next_env_state, reward, done, _ = env.step(step_key, env_state, action, env_params)
@@ -157,13 +160,23 @@ def train_step(
     # ---- Actor update ----
     entropy_coeff = cfg.stream_ac.entropy_coeff
 
-    def actor_loss_fn(actor):
-        logits_ = actor(norm_obs)
-        log_probs = jax.nn.log_softmax(logits_)
-        log_prob_a = log_probs[action]
-        probs = jax.nn.softmax(logits_)
-        entropy = -jnp.sum(probs * log_probs)
-        return -log_prob_a - entropy_coeff * entropy * jnp.sign(delta)
+    if train_state.is_continuous:
+        def actor_loss_fn(actor):
+            raw_out = actor(norm_obs)
+            mu, pre_std = jnp.split(raw_out, 2)
+            std = jax.nn.softplus(pre_std)
+            log_prob = -0.5 * jnp.sum(
+                ((action - mu) / std) ** 2 + 2 * jnp.log(std) + jnp.log(2 * jnp.pi))
+            entropy = 0.5 * jnp.sum(jnp.log(2 * jnp.pi * jnp.e * std ** 2))
+            return -log_prob - entropy_coeff * entropy * jnp.sign(delta)
+    else:
+        def actor_loss_fn(actor):
+            logits_ = actor(norm_obs)
+            log_probs = jax.nn.log_softmax(logits_)
+            log_prob_a = log_probs[action]
+            probs = jax.nn.softmax(logits_)
+            entropy = -jnp.sum(probs * log_probs)
+            return -log_prob_a - entropy_coeff * entropy * jnp.sign(delta)
 
     actor_grads = jax.grad(actor_loss_fn)(train_state.actor)
     actor_updates, new_actor_optimizer = train_state.actor_optimizer.with_update(
@@ -312,10 +325,10 @@ def prepare_experiment(cfg: DictConfig, seed: int):
 
     obs_flat_dim, action_dim, is_continuous, action_scale = get_env_specs(env, env_params)
 
-    # TODO: for continuous envs, actor output_dim should be 2 * action_dim (mean + log_std).
+    actor_output_dim = 2 * action_dim if is_continuous else action_dim
     actor = StreamACNet(
         input_dim=obs_flat_dim,
-        output_dim=action_dim,
+        output_dim=actor_output_dim,
         n_layers=cfg.model.n_layers,
         hidden_dim=cfg.model.hidden_dim,
         activation=cfg.model.activation,
