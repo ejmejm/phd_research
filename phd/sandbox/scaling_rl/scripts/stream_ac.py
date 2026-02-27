@@ -1,8 +1,14 @@
 """
-StreamAC experiment with JAX CartPole.
+StreamAC experiment with JAX environments (CartPole, Pendulum, MinAtar).
 
 Single script supporting multiple seeds via jax.vmap.
 Algorithm: StreamAC + ObGD (online, per-step actor-critic with eligibility traces).
+
+Supported environments (all via gymnax):
+  - CartPole-v1          (discrete, 1-D obs)
+  - Pendulum-v1          (continuous, 1-D obs)
+  - Breakout-MinAtar     (discrete, 3-D obs flattened)
+  - Freeway-MinAtar      (discrete, 3-D obs flattened)
 
 Reference: https://github.com/mohmdelsayed/streaming-drl
 """
@@ -11,7 +17,6 @@ import logging
 from typing import Any, Callable, Dict, Tuple
 
 import equinox as eqx
-import gymnax
 import hydra
 import jax
 import jax.numpy as jnp
@@ -23,6 +28,7 @@ from tqdm import tqdm
 from phd.feature_search.jax_core.experiment_helpers import rng_from_string
 from phd.feature_search.jax_core.utils import tree_replace
 from phd.research_utils.logging import finish_experiment, init_experiment, log_metrics
+from phd.sandbox.scaling_rl.core.envs import get_env_specs, make_env
 from phd.sandbox.scaling_rl.core.models import StreamACNet
 from phd.sandbox.scaling_rl.core.normalizers import ObsNormalizer, RewardScaler
 from phd.sandbox.scaling_rl.core.optimizers import ObGDOptimizer
@@ -39,6 +45,10 @@ logger = logging.getLogger(__name__)
 class TrainState(eqx.Module):
     # Static
     cfg: DictConfig = eqx.field(static=True)
+    is_continuous: bool = eqx.field(static=True)   # Pendulum-style vs CartPole-style
+    obs_flat_dim: int = eqx.field(static=True)      # flattened obs size (for MinAtar)
+    action_dim: int = eqx.field(static=True)        # raw action dim (before 2x for continuous)
+    action_scale: float = eqx.field(static=True)    # |max action| for continuous; 1.0 otherwise
 
     # Networks
     actor: StreamACNet
@@ -67,8 +77,16 @@ class TrainState(eqx.Module):
         obs_normalizer,
         reward_scaler,
         rng,
+        is_continuous: bool,
+        obs_flat_dim: int,
+        action_dim: int,
+        action_scale: float,
     ):
         self.cfg = cfg
+        self.is_continuous = is_continuous
+        self.obs_flat_dim = obs_flat_dim
+        self.action_dim = action_dim
+        self.action_scale = action_scale
         self.actor = actor
         self.critic = critic
         self.actor_optimizer = actor_optimizer
@@ -102,10 +120,16 @@ def train_step(
     cfg = train_state.cfg
     rng, action_key, step_key, reset_key = jax.random.split(train_state.rng, 4)
 
-    # ---- Observation normalization ----
-    norm_obs, obs_normalizer = train_state.obs_normalizer.update_and_normalize(obs)
+    # ---- Observation preprocessing + normalization ----
+    # preprocess_obs handles any model-specific reshaping (e.g. MinAtar (H,W,C) → 1-D for MLPs).
+    # Future model types (CNNs) override preprocess_obs for richer pipelines.
+    proc_obs = train_state.actor.preprocess_obs(obs)
+    norm_obs, obs_normalizer = train_state.obs_normalizer.update_and_normalize(proc_obs)
 
-    # ---- Action selection (categorical policy) ----
+    # ---- Action selection ----
+    # TODO: add continuous (Gaussian) policy branch here when train_state.is_continuous=True.
+    #   Sample raw_action ~ N(mean, std), apply tanh squashing scaled by train_state.action_scale,
+    #   and replace actor_loss_fn below with the squashed-Gaussian log-prob + entropy loss.
     logits = train_state.actor(norm_obs)
     action = jax.random.categorical(action_key, logits)
 
@@ -120,7 +144,8 @@ def train_step(
     )
 
     # ---- Normalize next_obs and scale reward ----
-    norm_next_obs, obs_normalizer = obs_normalizer.update_and_normalize(next_obs)
+    proc_next_obs = train_state.actor.preprocess_obs(next_obs)
+    norm_next_obs, obs_normalizer = obs_normalizer.update_and_normalize(proc_next_obs)
     scaled_reward, reward_scaler = train_state.reward_scaler.update_and_scale(reward, done)
 
     # ---- TD error (stop-gradient through both value estimates) ----
@@ -283,14 +308,14 @@ def run_multiseed_experiment(
 def prepare_experiment(cfg: DictConfig, seed: int):
     """Initialise all components for a single seed."""
     rng = jax.random.key(seed)
-    env, env_params = gymnax.make(cfg.env.name)
+    env, env_params = make_env(cfg)
 
-    obs_dim = env.obs_shape[0]
-    n_actions = env.num_actions
+    obs_flat_dim, action_dim, is_continuous, action_scale = get_env_specs(env, env_params)
 
+    # TODO: for continuous envs, actor output_dim should be 2 * action_dim (mean + log_std).
     actor = StreamACNet(
-        input_dim=obs_dim,
-        output_dim=n_actions,
+        input_dim=obs_flat_dim,
+        output_dim=action_dim,
         n_layers=cfg.model.n_layers,
         hidden_dim=cfg.model.hidden_dim,
         activation=cfg.model.activation,
@@ -298,7 +323,7 @@ def prepare_experiment(cfg: DictConfig, seed: int):
         key=rng_from_string(rng, 'actor'),
     )
     critic = StreamACNet(
-        input_dim=obs_dim,
+        input_dim=obs_flat_dim,
         output_dim=1,
         n_layers=cfg.model.n_layers,
         hidden_dim=cfg.model.hidden_dim,
@@ -311,7 +336,7 @@ def prepare_experiment(cfg: DictConfig, seed: int):
     actor_optimizer = ObGDOptimizer(actor, lr=sa.lr, gamma=sa.gamma, lamda=sa.lamda, kappa=sa.kappa_policy)
     critic_optimizer = ObGDOptimizer(critic, lr=sa.lr, gamma=sa.gamma, lamda=sa.lamda, kappa=sa.kappa_value)
 
-    obs_normalizer = ObsNormalizer(obs_dim=obs_dim)
+    obs_normalizer = ObsNormalizer(obs_dim=obs_flat_dim)
     reward_scaler = RewardScaler(gamma=sa.gamma)
 
     obs, env_state = env.reset(rng_from_string(rng, 'env_reset'), env_params)
@@ -325,6 +350,10 @@ def prepare_experiment(cfg: DictConfig, seed: int):
         obs_normalizer=obs_normalizer,
         reward_scaler=reward_scaler,
         rng=rng_from_string(rng, 'train'),
+        is_continuous=is_continuous,
+        obs_flat_dim=obs_flat_dim,
+        action_dim=action_dim,
+        action_scale=action_scale,
     )
     return train_state, env_state, obs, env, env_params
 

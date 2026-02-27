@@ -117,6 +117,15 @@ class StreamACNet(eqx.Module):
         self.activation_fn = ACTIVATION_MAP[activation]
         self.n_hidden = n_hidden
 
+    def preprocess_obs(self, obs: Array) -> Array:
+        """Flatten multi-dimensional observations to a 1-D vector.
+
+        Override in subclasses (e.g. CNNs) to add richer preprocessing.
+        For MinAtar the obs arrives as (H, W, C); ravel() gives a flat vector
+        that matches the MLP input_dim.
+        """
+        return obs.ravel()
+
     def __call__(self, x: Array) -> Array:
         for layer, ln in zip(self.linear_layers[:self.n_hidden], self.layer_norms):
             x = self.activation_fn(ln(layer(x)))
