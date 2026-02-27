@@ -247,14 +247,12 @@ def run_multiseed_experiment(
 
     all_metrics = []
 
-    # Warmup JIT
-    train_fn(train_states, env_states, obss, sequence_length)
-
     if show_progress:
         pbar = tqdm(total=cfg.train.total_steps, desc='Training')
     else:
         pbar = None
 
+    # The first call triggers JIT compilation; subsequent calls use the cached artifact.
     for _ in range(train_cycles):
         train_states, env_states, obss, step_stats = train_fn(
             train_states, env_states, obss, sequence_length,

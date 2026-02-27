@@ -25,17 +25,27 @@ ACTIVATION_MAP: dict[str, Callable] = {
 
 
 def _sparse_init_layer(layer: nn.Linear, sparsity: float, key: PRNGKeyArray) -> nn.Linear:
-    """Apply sparse init to a Linear layer: zero-out `sparsity` fraction of each row."""
-    w = np.array(layer.weight)       # (out_features, in_features)
+    """Apply sparse init to a Linear layer: zero-out `sparsity` fraction of each row.
+
+    Uses vmap over output neurons instead of a Python loop — fast even for large
+    hidden_dim.  n_zeros is capped at in_features-1 so at least one incoming weight
+    remains active (prevents dead neurons when in_features is small, e.g. CartPole).
+    """
+    w = layer.weight                    # (out_features, in_features)
     out_features, in_features = w.shape
-    n_zeros = int(math.ceil(sparsity * in_features))
+    n_zeros = min(int(math.ceil(sparsity * in_features)), in_features - 1)
 
-    for i in range(out_features):
-        key, subkey = jax.random.split(key)
-        perm = np.array(jax.random.permutation(subkey, in_features))
-        w[i, perm[:n_zeros]] = 0.0
+    row_keys = jax.random.split(key, out_features)
 
-    new_layer = eqx.tree_at(lambda l: l.weight, layer, jnp.array(w))
+    def _mask_row(k: PRNGKeyArray) -> Array:
+        perm = jax.random.permutation(k, in_features)
+        # Set the first n_zeros positions in the permutation to zero
+        return jnp.ones(in_features, dtype=w.dtype).at[perm[:n_zeros]].set(0.0)
+
+    masks = jax.vmap(_mask_row)(row_keys)   # (out_features, in_features)
+    new_w = w * masks
+
+    new_layer = eqx.tree_at(lambda l: l.weight, layer, new_w)
     if layer.bias is not None:
         new_layer = eqx.tree_at(lambda l: l.bias, new_layer, jnp.zeros_like(layer.bias))
     return new_layer
