@@ -1,6 +1,6 @@
 """Smoke tests for stream_ac with each supported gymnax environment.
 
-Covers: CartPole-v1, Breakout-MinAtar, Freeway-MinAtar (discrete action spaces).
+Covers: CartPole-v1, Breakout-MinAtar, Freeway-MinAtar, Craftax-Symbolic-v1 (discrete action spaces).
 Pendulum-v1 (continuous) is excluded until the Gaussian policy branch is added;
 see the TODO in train_step.
 
@@ -23,6 +23,7 @@ DISCRETE_ENVS = [
     'CartPole-v1',
     'Breakout-MinAtar',
     'Freeway-MinAtar',
+    'Craftax-Symbolic-v1',
 ]
 
 N_STEPS = 10
@@ -55,8 +56,8 @@ def test_prepare_experiment(env_name):
     train_state, env_state, obs, env, env_params = prepare_experiment(cfg, seed=0)
 
     assert not train_state.is_continuous
-    assert obs.shape == env.obs_shape
-    assert train_state.obs_flat_dim == int(np.prod(env.obs_shape))
+    assert obs.shape == env.observation_space(env_params).shape
+    assert train_state.obs_flat_dim == int(np.prod(env.observation_space(env_params).shape))
 
 
 @pytest.mark.parametrize('env_name', DISCRETE_ENVS)
@@ -75,15 +76,15 @@ def test_train_step_runs(env_name):
     assert jnp.isfinite(stats.td_error)
     # episode_return is NaN when no episode ended; finite otherwise
     assert stats.episode_return.dtype == jnp.float32
-    assert obs.shape == env.obs_shape
+    assert obs.shape == env.observation_space(env_params).shape
 
 
 @pytest.mark.parametrize('env_name', DISCRETE_ENVS)
 def test_obs_preprocessing(env_name):
     """Actor preprocess_obs produces a 1-D vector matching obs_flat_dim."""
     cfg = _make_cfg(env_name)
-    train_state, _, obs, env, _ = prepare_experiment(cfg, seed=0)
+    train_state, _, obs, env, env_params = prepare_experiment(cfg, seed=0)
 
     proc = train_state.actor.preprocess_obs(obs)
     assert proc.ndim == 1
-    assert proc.shape[0] == train_state.obs_flat_dim == int(np.prod(env.obs_shape))
+    assert proc.shape[0] == train_state.obs_flat_dim == int(np.prod(env.observation_space(env_params).shape))
