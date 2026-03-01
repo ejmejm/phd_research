@@ -72,7 +72,7 @@ def custom_optax_adam(
             bias_correction2 = 1 - betas[1]**step
 
             step_size = lr / bias_correction1
-            denom = jnp.sqrt(bias_correction2 / exp_avg_sq) + eps
+            denom = jnp.sqrt(exp_avg_sq / bias_correction2) + eps
             param_update = exp_avg / denom * -step_size
             
             return param_update, step, exp_avg, exp_avg_sq
