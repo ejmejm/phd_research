@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from jaxtyping import PRNGKeyArray
 from optax._src import base
 
-from phd.feature_search.jax_core.utils import tree_unzip
+from phd.jax_core.utils import tree_unzip
 
 logger = logging.getLogger(__name__)
 

@@ -4,8 +4,8 @@ import equinox as eqx
 import jax.numpy as jnp
 from omegaconf import DictConfig
 
-from phd.feature_search.jax_core.models import MLP
-from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask, CoreTransientBinaryTask
+from phd.jax_core.models import MLP
+from phd.jax_core.tasks.geoff import NonlinearGEOFFTask, CoreTransientBinaryTask
 from phd.feature_search.jax_core.feature_recycling import CBPTracker
 
 

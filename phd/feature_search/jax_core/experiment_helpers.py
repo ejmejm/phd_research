@@ -15,11 +15,11 @@ from omegaconf import DictConfig
 import optax
 
 from .feature_recycling import CBPTracker
-from .models import MLP
-from .optimizers import EqxOptimizer, optax_idbd, optax_upgd, custom_optax_adam
-from .tasks.geoff import BinaryRegressionTask, CoreTransientBinaryTask, InputChangingGEOFFTask, NonlinearGEOFFTask
-from .tasks.summation import SummationTask
-from .utils import tree_replace
+from phd.jax_core.models import MLP
+from phd.jax_core.optimizers import EqxOptimizer, optax_idbd, optax_upgd, custom_optax_adam
+from phd.jax_core.tasks.geoff import BinaryRegressionTask, CoreTransientBinaryTask, InputChangingGEOFFTask, NonlinearGEOFFTask
+from phd.jax_core.tasks.summation import SummationTask
+from phd.jax_core.utils import tree_replace
 
 
 logger = logging.getLogger(__name__)

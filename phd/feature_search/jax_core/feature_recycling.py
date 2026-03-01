@@ -11,11 +11,11 @@ from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 from optax import EmptyState
 
-from .models import lecun_uniform
-from .optimizers import EqxOptimizer
-from .optimizers.adam import AdamState
-from .optimizers.idbd import IDBDState
-from .utils import get_val_at_key_path, tree_replace, tree_unzip
+from phd.jax_core.models import lecun_uniform
+from phd.jax_core.optimizers import EqxOptimizer
+from phd.jax_core.optimizers.adam import AdamState
+from phd.jax_core.optimizers.idbd import IDBDState
+from phd.jax_core.utils import get_val_at_key_path, tree_replace, tree_unzip
 
 
 MAX_FLOAT = jnp.finfo(jnp.float32).max

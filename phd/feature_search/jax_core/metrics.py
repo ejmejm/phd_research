@@ -5,9 +5,9 @@ from jaxtyping import Array, Bool, Float
 from omegaconf import DictConfig
 from torch import layer_norm
 
-from .models import MLP
-from .optimizers import EqxOptimizer
-from .tasks.geoff import NonlinearGEOFFTask
+from phd.jax_core.models import MLP
+from phd.jax_core.optimizers import EqxOptimizer
+from phd.jax_core.tasks.geoff import NonlinearGEOFFTask
 
 
 def compute_feature_diff_matrix(

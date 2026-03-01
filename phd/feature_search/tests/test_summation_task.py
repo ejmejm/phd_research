@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from phd.feature_search.jax_core.tasks.summation import SummationTask
+from phd.jax_core.tasks.summation import SummationTask
 
 
 class TestSummationTaskStationary:

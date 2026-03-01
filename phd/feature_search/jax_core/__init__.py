@@ -1,1 +1,1 @@
-from .optimizers import optimizer # import EqxOptimizer
+from phd.jax_core.optimizers import optimizer # import EqxOptimizer

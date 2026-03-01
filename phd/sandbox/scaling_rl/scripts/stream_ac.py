@@ -26,7 +26,7 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 
 from phd.feature_search.jax_core.experiment_helpers import rng_from_string
-from phd.feature_search.jax_core.utils import tree_replace
+from phd.jax_core.utils import tree_replace
 from phd.research_utils.logging import finish_experiment, init_experiment, log_metrics
 from phd.sandbox.scaling_rl.core.envs import get_env_specs, make_env
 from phd.sandbox.scaling_rl.core.models import StreamACNet

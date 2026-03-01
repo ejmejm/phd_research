@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from phd.feature_search.jax_core.utils import tree_replace
+from phd.jax_core.utils import tree_replace
 
 
 class ObGDOptimizer(eqx.Module):

@@ -6,9 +6,9 @@ import optax
 import pytest
 from omegaconf import DictConfig
 
-from phd.feature_search.jax_core.models import MLP
+from phd.jax_core.models import MLP
 from phd.feature_search.jax_core.experiment_helpers import prepare_optimizer
-from phd.feature_search.jax_core.optimizers.optimizer import EqxOptimizer
+from phd.jax_core.optimizers.optimizer import EqxOptimizer
 from functools import partial
 
 

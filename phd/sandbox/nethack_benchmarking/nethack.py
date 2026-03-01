@@ -4,7 +4,7 @@ import equinox as eqx
 import jax.numpy as jnp
 from nle_prediction import OrderedNetHackDataloader
 
-from phd.feature_search.jax_core.utils import tree_replace
+from phd.jax_core.utils import tree_replace
 
 
 class NethackPredictionTask(eqx.Module):

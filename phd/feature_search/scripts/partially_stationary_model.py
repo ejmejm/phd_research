@@ -15,10 +15,10 @@ from tqdm import tqdm
 from phd.feature_search.jax_core.experiment_helpers import standardize_targets
 from phd.feature_search.jax_core.feature_recycling import CBPTracker
 from phd.feature_search.jax_core.metrics import *
-from phd.feature_search.jax_core.models import MLP
-from phd.feature_search.jax_core.optimizers import EqxOptimizer
-from phd.feature_search.jax_core.tasks.geoff import NonlinearGEOFFTask
-from phd.feature_search.jax_core.utils import tree_replace
+from phd.jax_core.models import MLP
+from phd.jax_core.optimizers import EqxOptimizer
+from phd.jax_core.tasks.geoff import NonlinearGEOFFTask
+from phd.jax_core.utils import tree_replace
 from phd.research_utils.logging import *
 
 from phd.feature_search.scripts.jax_full_feature_search import (
