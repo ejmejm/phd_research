@@ -1,0 +1,40 @@
+project: structure-search
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+# Experiment tracking
+wandb: false
+mlflow: false
+comet_ml: false
+
+# Dataset
+dataset:
+  name: cifar10
+
+# Model
+model:
+  n_layers: 2
+  hidden_dim: 128
+  activation: relu
+  weight_init_method: lecun_uniform
+  use_bias: false
+  n_frozen_layers: 0
+
+# Optimizer
+optimizer:
+  name: adam
+  learning_rate: 1e-3
+  weight_decay: 0
+
+# Structure tracker (placeholder)
+structure_tracker:
+  enabled: false
+
+# Training
+train:
+  batch_size: 1
+  total_steps: 100_000
+  log_freq: 1000
+
+# Seed: single int or list of ints for multi-seed
+seed: null

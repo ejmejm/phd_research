@@ -1,0 +1,36 @@
+experiment: structure-search
+sweep_name: idbd_lr_sweep
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+parameters:
+  mlflow: true
+
+  model.n_layers: 3
+  model.hidden_dim: 64
+
+  optimizer.name: idbd
+
+  optimizer.learning_rate:
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+    - "${eval:2**-5}"
+    - "${eval:2**-3}"
+    - "${eval:2**-1}"
+    - "${eval:2**1}"
+
+  optimizer.meta_learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed: [1, 2, 3]
