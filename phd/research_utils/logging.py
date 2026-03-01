@@ -54,7 +54,11 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
     if config and config.get('mlflow', False):
         import mlflow
         
-        if config.get('mlflow_tracking_uri'):
+        if os.environ.get('MLFLOW_RUN_ID') and os.environ.get('MLFLOW_TRACKING_URI'):
+            # When both are passed this is a sweep, so use the environment variable
+            # provided by the sweep script.
+            mlflow.set_tracking_uri(os.environ.get('MLFLOW_TRACKING_URI'))
+        elif config.get('mlflow_tracking_uri'):
             if os.environ.get('MLFLOW_TRACKING_URI') is not None:
                 logger.warning(
                     f"MLFLOW_TRACKING_URI is set in both the environment and the config, "
@@ -280,7 +284,7 @@ def log_metrics(metrics: Dict[str, Union[int, float]], config: DictConfig,
             if isinstance(v, np.ndarray):
                 v = v.tolist()
             prepped_metrics[f'{prefix}{k}'] = v
-        step = int(step)
+        step = int(step) if step is not None else None
         mlflow.log_metrics(prepped_metrics, step=step)
     
     if config.get('wandb', False):
