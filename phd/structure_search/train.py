@@ -244,6 +244,11 @@ def run_experiment(
     log_executor = ThreadPoolExecutor(max_workers=1)
     log_futures = []
 
+    # Capture parent run ID so background thread can log to the correct run
+    import mlflow
+    parent_run_id = mlflow.active_run().info.run_id
+    mlflow_client = mlflow.tracking.MlflowClient()
+
     for _ in range(num_scans):
         # Pre-sample one cycle of data on CPU per seed
         batch = [stream.sample_batch(log_freq) for stream in streams]
@@ -260,9 +265,10 @@ def run_experiment(
 
         step = int(train_state.step[0].item())
 
-        # Submit logging to background thread
+        # Submit logging to background thread (use client API to avoid thread-local active run issue)
         def _log_step(mean_loss, mean_acc, per_seed_loss, per_seed_acc, step):
-            log_metrics({'loss': mean_loss, 'accuracy': mean_acc}, cfg, step=step)
+            mlflow_client.log_metric(parent_run_id, 'loss', mean_loss, step=step)
+            mlflow_client.log_metric(parent_run_id, 'accuracy', mean_acc, step=step)
             log_child_metrics(
                 {'loss': per_seed_loss, 'accuracy': per_seed_acc},
                 cfg, step=step,
