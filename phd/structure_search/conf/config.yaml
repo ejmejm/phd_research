@@ -26,6 +26,10 @@ optimizer:
   learning_rate: 1e-3
   weight_decay: 0
 
+  # IDBD specific parameters
+  autostep: true
+  meta_learning_rate: 0.002
+
 # Structure tracker (placeholder)
 structure_tracker:
   enabled: false

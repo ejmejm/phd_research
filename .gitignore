@@ -28,5 +28,6 @@ discovery.egg-info/
 *.pkl
 *.pbz2
 *.png
+*.lock
 
 phd/sandbox/nethack_benchmarking/data/nld-nao/
