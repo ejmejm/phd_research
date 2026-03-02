@@ -19,12 +19,15 @@ parameters:
   optimizer.name: adam
 
   optimizer.learning_rate:
+    - "${eval:2**-19}"
+    - "${eval:2**-17}"
     - "${eval:2**-15}"
     - "${eval:2**-13}"
     - "${eval:2**-11}"
     - "${eval:2**-9}"
     - "${eval:2**-7}"
     - "${eval:2**-5}"
-    - "${eval:2**-3}"
 
-  seed: [1, 2, 3]
+  seed:
+    type: atomic
+    value: [1, 2, 3]

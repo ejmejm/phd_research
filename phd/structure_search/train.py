@@ -26,7 +26,10 @@ from phd.jax_core.optimizers import EqxOptimizer
 from phd.jax_core.utils import tree_replace
 from phd.research_utils.logging import (
     init_experiment,
+    init_child_runs,
     log_metrics,
+    log_child_metrics,
+    finish_child_runs,
     finish_experiment,
 )
 from phd.structure_search.data import load_dataset, DataStream
@@ -221,7 +224,7 @@ def run_experiment(
     cfg: DictConfig,
     train_state: TrainState,
     streams: List[DataStream],
-) -> Tuple[TrainState, list, list]:
+) -> Tuple[TrainState, list, list, list, list]:
     """Outer training loop: pre-sample data on CPU, train on GPU via vmapped scan."""
     log_freq = cfg.train.log_freq
     num_scans = cfg.train.total_steps // log_freq
@@ -233,6 +236,8 @@ def run_experiment(
 
     all_losses = []
     all_accuracies = []
+    all_per_seed_losses = []
+    all_per_seed_accuracies = []
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
 
     for _ in range(num_scans):
@@ -244,20 +249,28 @@ def run_experiment(
         train_state, metrics = vmapped_scan(train_state, (images, labels))
 
         # metrics.loss / metrics.correct: (n_seeds, log_freq)
-        mean_loss = float(metrics.loss.mean())
-        mean_acc = float(metrics.correct.mean())
+        per_seed_loss = metrics.loss.mean(axis=1)  # (n_seeds,)
+        per_seed_acc = metrics.correct.mean(axis=1)  # (n_seeds,)
+        mean_loss = float(per_seed_loss.mean())
+        mean_acc = float(per_seed_acc.mean())
 
         step = int(train_state.step[0].item())
         log_metrics({'loss': mean_loss, 'accuracy': mean_acc}, cfg, step=step)
+        log_child_metrics(
+            {'loss': per_seed_loss.tolist(), 'accuracy': per_seed_acc.tolist()},
+            cfg, step=step,
+        )
 
         all_losses.append(mean_loss)
         all_accuracies.append(mean_acc)
+        all_per_seed_losses.append(np.array(per_seed_loss))
+        all_per_seed_accuracies.append(np.array(per_seed_acc))
 
         pbar.update(log_freq)
         pbar.set_postfix({'loss': f'{mean_loss:.4f}', 'acc': f'{mean_acc:.4f}'})
 
     pbar.close()
-    return train_state, all_losses, all_accuracies
+    return train_state, all_losses, all_accuracies, all_per_seed_losses, all_per_seed_accuracies
 
 
 # ---------------------------------------------------------------------------
@@ -278,10 +291,12 @@ def main(cfg: DictConfig) -> None:
         cfg.seed = list(cfg.seed)
 
     set_seed(cfg.seed[0])
+    init_child_runs(cfg.seed, cfg)
 
     train_state, streams, n_params = prepare_experiment(cfg)
 
-    train_state, all_losses, all_accuracies = run_experiment(
+    (train_state, all_losses, all_accuracies,
+     all_per_seed_losses, all_per_seed_accuracies) = run_experiment(
         cfg, train_state, streams)
 
     # Final summary
@@ -301,6 +316,18 @@ def main(cfg: DictConfig) -> None:
         'num_params': n_params,
     }, cfg)
 
+    # Per-seed summary to child runs
+    if all_per_seed_losses:
+        per_seed_losses = np.stack(all_per_seed_losses)  # (num_scans, n_seeds)
+        per_seed_accs = np.stack(all_per_seed_accuracies)
+        log_child_metrics({
+            'average_loss': per_seed_losses.mean(axis=0).tolist(),
+            'asymptotic_loss': per_seed_losses[-n_tail:].mean(axis=0).tolist(),
+            'asymptotic_accuracy': per_seed_accs[-n_tail:].mean(axis=0).tolist(),
+            'num_params': [n_params] * len(cfg.seed),
+        }, cfg)
+
+    finish_child_runs(cfg)
     finish_experiment(cfg)
 
 

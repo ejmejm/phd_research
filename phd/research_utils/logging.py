@@ -21,6 +21,7 @@ wandb = None
 comet_ml = None
 mlflow = None
 experiment_module_name: Optional[str] = None
+_mlflow_child_run_ids: List[str] = []
 
 
 logger = logging.getLogger(__name__)
@@ -216,6 +217,61 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
     return config
 
 
+def init_child_runs(seeds: list, config: DictConfig) -> List[str]:
+    """Create child MLflow runs for each seed in a multi-seed experiment.
+
+    Also tags the parent run as 'multi_seed' or 'single_seed'.
+
+    Args:
+        seeds: List of random seeds.
+        config: Hydra configuration object.
+
+    Returns:
+        List of child run IDs (empty if not using MLflow, single seed,
+        or log_individual_seeds is disabled).
+    """
+    global _mlflow_child_run_ids
+    _mlflow_child_run_ids = []
+
+    if not config.get('mlflow', False):
+        return []
+
+    is_multi_seed = len(seeds) > 1
+
+    # Tag parent run
+    mlflow.set_tag('seed_mode', 'multi_seed' if is_multi_seed else 'single_seed')
+
+    if not is_multi_seed or not config.get('log_individual_seeds', True):
+        return []
+
+    from mlflow.entities import Param
+
+    parent_run = mlflow.active_run()
+    client = mlflow.tracking.MlflowClient()
+
+    raw_dict_config = omegaconf.OmegaConf.to_container(
+        config, resolve=True, throw_on_missing=True)
+    flat_config = flatten_dict(raw_dict_config)
+
+    for seed in seeds:
+        child_run = client.create_run(
+            experiment_id=parent_run.info.experiment_id,
+            tags={
+                'mlflow.parentRunId': parent_run.info.run_id,
+                'mlflow.runName': f'seed_{seed}',
+                'seed_mode': 'single_seed',
+            },
+        )
+        params = [Param(str(k), str(v)) for k, v in flat_config.items()]
+        params.append(Param('child_seed', str(seed)))
+        for i in range(0, len(params), 100):
+            client.log_batch(child_run.info.run_id, params=params[i:i+100])
+
+        _mlflow_child_run_ids.append(child_run.info.run_id)
+
+    return _mlflow_child_run_ids
+
+
 def update_params(config: DictConfig) -> None:
     """Update experiment parameters in the active logging framework.
     
@@ -302,6 +358,33 @@ def log_metrics(metrics: Dict[str, Union[int, float]], config: DictConfig,
         
         experiment = comet_ml.get_global_experiment()
         experiment.log_metrics(metrics, prefix=prefix, step=step)
+
+
+def log_child_metrics(per_seed_metrics: Dict[str, list], config: DictConfig,
+                      step: Optional[int] = None) -> None:
+    """Log per-seed metrics to child MLflow runs.
+
+    Args:
+        per_seed_metrics: Dict mapping metric names to lists of values (one per seed).
+        config: Hydra configuration object.
+        step: Optional step number.
+    """
+    if not config.get('mlflow', False) or not _mlflow_child_run_ids:
+        return
+
+    import time
+    from mlflow.entities import Metric
+
+    client = mlflow.tracking.MlflowClient()
+    timestamp = int(time.time() * 1000)
+    step = int(step) if step is not None else 0
+
+    for i, run_id in enumerate(_mlflow_child_run_ids):
+        metrics = [
+            Metric(k, float(v[i]), timestamp, step)
+            for k, v in per_seed_metrics.items()
+        ]
+        client.log_batch(run_id, metrics=metrics)
 
 
 def log_images(images: Dict[str, List[np.ndarray]], config: DictConfig, 
@@ -394,6 +477,18 @@ def finish_experiment(config: DictConfig) -> None:
     if config.get('comet_ml', False):
         experiment = comet_ml.get_global_experiment()
         experiment.end()
+
+
+def finish_child_runs(config: DictConfig) -> None:
+    """End child MLflow runs."""
+    global _mlflow_child_run_ids
+    if not config.get('mlflow', False) or not _mlflow_child_run_ids:
+        return
+
+    client = mlflow.tracking.MlflowClient()
+    for run_id in _mlflow_child_run_ids:
+        client.set_terminated(run_id)
+    _mlflow_child_run_ids = []
 
 
 def track_model(model: Any, config: DictConfig) -> None:

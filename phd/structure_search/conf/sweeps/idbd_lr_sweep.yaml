@@ -33,4 +33,6 @@ parameters:
     - "${eval:2**-8}"
     - "${eval:2**-7}"
 
-  seed: [1, 2, 3]
+  seed:
+    type: atomic
+    value: [1, 2, 3]
