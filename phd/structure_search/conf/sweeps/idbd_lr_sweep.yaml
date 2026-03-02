@@ -10,11 +10,17 @@ spec:
   metric: asymptotic_loss
   direction: minimize
 
+plot_params:
+  split_by: model.hidden_dim
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    hue: optimizer.meta_learning_rate
+
 parameters:
   mlflow: true
 
   model.n_layers: 3
-  model.hidden_dim: 64
+  model.hidden_dim: [64, 256]
 
   optimizer.name: idbd
 
