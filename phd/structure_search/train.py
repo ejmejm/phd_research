@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import os
 from typing import List, Tuple
@@ -240,6 +241,9 @@ def run_experiment(
     all_per_seed_accuracies = []
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
 
+    log_executor = ThreadPoolExecutor(max_workers=1)
+    log_futures = []
+
     for _ in range(num_scans):
         # Pre-sample one cycle of data on CPU per seed
         batch = [stream.sample_batch(log_freq) for stream in streams]
@@ -255,11 +259,19 @@ def run_experiment(
         mean_acc = float(per_seed_acc.mean())
 
         step = int(train_state.step[0].item())
-        log_metrics({'loss': mean_loss, 'accuracy': mean_acc}, cfg, step=step)
-        log_child_metrics(
-            {'loss': per_seed_loss.tolist(), 'accuracy': per_seed_acc.tolist()},
-            cfg, step=step,
-        )
+
+        # Submit logging to background thread
+        def _log_step(mean_loss, mean_acc, per_seed_loss, per_seed_acc, step):
+            log_metrics({'loss': mean_loss, 'accuracy': mean_acc}, cfg, step=step)
+            log_child_metrics(
+                {'loss': per_seed_loss, 'accuracy': per_seed_acc},
+                cfg, step=step,
+            )
+
+        log_futures.append(log_executor.submit(
+            _log_step, mean_loss, mean_acc,
+            per_seed_loss.tolist(), per_seed_acc.tolist(), step,
+        ))
 
         all_losses.append(mean_loss)
         all_accuracies.append(mean_acc)
@@ -268,6 +280,11 @@ def run_experiment(
 
         pbar.update(log_freq)
         pbar.set_postfix({'loss': f'{mean_loss:.4f}', 'acc': f'{mean_acc:.4f}'})
+
+    # Wait for all logging to finish
+    for f in log_futures:
+        f.result()
+    log_executor.shutdown(wait=False)
 
     pbar.close()
     return train_state, all_losses, all_accuracies, all_per_seed_losses, all_per_seed_accuracies
