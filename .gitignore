@@ -21,6 +21,7 @@ outputs/
 discovery.egg-info/
 
 **/wandb
+**/mlruns
 
 *.csv
 *.db
