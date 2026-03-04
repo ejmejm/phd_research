@@ -34,6 +34,7 @@ from phd.research_utils.logging import (
     finish_experiment,
 )
 from phd.structure_search.data import load_dataset, DataStream
+from phd.structure_search.dynamic_network import DynamicNetwork, sync_outgoing_weights
 
 
 SCAN_UNROLL = 4
@@ -197,6 +198,10 @@ def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
         updates, new_optimizer = train_state.optimizer.with_update(
             grads, train_state.model)
     new_model = eqx.apply_updates(train_state.model, updates)
+
+    # Sync outgoing weights after optimizer update (for custom backward gather)
+    if isinstance(new_model, DynamicNetwork):
+        new_model = sync_outgoing_weights(new_model)
 
     # Structure tracker (no-op for now)
     new_tracker = train_state.structure_tracker.update_stats(

@@ -52,17 +52,24 @@ def _forward_impl(
 
 
 def _make_dynamic_forward(activation_fns, activation_deriv_fns,
-                          input_dim, max_layers, max_units_per_layer, buffer_size):
-    """Create a custom_vjp forward function with static config bound.
+                          input_dim, max_layers, max_units_per_layer, buffer_size,
+                          input_indices, unit_mask, activation_indices, output_mask,
+                          outgoing_unit_indices, outgoing_conn_indices,
+                          outgoing_weights):
+    """Create a custom_vjp forward function with config and structure bound.
 
-    Static Python values (functions, ints) are captured in the closure.
-    Only JAX arrays are passed as arguments to the custom_vjp function.
+    Static Python values (functions, ints) and int32 structure arrays are
+    captured in the closure.  Only differentiable JAX arrays (weights,
+    output_weights, x) are passed as arguments to the custom_vjp function,
+    so the backward returns only 3 cotangents instead of 9.
+
+    outgoing_weights is float32 but captured in the closure (not an argument),
+    so it receives no gradients. It must be synced from incoming weights via
+    sync_outgoing_weights() after each optimizer step.
     """
 
     @jax.custom_vjp
-    def dynamic_forward(weights, output_weights, x,
-                        input_indices, unit_mask, activation_indices, output_mask,
-                        outgoing_unit_indices, outgoing_conn_indices):
+    def dynamic_forward(weights, output_weights, x):
         output, buffer, _pre_acts = _forward_impl(
             weights, output_weights, x,
             input_indices, unit_mask, activation_indices, output_mask,
@@ -72,9 +79,7 @@ def _make_dynamic_forward(activation_fns, activation_deriv_fns,
         )
         return output, buffer
 
-    def dynamic_forward_fwd(weights, output_weights, x,
-                            input_indices, unit_mask, activation_indices, output_mask,
-                            outgoing_unit_indices, outgoing_conn_indices):
+    def dynamic_forward_fwd(weights, output_weights, x):
         output, buffer, pre_acts = _forward_impl(
             weights, output_weights, x,
             input_indices, unit_mask, activation_indices, output_mask,
@@ -82,15 +87,11 @@ def _make_dynamic_forward(activation_fns, activation_deriv_fns,
             activation_fns, activation_deriv_fns,
             input_dim, max_layers, max_units_per_layer, buffer_size,
         )
-        residuals = (buffer, pre_acts, weights, output_weights,
-                     input_indices, unit_mask, activation_indices, output_mask,
-                     outgoing_unit_indices, outgoing_conn_indices)
+        residuals = (buffer, pre_acts, weights, output_weights)
         return (output, buffer), residuals
 
     def dynamic_forward_bwd(residuals, g):
-        (buffer, pre_acts, weights, output_weights,
-         input_indices, unit_mask, activation_indices, output_mask,
-         outgoing_unit_indices, outgoing_conn_indices) = residuals
+        buffer, pre_acts, weights, output_weights = residuals
         grad_output, grad_buffer = g
 
         # --- Output layer ---
@@ -127,27 +128,17 @@ def _make_dynamic_forward(activation_fns, activation_deriv_fns,
                 grad_pre_act[:, None] * gathered * conn_mask
             )
 
-            # 4. Buffer gradient via OUTGOING indices (GATHER, not scatter!)
+            # 4. Buffer gradient propagation (gather from pre-arranged outgoing weights)
             out_u = outgoing_unit_indices[l]  # (buffer_size, max_fan_out)
-            out_c = outgoing_conn_indices[l]  # (buffer_size, max_fan_out)
             out_mask = (out_u >= 0).astype(jnp.float32)
             safe_u = jnp.maximum(out_u, 0)
-            safe_c = jnp.maximum(out_c, 0)
-
-            contrib = grad_pre_act[safe_u] * weights[l, safe_u, safe_c] * out_mask
+            contrib = grad_pre_act[safe_u] * outgoing_weights[l] * out_mask
             grad_buffer = grad_buffer + contrib.sum(axis=-1)
 
         # 5. Input gradient
         grad_x = grad_buffer[:input_dim]
 
-        # Return cotangents for all 9 arguments (zeros for int32 structure arrays)
-        return (grad_weights, grad_output_weights, grad_x,
-                jnp.zeros_like(input_indices, dtype=jnp.float32),
-                jnp.zeros_like(unit_mask, dtype=jnp.float32),
-                jnp.zeros_like(activation_indices, dtype=jnp.float32),
-                jnp.zeros_like(output_mask, dtype=jnp.float32),
-                jnp.zeros_like(outgoing_unit_indices, dtype=jnp.float32),
-                jnp.zeros_like(outgoing_conn_indices, dtype=jnp.float32))
+        return (grad_weights, grad_output_weights, grad_x)
 
     dynamic_forward.defvjp(dynamic_forward_fwd, dynamic_forward_bwd)
     return dynamic_forward
@@ -224,6 +215,7 @@ class DynamicNetwork(eqx.Module):
     output_mask: Array       # (output_dim, buffer_size)
     outgoing_unit_indices: Array  # (max_layers, buffer_size, max_fan_out)
     outgoing_conn_indices: Array  # (max_layers, buffer_size, max_fan_out)
+    outgoing_weights: Array      # (max_layers, buffer_size, max_fan_out)
 
     def __init__(
         self,
@@ -308,6 +300,10 @@ class DynamicNetwork(eqx.Module):
             fill_value=-1,
             dtype=jnp.int32,
         )
+        self.outgoing_weights = jnp.zeros(
+            (max_layers, self.buffer_size, self.max_fan_out),
+            dtype=jnp.float32,
+        )
 
     def __call__(self, x: Array) -> Tuple[Array, Array]:
         """Forward pass through the dynamic network.
@@ -324,13 +320,12 @@ class DynamicNetwork(eqx.Module):
             self.activation_fns, self.activation_deriv_fns,
             self.input_dim, self.max_layers,
             self.max_units_per_layer, self.buffer_size,
-        )
-        return fwd(
-            self.weights, self.output_weights, x,
             self.input_indices, self.unit_mask,
             self.activation_indices, self.output_mask,
             self.outgoing_unit_indices, self.outgoing_conn_indices,
+            jax.lax.stop_gradient(self.outgoing_weights),
         )
+        return fwd(self.weights, self.output_weights, x)
 
 
 def _build_outgoing_for_layer(
@@ -378,16 +373,19 @@ def _build_outgoing_for_layer(
 
     valid = sorted_active & (within_group < max_fan_out)
 
-    # Scatter into flattened (buffer_size, max_fan_out) arrays
+    # Scatter into flattened (buffer_size, max_fan_out) arrays.
+    # Use a trash slot at the end so invalid entries don't overwrite valid ones
+    # (JAX .at[].set with duplicate indices uses last-writer-wins).
+    out_size = buffer_size * max_fan_out
     flat_idx = sorted_src * max_fan_out + within_group
-    flat_idx = jnp.where(valid, flat_idx, 0)
+    flat_idx = jnp.where(valid, flat_idx, out_size)  # invalid → trash slot
 
-    out_u = jnp.full(buffer_size * max_fan_out, -1, dtype=jnp.int32)
-    out_c = jnp.full(buffer_size * max_fan_out, -1, dtype=jnp.int32)
+    out_u = jnp.full(out_size + 1, -1, dtype=jnp.int32)
+    out_c = jnp.full(out_size + 1, -1, dtype=jnp.int32)
     out_u = out_u.at[flat_idx].set(jnp.where(valid, sorted_u, -1))
     out_c = out_c.at[flat_idx].set(jnp.where(valid, sorted_c, -1))
 
-    return out_u.reshape(buffer_size, max_fan_out), out_c.reshape(buffer_size, max_fan_out)
+    return out_u[:out_size].reshape(buffer_size, max_fan_out), out_c[:out_size].reshape(buffer_size, max_fan_out)
 
 
 def build_outgoing_indices(network: DynamicNetwork) -> DynamicNetwork:
@@ -407,11 +405,31 @@ def build_outgoing_indices(network: DynamicNetwork) -> DynamicNetwork:
 
     out_u, out_c = jax.vmap(per_layer)(network.input_indices)
 
-    return eqx.tree_at(
+    network = eqx.tree_at(
         lambda n: (n.outgoing_unit_indices, n.outgoing_conn_indices),
         network,
         (out_u, out_c),
     )
+    return sync_outgoing_weights(network)
+
+
+def sync_outgoing_weights(network: DynamicNetwork) -> DynamicNetwork:
+    """Sync outgoing weights from incoming weights using outgoing index mapping.
+
+    Must be called after any weight update (optimizer step) or structural change.
+    Returns a new network with updated outgoing_weights array.
+    """
+    out_u = network.outgoing_unit_indices  # (L, buf, fan_out)
+    out_c = network.outgoing_conn_indices  # (L, buf, fan_out)
+    mask = (out_u >= 0).astype(jnp.float32)
+    safe_u = jnp.maximum(out_u, 0)
+    safe_c = jnp.maximum(out_c, 0)
+
+    def per_layer(w_l, u_l, c_l, m_l):
+        return w_l[u_l, c_l] * m_l
+
+    new_ow = jax.vmap(per_layer)(network.weights, safe_u, safe_c, mask)
+    return eqx.tree_at(lambda n: n.outgoing_weights, network, new_ow)
 
 
 def count_active_connections(network: DynamicNetwork) -> int:

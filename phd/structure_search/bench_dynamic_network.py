@@ -13,6 +13,7 @@ from phd.structure_search.dynamic_network import (
     DynamicNetwork,
     _build_outgoing_for_layer,
     build_outgoing_indices,
+    sync_outgoing_weights,
 )
 
 
@@ -95,14 +96,8 @@ def make_sparse_dynamic(input_dim, output_dim, n_layers, hidden_dim, key, connec
     # Calculate max units per layer needed
     max_units_per_layer = max(first_layer_units, units_per_remaining_layer, hidden_dim)
     
-    # max_fan_out: conservative estimate for random connectivity.
-    # Expected fan-out per source ≈ total_conns / n_sources.  Use 2x for headroom.
-    max_total_conns = max_units_per_layer * connections_per_unit
-    min_sources = min(input_dim, max_units_per_layer)
-    estimated_max_fan = min(2 * max_total_conns // max(min_sources, 1), max_units_per_layer)
-    estimated_max_fan = max(estimated_max_fan, connections_per_unit)
-
     # Create network with enough capacity
+    # max_fan_out matches connections_per_unit (symmetric: 32 in, 32 out)
     net = DynamicNetwork(
         input_dim=input_dim,
         output_dim=output_dim,
@@ -110,7 +105,7 @@ def make_sparse_dynamic(input_dim, output_dim, n_layers, hidden_dim, key, connec
         max_units_per_layer=max_units_per_layer,
         max_connections_per_unit=connections_per_unit,
         activations=('relu',),
-        max_fan_out=estimated_max_fan,
+        max_fan_out=connections_per_unit,
         key=key,
     )
     
@@ -328,13 +323,41 @@ def run_benchmark(input_dim, output_dim, n_layers, hidden_dim, batch_size):
     dyn_rebuild_ms = bench_rebuild(dyn)
     dyn_sparse_rebuild_ms = bench_rebuild(dyn_sparse)
 
-    dyn_total = dyn_rebuild_ms + dyn_grad_ms
-    dyn_sparse_total = dyn_sparse_rebuild_ms + dyn_sparse_grad_ms
+    # sync_outgoing_weights standalone
+    def bench_sync(net, warmup=5, iters=200):
+        sync_fn = jax.jit(sync_outgoing_weights)
+        for _ in range(warmup):
+            sync_fn(net)
+        jax.block_until_ready(sync_fn(net).outgoing_weights)
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            result = sync_fn(net)
+        jax.block_until_ready(result.outgoing_weights)
+        return (time.perf_counter() - t0) / iters * 1000
 
-    print(f"\nRebuild + forward + backward:")
+    dyn_sync_ms = bench_sync(dyn)
+    dyn_sparse_sync_ms = bench_sync(dyn_sparse)
+
+    print(f"\nSync outgoing weights:")
+    print(fmt("DynamicNet (dense)", dyn_sync_ms, dyn_sync_ms / mlp_grad_ms))
+    print(fmt("DynamicNet (sparse)", dyn_sparse_sync_ms, dyn_sparse_sync_ms / mlp_grad_ms))
+
+    dyn_total = dyn_rebuild_ms + dyn_sync_ms + dyn_grad_ms
+    dyn_sparse_total = dyn_sparse_rebuild_ms + dyn_sparse_sync_ms + dyn_sparse_grad_ms
+
+    print(f"\nRebuild + sync + forward + backward:")
     print(fmt("MLP", mlp_grad_ms, 1.0))
     print(fmt("DynamicNet (dense)", dyn_total, dyn_total / mlp_grad_ms))
     print(fmt("DynamicNet (sparse)", dyn_sparse_total, dyn_sparse_total / mlp_grad_ms))
+
+    # Per-step cost (sync only — rebuild is amortized over structure changes)
+    dyn_step = dyn_sync_ms + dyn_grad_ms
+    dyn_sparse_step = dyn_sparse_sync_ms + dyn_sparse_grad_ms
+
+    print(f"\nSync + forward + backward (per-step cost):")
+    print(fmt("MLP", mlp_grad_ms, 1.0))
+    print(fmt("DynamicNet (dense)", dyn_step, dyn_step / mlp_grad_ms))
+    print(fmt("DynamicNet (sparse)", dyn_sparse_step, dyn_sparse_step / mlp_grad_ms))
 
 
 if __name__ == '__main__':
