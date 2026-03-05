@@ -265,7 +265,6 @@ def run_experiment(
         pbar.update(log_freq)
         pbar.set_postfix({
             'loss': f'{mean_loss:.4f}', 'game': game_name,
-            'updates': update_step,
         })
 
         # Reinitialize at game boundaries if enabled

@@ -3,7 +3,7 @@ sweep_name: upgd_sweep_v1
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
-command: python train.py
+command: python train.py --config-name=all_games_config
 algorithm: grid
 
 spec:
@@ -12,14 +12,10 @@ spec:
 
 plots: [best_hyperparameters, sensitivity]
 plot_params:
-  metrics: [asymptotic_loss, average_loss]
+  metrics: average_loss
 
 parameters:
   mlflow: true
-
-  model.type: resnet
-  model.width_scale: 1.0
-  model.n_conv_sequences: 3
 
   optimizer.name: upgd
 

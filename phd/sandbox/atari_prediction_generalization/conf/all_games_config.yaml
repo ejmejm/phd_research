@@ -10,11 +10,35 @@ comet_ml: false
 # Dataset
 dataset:
   data_dir: ${oc.env:HOME}/local_projects/continual_atari_benchmark/dataset/data
-  steps_per_game: 20_000
+  steps_per_game: 500_000
   data_seed: 0
   game_order:
-    - ALE/Pong-v5
+    - ALE/Alien-v5
+    - ALE/Amidar-v5
+    - ALE/Assault-v5
+    - ALE/Asterix-v5
+    - ALE/BankHeist-v5
+    - ALE/BattleZone-v5
+    - ALE/Boxing-v5
     - ALE/Breakout-v5
+    - ALE/ChopperCommand-v5
+    - ALE/CrazyClimber-v5
+    - ALE/DemonAttack-v5
+    - ALE/Freeway-v5
+    - ALE/Frostbite-v5
+    - ALE/Gopher-v5
+    - ALE/Hero-v5
+    - ALE/Jamesbond-v5
+    - ALE/Kangaroo-v5
+    - ALE/Krull-v5
+    - ALE/KungFuMaster-v5
+    - ALE/MsPacman-v5
+    - ALE/Pong-v5
+    - ALE/PrivateEye-v5
+    - ALE/Qbert-v5
+    - ALE/RoadRunner-v5
+    - ALE/Seaquest-v5
+    - ALE/UpNDown-v5
 
 # Model
 model:
@@ -48,11 +72,11 @@ preprocessing:
 
 # Training
 train:
-  total_steps: 200_000
-  log_freq: 1000
+  total_steps: 13_000_000
+  log_freq: 5000
   batch_size: 1
   reinit_at_game_boundary: false
 
 # Seed: single int or list of ints for multi-seed
-seed: null
+seed: [1, 2, 3, 4, 5]
 log_individual_seeds: true
