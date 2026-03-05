@@ -17,7 +17,6 @@ from phd.jax_core.models import lecun_uniform, ACTIVATION_MAP
 def _forward_impl(
     weights, output_weights, x,
     input_indices, unit_mask, activation_indices, output_mask,
-    outgoing_unit_indices, outgoing_conn_indices,
     activation_fns, activation_deriv_fns,
     input_dim, max_layers, max_units_per_layer, buffer_size,
 ):
@@ -54,8 +53,7 @@ def _forward_impl(
 def _make_dynamic_forward(activation_fns, activation_deriv_fns,
                           input_dim, max_layers, max_units_per_layer, buffer_size,
                           input_indices, unit_mask, activation_indices, output_mask,
-                          outgoing_unit_indices, outgoing_conn_indices,
-                          outgoing_weights):
+                          outgoing_unit_indices, outgoing_weights):
     """Create a custom_vjp forward function with config and structure bound.
 
     Static Python values (functions, ints) and int32 structure arrays are
@@ -73,7 +71,6 @@ def _make_dynamic_forward(activation_fns, activation_deriv_fns,
         output, buffer, _pre_acts = _forward_impl(
             weights, output_weights, x,
             input_indices, unit_mask, activation_indices, output_mask,
-            outgoing_unit_indices, outgoing_conn_indices,
             activation_fns, activation_deriv_fns,
             input_dim, max_layers, max_units_per_layer, buffer_size,
         )
@@ -83,7 +80,6 @@ def _make_dynamic_forward(activation_fns, activation_deriv_fns,
         output, buffer, pre_acts = _forward_impl(
             weights, output_weights, x,
             input_indices, unit_mask, activation_indices, output_mask,
-            outgoing_unit_indices, outgoing_conn_indices,
             activation_fns, activation_deriv_fns,
             input_dim, max_layers, max_units_per_layer, buffer_size,
         )
@@ -142,42 +138,6 @@ def _make_dynamic_forward(activation_fns, activation_deriv_fns,
 
     dynamic_forward.defvjp(dynamic_forward_fwd, dynamic_forward_bwd)
     return dynamic_forward
-
-
-def _dynamic_forward_plain(
-    weights, output_weights, x,
-    input_indices, unit_mask, activation_indices, output_mask,
-    activation_fns,
-    input_dim, max_layers, max_units_per_layer, buffer_size,
-):
-    """Forward pass WITHOUT custom VJP (for testing gradient correctness)."""
-    buffer = jnp.zeros(buffer_size)
-    buffer = buffer.at[:input_dim].set(x)
-
-    offsets = jnp.arange(max_layers) * max_units_per_layer + input_dim
-
-    def layer_step(buffer, layer_data):
-        w, idx, u_mask, act_idx, offset = layer_data
-        safe_idx = jnp.maximum(idx, 0)
-        conn_mask = (idx >= 0).astype(jnp.float32)
-        gathered = jnp.take(buffer, safe_idx, mode='clip')
-        pre_act = (gathered * conn_mask * w).sum(axis=-1)
-
-        def apply_activation(i, val):
-            return jax.lax.switch(i, activation_fns, val)
-
-        post_act = jax.vmap(apply_activation)(act_idx, pre_act)
-        post_act = post_act * u_mask.astype(jnp.float32)
-        buffer = jax.lax.dynamic_update_slice(buffer, post_act, (offset,))
-        return buffer, None
-
-    scan_data = (weights, input_indices, unit_mask, activation_indices, offsets)
-    buffer, _ = jax.lax.scan(
-        layer_step, buffer, scan_data, unroll=min(max_layers, 5),
-    )
-
-    output = (output_weights * output_mask.astype(jnp.float32)) @ buffer
-    return output, buffer
 
 
 class DynamicNetwork(eqx.Module):
@@ -322,7 +282,7 @@ class DynamicNetwork(eqx.Module):
             self.max_units_per_layer, self.buffer_size,
             self.input_indices, self.unit_mask,
             self.activation_indices, self.output_mask,
-            self.outgoing_unit_indices, self.outgoing_conn_indices,
+            self.outgoing_unit_indices,
             jax.lax.stop_gradient(self.outgoing_weights),
         )
         return fwd(self.weights, self.output_weights, x)

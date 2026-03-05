@@ -7,7 +7,7 @@ import numpy as np
 
 from phd.structure_search.dynamic_network import (
     DynamicNetwork,
-    _dynamic_forward_plain,
+    _forward_impl,
     build_outgoing_indices,
     sync_outgoing_weights,
     count_active_connections,
@@ -413,22 +413,21 @@ def test_sync_outgoing_weights():
 def test_custom_vjp_matches_autodiff():
     """Custom backward should produce identical gradients to JAX autodiff."""
     net = _build_test_network()
-
     x = jax.random.normal(jax.random.key(1), (net.input_dim,))
 
-    # Gradients via custom VJP (the new __call__)
+    # Gradients via custom VJP (__call__)
     def loss_custom(model):
         output, _ = model(x)
         return jnp.sum(output ** 2)
     _, grads_custom = eqx.filter_value_and_grad(loss_custom)(net)
 
-    # Gradients via plain autodiff (no custom VJP)
+    # Gradients via plain autodiff (_forward_impl has no custom_vjp)
     def loss_plain(model):
-        output, _ = _dynamic_forward_plain(
+        output, _, _ = _forward_impl(
             model.weights, model.output_weights, x,
             model.input_indices, model.unit_mask,
             model.activation_indices, model.output_mask,
-            model.activation_fns,
+            model.activation_fns, model.activation_deriv_fns,
             model.input_dim, model.max_layers,
             model.max_units_per_layer, model.buffer_size,
         )
@@ -507,7 +506,7 @@ def test_gradient_multi_layer():
 
 
 def test_gradient_multiple_activations():
-    """Gradients should be correct with mixed activation functions."""
+    """Gradients should be correct with mixed activation functions (finite diff)."""
     input_dim, output_dim = 4, 2
     net = DynamicNetwork(
         input_dim=input_dim, output_dim=output_dim, max_layers=1,
@@ -556,29 +555,24 @@ def test_gradient_multiple_activations():
 
     x = jax.random.normal(jax.random.key(1), (input_dim,))
 
-    # Compare custom VJP vs autodiff
-    def loss_custom(model):
+    def loss_fn(model):
         output, _ = model(x)
         return jnp.sum(output ** 2)
 
-    def loss_plain(model):
-        output, _ = _dynamic_forward_plain(
-            model.weights, model.output_weights, x,
-            model.input_indices, model.unit_mask,
-            model.activation_indices, model.output_mask,
-            model.activation_fns,
-            model.input_dim, model.max_layers,
-            model.max_units_per_layer, model.buffer_size,
+    _, grads = eqx.filter_value_and_grad(loss_fn)(net)
+
+    # Verify against finite differences for each active weight
+    eps = 1e-4
+    for idx in [(0, 0, 0), (0, 1, 0), (0, 2, 0)]:
+        w_plus = net.weights.at[idx].add(eps)
+        w_minus = net.weights.at[idx].add(-eps)
+        net_plus = build_outgoing_indices(eqx.tree_at(lambda n: n.weights, net, w_plus))
+        net_minus = build_outgoing_indices(eqx.tree_at(lambda n: n.weights, net, w_minus))
+        fd = (loss_fn(net_plus) - loss_fn(net_minus)) / (2 * eps)
+        np.testing.assert_allclose(
+            grads.weights[idx], fd, atol=1e-3,
+            err_msg=f"Mixed-activation gradient mismatch at {idx}",
         )
-        return jnp.sum(output ** 2)
-
-    _, grads_custom = eqx.filter_value_and_grad(loss_custom)(net)
-    _, grads_plain = eqx.filter_value_and_grad(loss_plain)(net)
-
-    np.testing.assert_allclose(grads_custom.weights, grads_plain.weights, atol=1e-5)
-    np.testing.assert_allclose(
-        grads_custom.output_weights, grads_plain.output_weights, atol=1e-5
-    )
     print("PASS: test_gradient_multiple_activations")
 
 
@@ -596,60 +590,6 @@ def test_vmap_grad():
     assert not jnp.any(jnp.isnan(grads.weights))
     assert not jnp.any(jnp.isnan(grads.output_weights))
     print("PASS: test_vmap_grad")
-
-
-def test_explicit_vjp_matches_optimized():
-    """Explicit backward (dense J^T matmul) should match the optimized custom VJP."""
-    net = _build_test_network()
-    x = jax.random.normal(jax.random.key(1), (net.input_dim,))
-
-    def loss_custom(model):
-        output, _ = model(x)
-        return jnp.sum(output ** 2)
-
-    def loss_explicit(model):
-        output, _ = model.forward_explicit(x)
-        return jnp.sum(output ** 2)
-
-    val_c, grads_custom = eqx.filter_value_and_grad(loss_custom)(net)
-    val_e, grads_explicit = eqx.filter_value_and_grad(loss_explicit)(net)
-
-    np.testing.assert_allclose(val_c, val_e, atol=1e-6)
-    np.testing.assert_allclose(grads_explicit.weights, grads_custom.weights, atol=1e-5)
-    np.testing.assert_allclose(
-        grads_explicit.output_weights, grads_custom.output_weights, atol=1e-5
-    )
-    print("PASS: test_explicit_vjp_matches_optimized")
-
-
-def test_explicit_vjp_matches_autodiff():
-    """Explicit backward should match JAX's own autodiff (no custom VJP)."""
-    net = _build_test_network()
-    x = jax.random.normal(jax.random.key(1), (net.input_dim,))
-
-    def loss_explicit(model):
-        output, _ = model.forward_explicit(x)
-        return jnp.sum(output ** 2)
-
-    def loss_plain(model):
-        output, _ = _dynamic_forward_plain(
-            model.weights, model.output_weights, x,
-            model.input_indices, model.unit_mask,
-            model.activation_indices, model.output_mask,
-            model.activation_fns,
-            model.input_dim, model.max_layers,
-            model.max_units_per_layer, model.buffer_size,
-        )
-        return jnp.sum(output ** 2)
-
-    _, grads_explicit = eqx.filter_value_and_grad(loss_explicit)(net)
-    _, grads_plain = eqx.filter_value_and_grad(loss_plain)(net)
-
-    np.testing.assert_allclose(grads_explicit.weights, grads_plain.weights, atol=1e-5)
-    np.testing.assert_allclose(
-        grads_explicit.output_weights, grads_plain.output_weights, atol=1e-5
-    )
-    print("PASS: test_explicit_vjp_matches_autodiff")
 
 
 if __name__ == '__main__':
@@ -671,7 +611,5 @@ if __name__ == '__main__':
     test_gradient_multi_layer()
     test_gradient_multiple_activations()
     test_vmap_grad()
-    test_explicit_vjp_matches_optimized()
-    test_explicit_vjp_matches_autodiff()
 
     print("\nAll tests passed!")

@@ -6,13 +6,12 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from functools import partial
-
 from phd.jax_core.models import MLP
 from phd.structure_search.dynamic_network import (
     DynamicNetwork,
-    _build_outgoing_for_layer,
     build_outgoing_indices,
+    count_active_connections,
+    count_active_units,
     sync_outgoing_weights,
 )
 
@@ -218,20 +217,6 @@ def bench(fn, x, warmup=5, iters=200):
     return elapsed / iters * 1000
 
 
-def bench_grad(fn, x, warmup=5, iters=200):
-    """Time a jitted grad function. Returns mean ms per call."""
-    for _ in range(warmup):
-        _ = fn(x)
-    jax.block_until_ready(fn(x))
-
-    t0 = time.perf_counter()
-    for _ in range(iters):
-        result = fn(x)
-    jax.block_until_ready(result)
-    elapsed = time.perf_counter() - t0
-    return elapsed / iters * 1000
-
-
 def run_benchmark(input_dim, output_dim, n_layers, hidden_dim, batch_size):
     key = jax.random.key(0)
     print(f"\n{'='*60}")
@@ -255,6 +240,27 @@ def run_benchmark(input_dim, output_dim, n_layers, hidden_dim, batch_size):
     # Sparse DynamicNetwork (32 connections per unit)
     dyn_sparse = make_sparse_dynamic(input_dim, output_dim, n_layers, hidden_dim, key, connections_per_unit=32)
 
+    # Model stats
+    def count_allocated(model):
+        """Total allocated float array capacity (includes padding)."""
+        return sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_inexact_array)))
+
+    mlp_hidden = sum(l.weight.shape[0] for l in mlp.layers[:-1])
+    mlp_params = count_allocated(mlp)
+
+    dyn_hidden = count_active_units(dyn)
+    dyn_conns = count_active_connections(dyn)
+    dyn_alloc = count_allocated(dyn)
+
+    dyn_sparse_hidden = count_active_units(dyn_sparse)
+    dyn_sparse_conns = count_active_connections(dyn_sparse)
+    dyn_sparse_alloc = count_allocated(dyn_sparse)
+
+    print(f"\nModel stats:")
+    print(f"  {'MLP':<24s} {mlp_hidden:>6} hidden units, {mlp_params:>10,} params")
+    print(f"  {'DynamicNet (dense)':<24s} {dyn_hidden:>6} hidden units, {dyn_conns:>10,} connections, {dyn_alloc:>10,} allocated")
+    print(f"  {'DynamicNet (sparse)':<24s} {dyn_sparse_hidden:>6} hidden units, {dyn_sparse_conns:>10,} connections, {dyn_sparse_alloc:>10,} allocated")
+
     x = jax.random.normal(jax.random.key(1), (batch_size, input_dim))
 
     # Forward pass
@@ -275,49 +281,33 @@ def run_benchmark(input_dim, output_dim, n_layers, hidden_dim, batch_size):
     print(fmt("DynamicNet (sparse)", dyn_sparse_ms, dyn_sparse_ms / mlp_ms))
 
     # Forward + backward
-    def mlp_loss(model, x):
+    def loss_fn(model, x):
         out, _ = jax.vmap(model)(x)
         return jnp.mean(out ** 2)
 
-    def dyn_loss(model, x):
-        out, _ = jax.vmap(model)(x)
-        return jnp.mean(out ** 2)
+    mlp_grad_fn = jax.jit(lambda x: eqx.filter_value_and_grad(loss_fn)(mlp, x))
+    dyn_grad_fn = jax.jit(lambda x: eqx.filter_value_and_grad(loss_fn)(dyn, x))
+    dyn_sparse_grad_fn = jax.jit(lambda x: eqx.filter_value_and_grad(loss_fn)(dyn_sparse, x))
 
-    mlp_grad_fn = jax.jit(lambda x: eqx.filter_value_and_grad(mlp_loss)(mlp, x))
-    dyn_grad_fn = jax.jit(lambda x: eqx.filter_value_and_grad(dyn_loss)(dyn, x))
-    dyn_sparse_grad_fn = jax.jit(lambda x: eqx.filter_value_and_grad(dyn_loss)(dyn_sparse, x))
-
-    mlp_grad_ms = bench_grad(mlp_grad_fn, x)
-    dyn_grad_ms = bench_grad(dyn_grad_fn, x)
-    dyn_sparse_grad_ms = bench_grad(dyn_sparse_grad_fn, x)
+    mlp_grad_ms = bench(mlp_grad_fn, x)
+    dyn_grad_ms = bench(dyn_grad_fn, x)
+    dyn_sparse_grad_ms = bench(dyn_sparse_grad_fn, x)
 
     print(f"\nForward + backward:")
     print(fmt("MLP", mlp_grad_ms, 1.0))
     print(fmt("DynamicNet (dense)", dyn_grad_ms, dyn_grad_ms / mlp_grad_ms))
     print(fmt("DynamicNet (sparse)", dyn_sparse_grad_ms, dyn_sparse_grad_ms / mlp_grad_ms))
 
-    # build_outgoing_indices standalone (with input_indices as dynamic/traced)
-    def make_rebuild_fn(net):
-        @partial(jax.jit, static_argnums=(1, 2, 3, 4))
-        def rebuild_fn(input_indices, max_units, max_conns, buf_size, max_fan):
-            def per_layer(input_indices_l):
-                return _build_outgoing_for_layer(
-                    input_indices_l, max_units, max_conns, buf_size, max_fan,
-                )
-            return jax.vmap(per_layer)(input_indices)
-        return rebuild_fn
-
+    # build_outgoing_indices standalone (includes sync)
     def bench_rebuild(net, warmup=5, iters=200):
-        rebuild_fn = make_rebuild_fn(net)
-        args = (net.input_indices, net.max_units_per_layer,
-                net.max_connections_per_unit, net.buffer_size, net.max_fan_out)
+        rebuild_fn = jax.jit(build_outgoing_indices)
         for _ in range(warmup):
-            rebuild_fn(*args)
-        jax.block_until_ready(rebuild_fn(*args))
+            rebuild_fn(net)
+        jax.block_until_ready(rebuild_fn(net).outgoing_weights)
         t0 = time.perf_counter()
         for _ in range(iters):
-            result = rebuild_fn(*args)
-        jax.block_until_ready(result)
+            result = rebuild_fn(net)
+        jax.block_until_ready(result.outgoing_weights)
         return (time.perf_counter() - t0) / iters * 1000
 
     dyn_rebuild_ms = bench_rebuild(dyn)
