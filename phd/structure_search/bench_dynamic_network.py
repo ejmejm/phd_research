@@ -66,138 +66,97 @@ def make_fully_connected_dynamic(input_dim, output_dim, n_layers, hidden_dim, ke
     return build_outgoing_indices(net)
 
 
-def make_sparse_dynamic(input_dim, output_dim, n_layers, hidden_dim, key, connections_per_unit=32):
-    """Create a DynamicNetwork with 32 random connections per hidden unit,
-    matching the total number of connections in an equivalent dense MLP.
-    
-    This requires more hidden units than the dense network to compensate for
-    the reduced connections per unit.
+def make_sparse_dynamic(input_dim, output_dim, n_layers, hidden_dim, key,
+                        max_connections_per_unit=64):
+    """Create a DynamicNetwork with variable random connections per unit.
+
+    Each unit gets a random number of connections drawn uniformly from
+    [1, max_connections_per_unit]. The number of units per layer is chosen
+    so the total connections approximately match an equivalent dense MLP.
+    All hidden units in the last layer are connected to every output.
     """
-    # Calculate total hidden connections in dense MLP
-    # Input to first hidden: input_dim * hidden_dim
-    # Hidden to hidden: (n_layers - 1) * hidden_dim * hidden_dim
-    dense_hidden_connections = input_dim * hidden_dim + (n_layers - 1) * hidden_dim * hidden_dim
-    
-    # Calculate how many hidden units we need to match this
-    total_hidden_units_needed = (dense_hidden_connections + connections_per_unit - 1) // connections_per_unit
-    
-    # Distribute units across layers proportionally
-    # First layer gets input_dim * hidden_dim / connections_per_unit units
-    first_layer_units = (input_dim * hidden_dim + connections_per_unit - 1) // connections_per_unit
-    remaining_units = total_hidden_units_needed - first_layer_units
-    
-    # Remaining layers share the rest (distribute evenly)
-    if n_layers > 1:
-        units_per_remaining_layer = (remaining_units + n_layers - 2) // (n_layers - 1)
-    else:
-        units_per_remaining_layer = 0
-    
-    # Calculate max units per layer needed
-    max_units_per_layer = max(first_layer_units, units_per_remaining_layer, hidden_dim)
-    
-    # Create network with enough capacity
-    # max_fan_out matches connections_per_unit (symmetric: 32 in, 32 out)
+    # MLP params: input->hidden + (n_layers-1)*hidden->hidden + hidden->output
+    mlp_params = (input_dim * hidden_dim + (n_layers - 1) * hidden_dim * hidden_dim
+                  + hidden_dim * output_dim)
+
+    # Average connections per unit: E[Uniform(1, max)] for hidden + 1 output connection
+    avg_conns_per_unit = (1 + max_connections_per_unit) / 2 + output_dim
+
+    # Total units, split evenly across layers
+    total_units = max(n_layers, round(mlp_params / avg_conns_per_unit))
+    units_per_layer = max(1, total_units // n_layers)
+    max_units_per_layer = units_per_layer
+
     net = DynamicNetwork(
         input_dim=input_dim,
         output_dim=output_dim,
         max_layers=n_layers,
         max_units_per_layer=max_units_per_layer,
-        max_connections_per_unit=connections_per_unit,
+        max_connections_per_unit=max_connections_per_unit,
         activations=('relu',),
-        max_fan_out=connections_per_unit,
+        max_fan_out=max_connections_per_unit,
         key=key,
     )
-    
-    # Activate units in each layer
+
+    # Activate all units in each layer
     unit_mask = jnp.zeros_like(net.unit_mask)
-    if n_layers > 0:
-        unit_mask = unit_mask.at[0, :first_layer_units].set(1)
-        for l in range(1, n_layers):
-            unit_mask = unit_mask.at[l, :units_per_remaining_layer].set(1)
-    net = eqx.tree_at(lambda n: n.unit_mask, net, unit_mask)
-    
-    # Wire up connections randomly
     for l in range(n_layers):
-        # Determine how many units are active in this layer
+        unit_mask = unit_mask.at[l, :units_per_layer].set(1)
+    net = eqx.tree_at(lambda n: n.unit_mask, net, unit_mask)
+
+    # Wire up connections with variable fan-in per unit
+    for l in range(n_layers):
+        n_units = units_per_layer
+
+        # Available sources: previous layer only
         if l == 0:
-            n_units = first_layer_units
-        else:
-            n_units = units_per_remaining_layer
-        
-        # Get available source indices (match dense: each layer connects only to immediate previous layer)
-        if l == 0:
-            # First layer: only connect to inputs
             available_sources = jnp.arange(input_dim)
         else:
-            # Later layers: connect only to previous layer (matching dense MLP structure)
-            if l == 1:
-                # Connect to first layer
-                prev_offset = input_dim
-                prev_units = first_layer_units
-            else:
-                # Connect to previous hidden layer
-                prev_offset = input_dim + (l - 1) * max_units_per_layer
-                prev_units = units_per_remaining_layer
-            available_sources = jnp.arange(prev_offset, prev_offset + prev_units)
-        
-        # Randomly select connections_per_unit connections for each unit (vectorized)
+            prev_offset = input_dim + (l - 1) * max_units_per_layer
+            available_sources = jnp.arange(prev_offset, prev_offset + units_per_layer)
         n_available = available_sources.shape[0]
-        
-        # Generate all random keys at once
+
+        # Random keys for each unit
         conn_keys = jax.random.split(jax.random.fold_in(key, l * 1000), n_units)
         weight_keys = jax.random.split(jax.random.fold_in(key, l * 2000), n_units)
-        
-        # Helper function to generate weights for a single unit
-        def generate_weights(w_key, n_conns):
-            return jax.random.normal(w_key, (n_conns,)) * 0.01
-        
-        if n_available <= connections_per_unit:
-            # Use all available connections for all units (just repeat)
-            selected_indices = jnp.tile(available_sources[None, :], (n_units, 1))
-            # Pad with -1 to match connections_per_unit
-            padding = jnp.full((n_units, connections_per_unit - n_available), -1, dtype=jnp.int32)
-            idx_partial = jnp.concatenate([selected_indices, padding], axis=1)
-            # Create full idx array and set the active units
-            idx = jnp.full((max_units_per_layer, connections_per_unit), -1, dtype=jnp.int32)
-            idx = idx.at[:n_units, :].set(idx_partial)
-            # Generate weights for all units at once using vmap
-            w_vals = jax.vmap(lambda k: generate_weights(k, n_available))(weight_keys)
-            w_padding = jnp.zeros((n_units, connections_per_unit - n_available), dtype=jnp.float32)
-            w_partial = jnp.concatenate([w_vals, w_padding], axis=1)
-            w = jnp.zeros((max_units_per_layer, connections_per_unit), dtype=jnp.float32)
-            w = w.at[:n_units, :].set(w_partial)
-        else:
-            # Vectorized random sampling for all units
-            def sample_connections(conn_key):
-                selected = jax.random.choice(
-                    conn_key, available_sources, shape=(connections_per_unit,), replace=False
-                )
-                return jnp.sort(selected)
-            
-            # Use vmap to sample for all units at once
-            selected_indices = jax.vmap(sample_connections)(conn_keys)
-            idx = jnp.full((max_units_per_layer, connections_per_unit), -1, dtype=jnp.int32)
-            idx = idx.at[:n_units, :].set(selected_indices)
-            
-            # Generate weights for all units at once using vmap
-            w_vals = jax.vmap(lambda k: generate_weights(k, connections_per_unit))(weight_keys)
-            w = jnp.zeros((max_units_per_layer, connections_per_unit), dtype=jnp.float32)
-            w = w.at[:n_units, :].set(w_vals)
-        
-        net = eqx.tree_at(
-            lambda n: n.input_indices,
-            net,
-            net.input_indices.at[l].set(idx),
+
+        # Sample random number of connections per unit: Uniform(1, max_connections)
+        # Clamp to n_available if the previous layer is small
+        max_possible = min(max_connections_per_unit, n_available)
+        n_conns_per_unit = jax.random.randint(
+            jax.random.fold_in(key, l * 3000),
+            shape=(n_units,), minval=1, maxval=max_possible + 1,
         )
+
+        # For each unit: sample n_conns sources, pad rest with -1
+        def sample_unit(conn_key, w_key, n_conns):
+            # Sample max_possible indices, then mask to n_conns
+            perm = jax.random.permutation(conn_key, n_available)[:max_possible]
+            sources = available_sources[perm]
+            sources = jnp.sort(sources)
+            # Mask: keep first n_conns, rest become -1
+            slot_idx = jnp.arange(max_connections_per_unit)
+            idx = jnp.where(slot_idx < n_conns, sources[slot_idx % max_possible], -1)
+            # Weights
+            w = jax.random.normal(w_key, (max_connections_per_unit,)) * 0.01
+            w = jnp.where(slot_idx < n_conns, w, 0.0)
+            return idx, w
+
+        all_idx, all_w = jax.vmap(sample_unit)(conn_keys, weight_keys, n_conns_per_unit)
+
+        # Place into full arrays
+        idx = jnp.full((max_units_per_layer, max_connections_per_unit), -1, dtype=jnp.int32)
+        idx = idx.at[:n_units].set(all_idx)
+        w = jnp.zeros((max_units_per_layer, max_connections_per_unit), dtype=jnp.float32)
+        w = w.at[:n_units].set(all_w)
+
+        net = eqx.tree_at(lambda n: n.input_indices, net, net.input_indices.at[l].set(idx))
         net = eqx.tree_at(lambda n: n.weights, net, net.weights.at[l].set(w))
-    
-    # Wire last layer units to outputs (match dense: hidden_dim units to all outputs)
-    # Dense has hidden_dim * output_dim output connections
-    # We connect hidden_dim units from last layer to all outputs to match this
+
+    # Connect all hidden units in last layer to every output
     if n_layers > 0:
         last_offset = input_dim + (n_layers - 1) * max_units_per_layer
-        # Connect only hidden_dim units to match dense network's output connections
-        out_mask = net.output_mask.at[:, last_offset:last_offset + hidden_dim].set(1)
+        out_mask = net.output_mask.at[:, last_offset:last_offset + units_per_layer].set(1)
         net = eqx.tree_at(lambda n: n.output_mask, net, out_mask)
 
     return build_outgoing_indices(net)
@@ -238,7 +197,7 @@ def run_benchmark(input_dim, output_dim, n_layers, hidden_dim, batch_size):
     dyn = make_fully_connected_dynamic(input_dim, output_dim, n_layers, hidden_dim, key)
 
     # Sparse DynamicNetwork (32 connections per unit)
-    dyn_sparse = make_sparse_dynamic(input_dim, output_dim, n_layers, hidden_dim, key, connections_per_unit=32)
+    dyn_sparse = make_sparse_dynamic(input_dim, output_dim, n_layers, hidden_dim, key, max_connections_per_unit=64)
 
     # Model stats
     def count_allocated(model):
@@ -250,16 +209,18 @@ def run_benchmark(input_dim, output_dim, n_layers, hidden_dim, batch_size):
 
     dyn_hidden = count_active_units(dyn)
     dyn_conns = count_active_connections(dyn)
+    dyn_weights = dyn.weights.size + dyn.output_weights.size
     dyn_alloc = count_allocated(dyn)
 
     dyn_sparse_hidden = count_active_units(dyn_sparse)
     dyn_sparse_conns = count_active_connections(dyn_sparse)
+    dyn_sparse_weights = dyn_sparse.weights.size + dyn_sparse.output_weights.size
     dyn_sparse_alloc = count_allocated(dyn_sparse)
 
     print(f"\nModel stats:")
     print(f"  {'MLP':<24s} {mlp_hidden:>6} hidden units, {mlp_params:>10,} params")
-    print(f"  {'DynamicNet (dense)':<24s} {dyn_hidden:>6} hidden units, {dyn_conns:>10,} connections, {dyn_alloc:>10,} allocated")
-    print(f"  {'DynamicNet (sparse)':<24s} {dyn_sparse_hidden:>6} hidden units, {dyn_sparse_conns:>10,} connections, {dyn_sparse_alloc:>10,} allocated")
+    print(f"  {'DynamicNet (dense)':<24s} {dyn_hidden:>6} hidden units, {dyn_conns:>10,} connections, {dyn_weights:>10,} weights, {dyn_alloc:>10,} allocated")
+    print(f"  {'DynamicNet (sparse)':<24s} {dyn_sparse_hidden:>6} hidden units, {dyn_sparse_conns:>10,} connections, {dyn_sparse_weights:>10,} weights, {dyn_sparse_alloc:>10,} allocated")
 
     x = jax.random.normal(jax.random.key(1), (batch_size, input_dim))
 
