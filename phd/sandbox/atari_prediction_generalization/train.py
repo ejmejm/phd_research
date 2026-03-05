@@ -23,6 +23,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
 )
 from phd.jax_core.models import MLP
 from phd.jax_core.optimizers import EqxOptimizer
+from phd.sandbox.atari_prediction_generalization.resnet import ResNet
 from phd.jax_core.utils import tree_replace
 from phd.research_utils.logging import (
     init_experiment,
@@ -49,7 +50,7 @@ OUTPUT_DIM = 1  # Predicting scalar return
 # ---------------------------------------------------------------------------
 
 class TrainState(eqx.Module):
-    model: MLP
+    model: eqx.Module
     optimizer: EqxOptimizer
     step: jax.Array
     rng: PRNGKeyArray
@@ -91,6 +92,33 @@ def stack_pytrees(pytrees):
     return jax.tree.unflatten(treedef, stacked)
 
 
+def create_model(cfg: DictConfig, input_dim: int, *, key: PRNGKeyArray) -> eqx.Module:
+    """Create a model based on config."""
+    model_type = cfg.model.get('type', 'mlp')
+    if model_type == 'mlp':
+        return MLP(
+            input_dim=input_dim,
+            output_dim=OUTPUT_DIM,
+            n_layers=cfg.model.n_layers,
+            hidden_dim=cfg.model.hidden_dim,
+            weight_init_method=cfg.model.weight_init_method,
+            activation=cfg.model.activation,
+            n_frozen_layers=cfg.model.get('n_frozen_layers', 0),
+            key=key,
+        )
+    elif model_type == 'resnet':
+        pp = cfg.preprocessing
+        return ResNet(
+            in_channels=pp.frame_stack if pp.grayscale else pp.frame_stack * 3,
+            output_dim=OUTPUT_DIM,
+            width_scale=cfg.model.width_scale,
+            n_conv_sequences=cfg.model.n_conv_sequences,
+            key=key,
+        )
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+
 def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStream, int]:
     """Initialize per-seed models, optimizers, and data stream."""
     seeds = cfg.seed
@@ -102,18 +130,16 @@ def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStrea
     for seed in seeds:
         rng = jax.random.key(seed)
 
-        model = MLP(
-            input_dim=input_dim,
-            output_dim=OUTPUT_DIM,
-            n_layers=cfg.model.n_layers,
-            hidden_dim=cfg.model.hidden_dim,
-            weight_init_method=cfg.model.weight_init_method,
-            activation=cfg.model.activation,
-            n_frozen_layers=cfg.model.get('n_frozen_layers', 0),
-            key=rng_from_string(rng, 'model'),
-        )
+        model = create_model(cfg, input_dim, key=rng_from_string(rng, 'model'))
 
-        optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
+        # ResNet has no .layers/.n_frozen_layers; pass a filter_spec
+        # that marks all array leaves as trainable.
+        if cfg.model.get('type', 'mlp') == 'resnet':
+            filter_spec = jax.tree.map(eqx.is_array, model)
+        else:
+            filter_spec = None
+        optimizer = prepare_optimizer(
+            model, cfg.optimizer.name, cfg.optimizer, filter_spec=filter_spec)
 
         train_states.append(TrainState(
             model=model,
@@ -123,7 +149,8 @@ def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStrea
         ))
 
     n_params = count_params(train_states[0].model)
-    print(f'Model: MLP, Params: {n_params}, Seeds: {seeds}')
+    model_type = cfg.model.get('type', 'mlp')
+    print(f'Model: {model_type}, Params: {n_params}, Seeds: {seeds}')
 
     batched_state = stack_pytrees(train_states)
     return batched_state, stream, n_params
@@ -135,7 +162,7 @@ def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStrea
 
 def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
     """Single training step for jax.lax.scan."""
-    observations, targets = data  # (input_dim,), (1,)
+    observations, targets = data  # (input_dim,) or (C, H, W), (1,)
 
     def loss_fn(model):
         predictions, _ = model(observations)  # (1,)
@@ -198,10 +225,7 @@ def run_experiment(
         # Get preloaded batch (next preload starts automatically)
         obs, returns = loader.get()
 
-        # Transfer uint8 obs to GPU and normalize there (4x less data to transfer).
-        # NOTE: This uint8 -> float32 normalization assumes Atari image observations.
-        # Will need to be changed for non-image or pre-normalized data.
-        obs_jax = jnp.array(obs).astype(jnp.float32) / 255.0
+        obs_jax = jnp.array(obs)
         returns_jax = jnp.array(returns)
 
         # Data is shared across seeds (not vmapped) — only train_state is vmapped

@@ -158,7 +158,7 @@ class ContinualAtariStream:
         """Sample the next n_steps of sequential data.
 
         Returns:
-            observations: uint8 array (n_steps, input_dim), flattened
+            observations: float32 array (n_steps, C, H, W), normalized to [0, 1]
             returns: float32 array (n_steps, 1)
         """
         if self.current_step + n_steps > self.total_steps:
@@ -179,16 +179,16 @@ class ContinualAtariStream:
         if self._preprocess:
             # Grayscale + resize on CPU (runs in background thread)
             processed = preprocess_frames(raw_obs, self._resize_hw)
-            # Framestack (handles game boundary resets)
+            # Framestack: (n_steps, H, W, C)
             obs = self._apply_framestack(processed)
         else:
             obs = raw_obs
 
         self.current_step += n_steps
 
-        # Flatten to 1D per step, keep as uint8 — normalization happens on GPU
-        obs_flat = obs.reshape(n_steps, -1)
-        return obs_flat, returns
+        # Channels-first and normalize: (n_steps, H, W, C) -> (n_steps, C, H, W)
+        obs = obs.transpose(0, 3, 1, 2).astype(np.float32) / 255.0
+        return obs, returns
 
 
 class BackgroundDataLoader:
@@ -221,7 +221,7 @@ class BackgroundDataLoader:
         """Get the preloaded batch and start preloading the next one.
 
         Returns:
-            observations: uint8 array (chunk_size, input_dim)
+            observations: float32 array (chunk_size, C, H, W)
             returns: float32 array (chunk_size, 1)
         """
         if self._future is None:

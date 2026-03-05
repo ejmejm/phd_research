@@ -208,8 +208,9 @@ class MLP(eqx.Module):
             Tuple of (output, param_inputs) where param_inputs is a list of inputs to each layer
             (in order: input to layer 0, input to layer 1, ..., input to final layer)
         """
+        x = jnp.reshape(x, (-1,))  # flatten arbitrary input shape
         param_inputs = []
-        
+
         # Process all layers except the last
         for i, layer in enumerate(self.layers[:-1]):
             param_inputs.append(x)

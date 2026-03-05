@@ -10,10 +10,10 @@ First I need to make some change to the [benchmark](https://github.com/ejmejm/Co
 - [ ] ~~Allow for a batch learning option?~~ (start with streaming for now)
 
 Then I need to get a baselines running:
-- [ ] Implement a basic multi-seed multi-run logging script with preloading of batches of data, following `phd/sturcture_search/train.py` as an example
-- [ ] Swap out the data with the Atari prediction dataset (found in `../continual_atari_benchmark/dataset/dataset_loader.py`). Make a symlink to the data in that same dir so it can be used for this project.
+- [x] Implement a basic multi-seed multi-run logging script with preloading of batches of data, following `phd/sturcture_search/train.py` as an example
+- [x] Swap out the data with the Atari prediction dataset (found in `../continual_atari_benchmark/dataset/dataset_loader.py`). Make a symlink to the data in that same dir so it can be used for this project.
+- [ ] Add a preprocessing step to resize to 84x84, grayscale, and do framestacking of 4
 - [ ] Implement the ResNet used in the Bigger, Better, Faster paper
-- [ ] Add a wrapper to resize to 84x84, grayscale, and do framestacking of 4
 - [ ] Setup a training script that uses Adam
 - [ ] Setup a training script that uses Adam, and reinitializes the network at game boundaries
 
