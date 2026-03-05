@@ -1,0 +1,43 @@
+experiment: atari-prediction
+sweep_name: adam_sweep_v1
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plots: [best_hyperparameters, sensitivity]
+plot_params:
+  split_by: train.reinit_at_game_boundary
+  metrics: [asymptotic_loss, average_loss]
+
+parameters:
+  mlflow: true
+
+  model.type: resnet
+  model.width_scale: 1.0
+  model.n_conv_sequences: 3
+
+  optimizer.name: adam
+
+  optimizer.learning_rate:
+    - "${eval:2**-23}"
+    - "${eval:2**-21}"
+    - "${eval:2**-19}"
+    - "${eval:2**-17}"
+    - "${eval:2**-15}"
+    - "${eval:2**-13}"
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+    - "${eval:2**-5}"
+
+  train.reinit_at_game_boundary: [false, true]
+
+  seed:
+    type: atomic
+    value: [1, 2, 3, 4, 5]
