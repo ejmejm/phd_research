@@ -11,18 +11,11 @@ import optax
 from tqdm import tqdm
 
 from data_stream import load_dataset, ContinualClassStream
-from models import build_model, count_params
+from models import build_model
+from phd.jax_core.utils import count_params, stack_pytrees
 
 
 UNROLL_STEPS = 4
-
-
-def stack_pytrees(pytrees):
-    """Stack a list of pytrees into a single pytree with a leading batch dimension."""
-    treedef = jax.tree.structure(pytrees[0])
-    all_leaves = [jax.tree.leaves(pytree) for pytree in pytrees]
-    stacked_leaves = [jnp.stack(xs) for xs in zip(*all_leaves)]
-    return jax.tree.unflatten(treedef, stacked_leaves)
 
 
 DEFAULT_SWITCH_FREQ = {

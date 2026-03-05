@@ -153,7 +153,3 @@ def build_model(args, image_shape, *, key):
         raise ValueError(f'Unknown model: {args.model}')
 
 
-def count_params(model) -> int:
-    """Count total trainable parameters in a model."""
-    params = eqx.filter(model, eqx.is_array)
-    return sum(x.size for x in jax.tree.leaves(params))

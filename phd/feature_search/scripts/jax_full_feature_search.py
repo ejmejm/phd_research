@@ -23,6 +23,7 @@ from phd.feature_search.jax_core.experiment_helpers import (
 )
 from phd.feature_search.jax_core.feature_recycling import CBPTracker
 from phd.feature_search.jax_core.metrics import *
+from phd.jax_core.utils import configure_jax, stack_pytrees
 from phd.jax_core.models import MLP
 from phd.jax_core.optimizers import EqxOptimizer
 from phd.jax_core.tasks.geoff import CoreTransientBinaryTask, NonlinearGEOFFTask
@@ -517,16 +518,6 @@ def validate_config(cfg: DictConfig):
         
     if cfg.model.get('use_perfect_features', False):
         validate_perfect_features_config(cfg)
-
-
-def configure_jax(cfg: DictConfig):
-    jax.config.update('jax_compilation_cache_dir', cfg.jax_jit_cache_dir)
-    jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
-    jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
-    jax.config.update('jax_persistent_cache_enable_xla_caches', 'xla_gpu_per_fusion_autotune_cache_dir')
-    
-    jax.config.update('jax_platform_name', cfg.device)
-    print(f"JAX is using device: {jax.devices(cfg.device)[0]}")
 
 
 @hydra.main(config_path='../conf', config_name='full_feature_search', version_base='1.1')

@@ -55,14 +55,6 @@ def run_multiseed_experiment(
     return train_state, task, all_metrics
 
 
-def stack_pytrees(pytrees: List[Any]) -> Any:
-    treedef = jax.tree.structure(pytrees[0])
-    all_leaves = [jax.tree.leaves(pytree) for pytree in pytrees]
-    new_pytrees = [jax.tree.unflatten(treedef, leaves) for leaves in all_leaves]
-    stacked_pytrees = jax.tree.map(lambda *args: jnp.stack(args), *new_pytrees)
-    return stacked_pytrees
-
-
 @hydra.main(config_path='../conf', config_name='full_feature_search', version_base='1.1')
 def main(cfg: DictConfig) -> None:
     """Run the feature recycling experiment."""

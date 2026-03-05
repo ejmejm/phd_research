@@ -13,6 +13,7 @@ import hydra
 import jax
 import jax.numpy as jnp
 from jaxtyping import PRNGKeyArray
+from phd.jax_core.utils import configure_jax, count_params, stack_pytrees
 import numpy as np
 from omegaconf import DictConfig
 from tqdm import tqdm
@@ -88,33 +89,9 @@ class StepMetrics(eqx.Module):
 # JAX configuration
 # ---------------------------------------------------------------------------
 
-def configure_jax(cfg: DictConfig):
-    jax.config.update('jax_compilation_cache_dir', cfg.jax_jit_cache_dir)
-    jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
-    jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
-    jax.config.update(
-        'jax_persistent_cache_enable_xla_caches',
-        'xla_gpu_per_fusion_autotune_cache_dir',
-    )
-    jax.config.update('jax_platform_name', cfg.device)
-    print(f'JAX device: {jax.devices(cfg.device)[0]}')
-
-
 # ---------------------------------------------------------------------------
 # Experiment setup
 # ---------------------------------------------------------------------------
-
-def count_params(model) -> int:
-    params = eqx.filter(model, eqx.is_array)
-    return sum(x.size for x in jax.tree.leaves(params))
-
-
-def stack_pytrees(pytrees):
-    treedef = jax.tree.structure(pytrees[0])
-    all_leaves = [jax.tree.leaves(pt) for pt in pytrees]
-    stacked = [jnp.stack(xs) for xs in zip(*all_leaves)]
-    return jax.tree.unflatten(treedef, stacked)
-
 
 def prepare_experiment(
     cfg: DictConfig,
