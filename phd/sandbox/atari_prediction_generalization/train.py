@@ -119,6 +119,42 @@ def create_model(cfg: DictConfig, input_dim: int, *, key: PRNGKeyArray) -> eqx.M
         raise ValueError(f"Unknown model type: {model_type}")
 
 
+def _create_train_state(cfg: DictConfig, input_dim: int, rng: PRNGKeyArray,
+                        step: jax.Array = None) -> TrainState:
+    """Create a single seed's TrainState with fresh model and optimizer."""
+    rng, model_key = jax.random.split(rng)
+    model = create_model(cfg, input_dim, key=model_key)
+
+    if cfg.model.get('type', 'mlp') == 'resnet':
+        filter_spec = jax.tree.map(eqx.is_array, model)
+    else:
+        filter_spec = None
+    optimizer = prepare_optimizer(
+        model, cfg.optimizer.name, cfg.optimizer, filter_spec=filter_spec)
+
+    return TrainState(
+        model=model,
+        optimizer=optimizer,
+        step=step if step is not None else jnp.array(0),
+        rng=rng,
+    )
+
+
+def reinit_train_state(train_state: TrainState, cfg: DictConfig,
+                       input_dim: int) -> TrainState:
+    """Reinitialize model weights and optimizer state for all seeds.
+
+    Uses each seed's current RNG to generate new weights, so each reinit
+    produces different (but deterministic) parameters.
+    """
+    n_seeds = train_state.step.shape[0]
+    new_states = []
+    for i in range(n_seeds):
+        new_states.append(_create_train_state(
+            cfg, input_dim, train_state.rng[i], step=train_state.step[i]))
+    return stack_pytrees(new_states)
+
+
 def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStream, int]:
     """Initialize per-seed models, optimizers, and data stream."""
     seeds = cfg.seed
@@ -128,25 +164,8 @@ def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStrea
 
     train_states = []
     for seed in seeds:
-        rng = jax.random.key(seed)
-
-        model = create_model(cfg, input_dim, key=rng_from_string(rng, 'model'))
-
-        # ResNet has no .layers/.n_frozen_layers; pass a filter_spec
-        # that marks all array leaves as trainable.
-        if cfg.model.get('type', 'mlp') == 'resnet':
-            filter_spec = jax.tree.map(eqx.is_array, model)
-        else:
-            filter_spec = None
-        optimizer = prepare_optimizer(
-            model, cfg.optimizer.name, cfg.optimizer, filter_spec=filter_spec)
-
-        train_states.append(TrainState(
-            model=model,
-            optimizer=optimizer,
-            step=jnp.array(0),
-            rng=rng_from_string(rng, 'train'),
-        ))
+        rng = rng_from_string(jax.random.key(seed), 'train')
+        train_states.append(_create_train_state(cfg, input_dim, rng))
 
     n_params = count_params(train_states[0].model)
     model_type = cfg.model.get('type', 'mlp')
@@ -162,10 +181,10 @@ def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStrea
 
 def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
     """Single training step for jax.lax.scan."""
-    observations, targets = data  # (input_dim,) or (C, H, W), (1,)
+    observations, targets = data  # (batch_size, C, H, W), (batch_size, 1)
 
     def loss_fn(model):
-        predictions, _ = model(observations)  # (1,)
+        predictions = jax.vmap(lambda x: model(x)[0])(observations)  # (batch_size, 1)
         loss = jnp.mean(jnp.square(predictions - targets))
         return loss
 
@@ -193,10 +212,21 @@ def run_experiment(
     cfg: DictConfig,
     train_state: TrainState,
     stream: ContinualAtariStream,
-) -> Tuple[TrainState, list, list, list]:
+) -> Tuple[TrainState, list, list]:
     """Outer training loop with background data preloading."""
     log_freq = cfg.train.log_freq
+    batch_size = cfg.train.get('batch_size', 1)
+    updates_per_scan = log_freq // batch_size
     num_scans = cfg.train.total_steps // log_freq
+    reinit = cfg.train.get('reinit_at_game_boundary', False)
+    steps_per_game = cfg.dataset.steps_per_game
+    input_dim = compute_input_dim(cfg)
+
+    if reinit:
+        assert steps_per_game % log_freq == 0, (
+            f"steps_per_game ({steps_per_game}) must be divisible by "
+            f"log_freq ({log_freq}) when reinit_at_game_boundary is enabled"
+        )
 
     def scan_steps(state, data):
         return jax.lax.scan(train_step, state, data, unroll=SCAN_UNROLL)
@@ -225,26 +255,29 @@ def run_experiment(
         # Get preloaded batch (next preload starts automatically)
         obs, returns = loader.get()
 
-        obs_jax = jnp.array(obs)
-        returns_jax = jnp.array(returns)
+        # Reshape into (n_updates, batch_size, ...) for scan over batched steps
+        obs_jax = jnp.array(obs).reshape(updates_per_scan, batch_size, *obs.shape[1:])
+        returns_jax = jnp.array(returns).reshape(updates_per_scan, batch_size, *returns.shape[1:])
 
         # Data is shared across seeds (not vmapped) — only train_state is vmapped
         train_state, metrics = vmapped_scan(
             train_state, (obs_jax, returns_jax))
 
-        # metrics.loss: (n_seeds, log_freq)
+        # metrics.loss: (n_seeds, updates_per_scan)
         per_seed_loss = metrics.loss.mean(axis=1)  # (n_seeds,)
         mean_loss = float(per_seed_loss.mean())
-        step = int(train_state.step[0].item())
+        update_step = int(train_state.step[0].item())
+        env_step = update_step * batch_size
 
         # Background logging
         if parent_run_id:
-            def _log_step(mean_loss, per_seed_loss, step):
-                mlflow_client.log_metric(parent_run_id, 'loss', mean_loss, step=step)
-                log_child_metrics({'loss': per_seed_loss}, cfg, step=step)
+            def _log_step(mean_loss, per_seed_loss, env_step, update_step):
+                mlflow_client.log_metric(parent_run_id, 'loss', mean_loss, step=env_step)
+                mlflow_client.log_metric(parent_run_id, 'update_step', update_step, step=env_step)
+                log_child_metrics({'loss': per_seed_loss}, cfg, step=env_step)
 
             log_futures.append(log_executor.submit(
-                _log_step, mean_loss, per_seed_loss.tolist(), step))
+                _log_step, mean_loss, per_seed_loss.tolist(), env_step, update_step))
 
         all_losses.append(mean_loss)
         all_per_seed_losses.append(np.array(per_seed_loss))
@@ -253,7 +286,18 @@ def run_experiment(
         game_name = stream.dataset.get_game_name(
             min(stream.current_step, stream.total_steps - 1))
         pbar.update(log_freq)
-        pbar.set_postfix({'loss': f'{mean_loss:.4f}', 'game': game_name})
+        pbar.set_postfix({
+            'loss': f'{mean_loss:.4f}', 'game': game_name,
+            'updates': update_step,
+        })
+
+        # Reinitialize at game boundaries if enabled
+        if (reinit
+                and stream.current_step % steps_per_game == 0
+                and stream.current_step < stream.total_steps):
+            print(f'\nReinitializing network at step {stream.current_step} '
+                  f'(game boundary)')
+            train_state = reinit_train_state(train_state, cfg, input_dim)
 
     # Wait for all logging to finish
     for f in log_futures:

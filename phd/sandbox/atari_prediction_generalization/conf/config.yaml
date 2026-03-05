@@ -19,10 +19,12 @@ dataset:
 # Model
 model:
   type: resnet           # 'mlp' or 'resnet'
-  # IMPALA-CNN settings
-  width_scale: 4.0       # Channel width multiplier (e.g. 0.25, 0.5, 1, 2, 4)
+
+  # ResNet settings
+  width_scale: 1.0       # Channel width multiplier (e.g. 0.25, 0.5, 1, 2, 4)
   n_conv_sequences: 3    # Number of ConvSequence blocks
-  # MLP settings (used when type=mlp)
+
+  # MLP settings
   n_layers: 2
   hidden_dim: 32
   activation: relu
@@ -34,6 +36,9 @@ optimizer:
   name: adam
   learning_rate: 1e-3
   weight_decay: 0
+  # UPGD-specific (used when name: upgd)
+  beta_utility: 0.999
+  sigma: 0.001
 
 # Preprocessing
 preprocessing:
@@ -45,6 +50,8 @@ preprocessing:
 train:
   total_steps: 200_000
   log_freq: 1000
+  batch_size: 1
+  reinit_at_game_boundary: false
 
 # Seed: single int or list of ints for multi-seed
 seed: null
