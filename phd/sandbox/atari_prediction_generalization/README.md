@@ -21,8 +21,18 @@ Then I need to setup my proposed solution method:
 - [x] Add an option to use an UPGD optimizer
 
 Then I need to prepare sweeps. I want to compare the different methods with a good set of hyperparameters for each method:
-- [ ] Write a sweep config for Adam, sweeping the step-size, and whether network resets are used
-- [ ] Write a sweep config UPGD, sweeping all of the things that were swept in the original paper
+- [x] Write a sweep config for Adam, sweeping the step-size, and whether network resets are used
+- [x] Write a sweep config UPGD, sweeping all of the things that were swept in the original paper
 - [ ] Test these experiments to see if they are efficient enough to run on my own computer
 - [ ] Setup a CC configuration for running these experiments?
 - [ ] Run the CC experiments?
+
+This starts with just using supervised learning to predict precomputed returns, but if that works I will want to move onto trying to learn a value function:
+- [ ] Make sure rewards are clipped like they are for computing the returns
+- [ ] Start with one step TD for the error function
+- [ ] Consider using TD lambda for the error function
+
+Other things to try that in general make learning better:
+- [ ] Normalize the observations with a Wellford-style online normalization
+- [ ] Use something like SR-SPR to learn better representation and more potentially useful features
+- [ ] Try batching to stabalize gradients
