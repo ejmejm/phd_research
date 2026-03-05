@@ -35,7 +35,7 @@ from phd.research_utils.logging import (
 from phd.sandbox.atari_prediction_generalization.data import (
     BackgroundDataLoader,
     ContinualAtariStream,
-    INPUT_DIM,
+    compute_input_dim,
     load_atari_data,
 )
 
@@ -94,6 +94,7 @@ def stack_pytrees(pytrees):
 def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStream, int]:
     """Initialize per-seed models, optimizers, and data stream."""
     seeds = cfg.seed
+    input_dim = compute_input_dim(cfg)
 
     stream = load_atari_data(cfg)
 
@@ -102,7 +103,7 @@ def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStrea
         rng = jax.random.key(seed)
 
         model = MLP(
-            input_dim=INPUT_DIM,
+            input_dim=input_dim,
             output_dim=OUTPUT_DIM,
             n_layers=cfg.model.n_layers,
             hidden_dim=cfg.model.hidden_dim,

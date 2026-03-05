@@ -2,12 +2,14 @@
 
 Wraps PrerecordedDataset from the continual-atari-benchmark package and provides
 sequential batch sampling with background preloading for efficient training.
+Includes standard Atari preprocessing: grayscale, resize, and framestacking.
 """
 
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Tuple
 
+import cv2
 import numpy as np
 from omegaconf import DictConfig
 
@@ -19,18 +21,47 @@ from continual_atari_benchmark.dataset_loader import OBS_CHUNK_SIZE
 OBS_HEIGHT = 210
 OBS_WIDTH = 160
 OBS_CHANNELS = 3
-INPUT_DIM = OBS_HEIGHT * OBS_WIDTH * OBS_CHANNELS  # 100800
+
+
+def compute_input_dim(cfg: DictConfig) -> int:
+    """Compute flattened input dimension from preprocessing config."""
+    pp = cfg.preprocessing
+    h, w = pp.resize
+    n_stack = pp.frame_stack
+    if pp.grayscale:
+        return h * w * n_stack
+    else:
+        return h * w * OBS_CHANNELS * n_stack
+
+
+def preprocess_frames(obs: np.ndarray, resize_hw: Tuple[int, int]) -> np.ndarray:
+    """Convert raw Atari frames to grayscale and resize.
+
+    Args:
+        obs: uint8 array (n, 210, 160, 3)
+        resize_hw: (height, width) target size
+
+    Returns:
+        uint8 array (n, height, width)
+    """
+    h, w = resize_hw
+    n = len(obs)
+    out = np.empty((n, h, w), dtype=np.uint8)
+    for i in range(n):
+        gray = cv2.cvtColor(obs[i], cv2.COLOR_RGB2GRAY)
+        out[i] = cv2.resize(gray, (w, h), interpolation=cv2.INTER_AREA)
+    return out
 
 
 class ContinualAtariStream:
     """Sequential data stream over pre-recorded Atari trajectories.
 
     Yields chunks of (observations, returns) in order across multiple games.
-    Observations are flattened to 1D and normalized to [0, 1].
+    Applies preprocessing (grayscale, resize, framestack) on the CPU.
     """
 
     def __init__(self, data_dir: str, game_order: list, steps_per_game: int,
-                 data_seed: int = 0):
+                 data_seed: int = 0, preprocessing: DictConfig = None):
         data_path = Path(data_dir)
 
         # Validate that required data files exist
@@ -55,14 +86,79 @@ class ContinualAtariStream:
         self.total_steps = len(self.dataset)
         self.current_step = 0
 
+        # Preprocessing config
+        self._preprocess = preprocessing is not None
+        if self._preprocess:
+            self._resize_hw = tuple(preprocessing.resize)
+            self._grayscale = preprocessing.grayscale
+            self._n_stack = preprocessing.frame_stack
+            # Frame buffer for framestacking across chunks (initialized on first call)
+            self._frame_buffer = None
+        else:
+            self._n_stack = 1
+
+    def _load_raw_observations(self, n_steps: int) -> np.ndarray:
+        """Bulk-load raw observations from chunk files.
+
+        Returns uint8 array (n_steps, 210, 160, 3).
+        """
+        obs_parts = []
+        remaining = n_steps
+        step = self.current_step
+
+        while remaining > 0:
+            game_idx = step // self.dataset.steps_per_game
+            local_step = step % self.dataset.steps_per_game
+            chunk_idx = local_step // OBS_CHUNK_SIZE
+            idx_in_chunk = local_step % OBS_CHUNK_SIZE
+
+            self.dataset._load_obs_chunk(game_idx, chunk_idx)
+            chunk_obs = self.dataset._current_chunk_obs
+
+            available_in_chunk = len(chunk_obs) - idx_in_chunk
+            steps_left_in_game = self.dataset.steps_per_game - local_step
+            take = min(remaining, available_in_chunk, steps_left_in_game)
+
+            obs_parts.append(chunk_obs[idx_in_chunk:idx_in_chunk + take])
+
+            step += take
+            remaining -= take
+
+        return np.concatenate(obs_parts, axis=0)
+
+    def _apply_framestack(self, processed: np.ndarray) -> np.ndarray:
+        """Apply framestacking over a continuous stream (no resets at any boundary).
+
+        The entire run is treated as one long episode. The frame buffer carries
+        over across chunks and game boundaries.
+
+        Args:
+            processed: uint8 array (n_steps, H, W) — preprocessed grayscale frames
+
+        Returns:
+            uint8 array (n_steps, H, W, n_stack)
+        """
+        n_stack = self._n_stack
+
+        # Initialize buffer on first call with copies of the first frame
+        if self._frame_buffer is None:
+            self._frame_buffer = np.stack([processed[0]] * (n_stack - 1))
+
+        # Prepend buffer and apply sliding window (zero-copy view)
+        full_seq = np.concatenate([self._frame_buffer, processed], axis=0)
+        stacked = np.lib.stride_tricks.sliding_window_view(
+            full_seq, n_stack, axis=0)
+
+        # Update buffer for next chunk
+        self._frame_buffer = processed[-(n_stack - 1):].copy()
+
+        return np.ascontiguousarray(stacked)
+
     def sample_batch(self, n_steps: int) -> Tuple[np.ndarray, np.ndarray]:
         """Sample the next n_steps of sequential data.
 
-        Bulk-loads observations directly from chunk files instead of calling
-        get_obs() in a loop. Handles chunk and game boundaries.
-
         Returns:
-            observations: float32 array (n_steps, INPUT_DIM), normalized [0, 1]
+            observations: uint8 array (n_steps, input_dim), flattened
             returns: float32 array (n_steps, 1)
         """
         if self.current_step + n_steps > self.total_steps:
@@ -77,39 +173,21 @@ class ContinualAtariStream:
             self.current_step:self.current_step + n_steps
         ].astype(np.float32).reshape(n_steps, 1)
 
-        # Bulk-load observations by iterating over chunk boundaries
-        obs_parts = []
-        remaining = n_steps
-        step = self.current_step
+        # Load raw observations
+        raw_obs = self._load_raw_observations(n_steps)
 
-        while remaining > 0:
-            game_idx = step // self.dataset.steps_per_game
-            local_step = step % self.dataset.steps_per_game
-            chunk_idx = local_step // OBS_CHUNK_SIZE
-            idx_in_chunk = local_step % OBS_CHUNK_SIZE
+        if self._preprocess:
+            # Grayscale + resize on CPU (runs in background thread)
+            processed = preprocess_frames(raw_obs, self._resize_hw)
+            # Framestack (handles game boundary resets)
+            obs = self._apply_framestack(processed)
+        else:
+            obs = raw_obs
 
-            # Load this chunk
-            self.dataset._load_obs_chunk(game_idx, chunk_idx)
-            chunk_obs = self.dataset._current_chunk_obs
-
-            # How many steps can we take from this chunk?
-            available_in_chunk = len(chunk_obs) - idx_in_chunk
-            # Also respect game boundary
-            steps_left_in_game = self.dataset.steps_per_game - local_step
-            take = min(remaining, available_in_chunk, steps_left_in_game)
-
-            obs_parts.append(chunk_obs[idx_in_chunk:idx_in_chunk + take])
-
-            step += take
-            remaining -= take
-
-        observations = np.concatenate(obs_parts, axis=0)
         self.current_step += n_steps
 
-        # Flatten but keep as uint8 — normalization happens on GPU.
-        # Use reshape (view, no copy) rather than making a contiguous copy.
-        obs_flat = observations.reshape(n_steps, -1)
-
+        # Flatten to 1D per step, keep as uint8 — normalization happens on GPU
+        obs_flat = obs.reshape(n_steps, -1)
         return obs_flat, returns
 
 
@@ -143,7 +221,7 @@ class BackgroundDataLoader:
         """Get the preloaded batch and start preloading the next one.
 
         Returns:
-            observations: float32 array (chunk_size, INPUT_DIM)
+            observations: uint8 array (chunk_size, input_dim)
             returns: float32 array (chunk_size, 1)
         """
         if self._future is None:
@@ -171,4 +249,5 @@ def load_atari_data(cfg: DictConfig) -> ContinualAtariStream:
         game_order=list(cfg.dataset.game_order),
         steps_per_game=cfg.dataset.steps_per_game,
         data_seed=cfg.dataset.data_seed,
+        preprocessing=cfg.get('preprocessing', None),
     )
