@@ -10,7 +10,7 @@ comet_ml: false
 # Dataset
 dataset:
   data_dir: data/
-  steps_per_game: 500_000
+  steps_per_game: 100_000
   data_seed: 0
   game_order:
     - ALE/Alien-v5
