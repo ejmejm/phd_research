@@ -244,8 +244,13 @@ class BackgroundDataLoader:
 
 def load_atari_data(cfg: DictConfig) -> ContinualAtariStream:
     """Create a ContinualAtariStream from config."""
+    # Resolve relative data_dir against original CWD (Hydra changes CWD to output dir)
+    data_dir = Path(cfg.dataset.data_dir)
+    if not data_dir.is_absolute():
+        import hydra
+        data_dir = Path(hydra.utils.get_original_cwd()) / data_dir
     return ContinualAtariStream(
-        data_dir=cfg.dataset.data_dir,
+        data_dir=str(data_dir),
         game_order=list(cfg.dataset.game_order),
         steps_per_game=cfg.dataset.steps_per_game,
         data_seed=cfg.dataset.data_seed,
