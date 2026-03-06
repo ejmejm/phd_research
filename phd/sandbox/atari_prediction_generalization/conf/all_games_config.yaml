@@ -9,7 +9,7 @@ comet_ml: false
 
 # Dataset
 dataset:
-  data_dir: ${oc.env:HOME}/local_projects/continual_atari_benchmark/dataset/data
+  data_dir: data/
   steps_per_game: 500_000
   data_seed: 0
   game_order:
