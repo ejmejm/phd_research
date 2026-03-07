@@ -55,15 +55,14 @@ class TrainState(eqx.Module):
     optimizer: EqxOptimizer
     step: jax.Array
     rng: PRNGKeyArray
+    running_mean_target: jax.Array
 
 
 class StepMetrics(eqx.Module):
     loss: jax.Array
+    baseline_loss: jax.Array
+    target_magnitude: jax.Array
 
-
-# ---------------------------------------------------------------------------
-# JAX configuration
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Experiment setup
@@ -114,6 +113,7 @@ def _create_train_state(cfg: DictConfig, input_dim: int, rng: PRNGKeyArray,
         optimizer=optimizer,
         step=step if step is not None else jnp.array(0),
         rng=rng,
+        running_mean_target=jnp.array(0.0),
     )
 
 
@@ -167,6 +167,18 @@ def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
 
     loss, grads = eqx.filter_value_and_grad(loss_fn)(train_state.model)
 
+    # Baseline loss: MSE using running mean of targets as prediction
+    baseline_preds = jnp.full_like(targets, train_state.running_mean_target)
+    baseline_loss = jnp.mean(jnp.square(baseline_preds - targets))
+
+    # Update running mean of targets (EMA with gamma=0.999)
+    gamma = 0.999
+    batch_mean = jnp.mean(targets)
+    new_running_mean = train_state.running_mean_target * gamma + (1.0 - gamma) * batch_mean
+
+    # Target magnitude
+    target_magnitude = jnp.mean(jnp.abs(targets))
+
     updates, new_optimizer = train_state.optimizer.with_update(
         grads, train_state.model)
     new_model = eqx.apply_updates(train_state.model, updates)
@@ -176,9 +188,11 @@ def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
         model=new_model,
         optimizer=new_optimizer,
         step=train_state.step + 1,
+        running_mean_target=new_running_mean,
     )
 
-    return new_state, StepMetrics(loss=loss)
+    return new_state, StepMetrics(
+        loss=loss, baseline_loss=baseline_loss, target_magnitude=target_magnitude)
 
 
 # ---------------------------------------------------------------------------
@@ -243,18 +257,24 @@ def run_experiment(
         # metrics.loss: (n_seeds, updates_per_scan)
         per_seed_loss = metrics.loss.mean(axis=1)  # (n_seeds,)
         mean_loss = float(per_seed_loss.mean())
+        mean_baseline_loss = float(metrics.baseline_loss.mean())
+        mean_target_magnitude = float(metrics.target_magnitude.mean())
         update_step = int(train_state.step[0].item())
         env_step = update_step * batch_size
 
         # Background logging
         if parent_run_id:
-            def _log_step(mean_loss, per_seed_loss, env_step, update_step):
+            def _log_step(mean_loss, per_seed_loss, mean_baseline_loss,
+                          mean_target_magnitude, env_step, update_step):
                 mlflow_client.log_metric(parent_run_id, 'loss', mean_loss, step=env_step)
+                mlflow_client.log_metric(parent_run_id, 'baseline_loss', mean_baseline_loss, step=env_step)
+                mlflow_client.log_metric(parent_run_id, 'target_magnitude', mean_target_magnitude, step=env_step)
                 mlflow_client.log_metric(parent_run_id, 'update_step', update_step, step=env_step)
                 log_child_metrics({'loss': per_seed_loss}, cfg, step=env_step)
 
             log_futures.append(log_executor.submit(
-                _log_step, mean_loss, per_seed_loss.tolist(), env_step, update_step))
+                _log_step, mean_loss, per_seed_loss.tolist(),
+                mean_baseline_loss, mean_target_magnitude, env_step, update_step))
 
         all_losses.append(mean_loss)
         all_per_seed_losses.append(np.array(per_seed_loss))
