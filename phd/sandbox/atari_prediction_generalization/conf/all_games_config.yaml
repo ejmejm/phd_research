@@ -72,8 +72,8 @@ preprocessing:
 
 # Training
 train:
-  total_steps: 13_000_000
-  log_freq: 5000
+  total_steps: 2_600_000
+  log_freq: 4000
   batch_size: 1
   reinit_at_game_boundary: false
 
