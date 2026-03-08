@@ -32,6 +32,7 @@ discovery.egg-info/
 *.lock
 
 phd/sandbox/nethack_benchmarking/data/nld-nao/
+phd/sandbox/atari_prediction_generalization/data/
 
 # Ignore symlinks
 *.lnk
