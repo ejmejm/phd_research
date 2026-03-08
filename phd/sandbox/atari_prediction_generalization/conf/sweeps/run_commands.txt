@@ -1,0 +1,5 @@
+~5 runs per 12 hour job
+
+sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_mlflow_agent.sbatch -p $HOME/scratch/phd_research/phd/sandbox/atari_prediction_generalization -c conf/sweeps/adam_sweep.yaml
+
+sbatch --array=1-65 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=2 --mem=8G --time=12:00:00 launch_mlflow_agent.sbatch -p $HOME/scratch/phd_research/phd/sandbox/atari_prediction_generalization -c conf/sweeps/upgd_sweep.yaml
