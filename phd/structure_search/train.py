@@ -35,7 +35,10 @@ from phd.research_utils.logging import (
     finish_experiment,
 )
 from phd.structure_search.data import load_dataset, DataStream
-from phd.structure_search.dynamic_network import DynamicNetwork, sync_outgoing_weights
+from phd.structure_search.dynamic_network import (
+    DynamicNetwork, sync_outgoing_weights, init_random_dynamic_network,
+    count_active_connections, count_active_units,
+)
 
 
 SCAN_UNROLL = 4
@@ -86,18 +89,23 @@ class StepMetrics(eqx.Module):
 
 
 # ---------------------------------------------------------------------------
-# JAX configuration
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Experiment setup
 # ---------------------------------------------------------------------------
+
+def _make_dynamic_filter_spec(model: DynamicNetwork):
+    """Build optimizer filter_spec for DynamicNetwork: only weights and output_weights."""
+    spec = jax.tree.map(lambda _: False, model)
+    return eqx.tree_at(
+        lambda n: (n.weights, n.output_weights), spec, (True, True),
+    )
+
 
 def prepare_experiment(
     cfg: DictConfig,
 ) -> Tuple[TrainState, List[DataStream], int]:
     """Initialize per-seed models, optimizers, data streams."""
     seeds = cfg.seed
+    model_type = cfg.model.get('type', 'mlp')
 
     images, labels, num_classes, input_dim = load_dataset(cfg.dataset.name)
 
@@ -116,18 +124,38 @@ def prepare_experiment(
             seed=seed,
         ))
 
-        model = MLP(
-            input_dim=input_dim,
-            output_dim=num_classes,
-            n_layers=cfg.model.n_layers,
-            hidden_dim=cfg.model.hidden_dim + int(use_bias),
-            weight_init_method=cfg.model.weight_init_method,
-            activation=cfg.model.activation,
-            n_frozen_layers=cfg.model.get('n_frozen_layers', 0),
-            key=rng_from_string(rng, 'model'),
-        )
+        model_key = rng_from_string(rng, 'model')
 
-        optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
+        if model_type == 'dynamic':
+            model = init_random_dynamic_network(
+                input_dim=input_dim,
+                output_dim=num_classes,
+                n_layers=cfg.model.n_layers,
+                units_per_layer=cfg.model.hidden_dim,
+                max_units_per_layer=cfg.model.get('max_units_per_layer', None),
+                max_connections_per_unit=cfg.model.get('max_connections_per_unit', None),
+                activations=(cfg.model.activation,),
+                max_fan_out=cfg.model.get('max_fan_out', None),
+                connect_all_to_output=cfg.model.get('connect_all_to_output', False),
+                key=model_key,
+            )
+            filter_spec = _make_dynamic_filter_spec(model)
+            optimizer = prepare_optimizer(
+                model, cfg.optimizer.name, cfg.optimizer,
+                filter_spec=filter_spec,
+            )
+        else:
+            model = MLP(
+                input_dim=input_dim,
+                output_dim=num_classes,
+                n_layers=cfg.model.n_layers,
+                hidden_dim=cfg.model.hidden_dim + int(use_bias),
+                weight_init_method=cfg.model.weight_init_method,
+                activation=cfg.model.activation,
+                n_frozen_layers=cfg.model.get('n_frozen_layers', 0),
+                key=model_key,
+            )
+            optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
 
         tracker = DummyStructureTracker(rng=rng_from_string(rng, 'tracker'))
 
@@ -140,7 +168,14 @@ def prepare_experiment(
         ))
 
     n_params = count_params(train_states[0].model)
-    print(f'Model: MLP, Params: {n_params}, Seeds: {seeds}')
+    if model_type == 'dynamic':
+        net = train_states[0].model
+        n_units = count_active_units(net)
+        n_conns = count_active_connections(net)
+        print(f'Model: DynamicNetwork, Params: {n_params}, '
+              f'Units: {n_units}, Connections: {n_conns}, Seeds: {seeds}')
+    else:
+        print(f'Model: MLP, Params: {n_params}, Seeds: {seeds}')
 
     batched_state = stack_pytrees(train_states)
     return batched_state, streams, n_params

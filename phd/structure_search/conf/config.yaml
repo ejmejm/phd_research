@@ -13,12 +13,19 @@ dataset:
 
 # Model
 model:
+  type: mlp  # 'mlp' or 'dynamic'
   n_layers: 2
   hidden_dim: 128
   activation: relu
   weight_init_method: lecun_uniform
   use_bias: false
   n_frozen_layers: 0
+
+  # DynamicNetwork-specific (only used when type=dynamic)
+  max_units_per_layer: null       # defaults to hidden_dim
+  max_connections_per_unit: null   # defaults to input_dim
+  max_fan_out: null                # defaults to max_units_per_layer
+  connect_all_to_output: false    # if true, all hidden units connect to output
 
 # Optimizer
 optimizer:

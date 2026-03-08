@@ -406,3 +406,132 @@ def count_active_connections(network: DynamicNetwork) -> int:
 def count_active_units(network: DynamicNetwork) -> int:
     """Count the total number of active hidden units."""
     return int(jnp.sum(network.unit_mask))
+
+
+def init_random_dynamic_network(
+    input_dim: int,
+    output_dim: int,
+    n_layers: int,
+    units_per_layer: int,
+    max_units_per_layer: int | None = None,
+    max_connections_per_unit: int | None = None,
+    activations: Tuple[str, ...] = ('relu',),
+    max_fan_out: int | None = None,
+    connect_all_to_output: bool = False,
+    *,
+    key: PRNGKeyArray,
+) -> DynamicNetwork:
+    """Create a DynamicNetwork with random connectivity.
+
+    Each hidden unit connects to max_connections_per_unit randomly chosen
+    positions from all prior layers (inputs + preceding hidden layers).
+
+    Args:
+        connect_all_to_output: If True, all active hidden units across all
+            layers connect to the output. If False (default), only the last
+            hidden layer connects to the output.
+    """
+    if max_units_per_layer is None:
+        max_units_per_layer = units_per_layer
+    if max_connections_per_unit is None:
+        max_connections_per_unit = input_dim
+
+    assert units_per_layer <= max_units_per_layer
+
+    net = DynamicNetwork(
+        input_dim=input_dim,
+        output_dim=output_dim,
+        max_layers=n_layers,
+        max_units_per_layer=max_units_per_layer,
+        max_connections_per_unit=max_connections_per_unit,
+        activations=activations,
+        max_fan_out=max_fan_out,
+        key=key,
+    )
+
+    buffer_size = net.buffer_size
+    weights = net.weights
+    input_indices = net.input_indices
+    unit_mask = net.unit_mask
+
+    for l in range(n_layers):
+        # Build mask of available source positions (inputs + all prior layers)
+        available_mask = jnp.zeros(buffer_size, dtype=jnp.bool_)
+        available_mask = available_mask.at[:input_dim].set(True)
+        for prev_l in range(l):
+            offset = input_dim + prev_l * max_units_per_layer
+            available_mask = available_mask.at[offset:offset + units_per_layer].set(True)
+
+        n_available = int(available_mask.sum())
+        n_conns = min(max_connections_per_unit, n_available)
+
+        # Gather available indices into a dense array for permutation sampling
+        available_indices = jnp.where(available_mask, jnp.arange(buffer_size), buffer_size)
+        available_indices = jnp.sort(available_indices)[:n_available]  # (n_available,)
+
+        # Sample random connections for all units at once via vmap
+        key, layer_key = jax.random.split(key)
+        unit_keys = jax.random.split(layer_key, units_per_layer)
+
+        def sample_unit(unit_key):
+            perm = jax.random.permutation(unit_key, n_available)[:n_conns]
+            sources = jnp.sort(available_indices[perm])
+            # Pad to max_connections_per_unit with -1
+            padded = jnp.full(max_connections_per_unit, -1, dtype=jnp.int32)
+            padded = padded.at[:n_conns].set(sources)
+            return padded
+
+        layer_indices = jax.vmap(sample_unit)(unit_keys)  # (units_per_layer, max_conns)
+
+        # Place into full arrays (pad inactive units with -1)
+        full_indices = jnp.full(
+            (max_units_per_layer, max_connections_per_unit), -1, dtype=jnp.int32)
+        full_indices = full_indices.at[:units_per_layer].set(layer_indices)
+        input_indices = input_indices.at[l].set(full_indices)
+
+        # Lecun uniform weights for active connections
+        key, w_key = jax.random.split(key)
+        w = lecun_uniform(w_key, (units_per_layer, max_connections_per_unit),
+                          in_dim=n_conns)
+        # Zero out padding slots
+        conn_mask = (layer_indices >= 0).astype(jnp.float32)
+        w = w * conn_mask
+        full_w = jnp.zeros((max_units_per_layer, max_connections_per_unit))
+        full_w = full_w.at[:units_per_layer].set(w)
+        weights = weights.at[l].set(full_w)
+
+        # Activate units
+        unit_mask = unit_mask.at[l, :units_per_layer].set(1)
+
+    # Output layer wiring
+    output_mask = jnp.zeros_like(net.output_mask)
+    output_weights = jnp.zeros_like(net.output_weights)
+
+    if connect_all_to_output:
+        # Connect all active hidden units across all layers to the output
+        total_output_units = n_layers * units_per_layer
+        key, ow_key = jax.random.split(key)
+        for l in range(n_layers):
+            offset = input_dim + l * max_units_per_layer
+            output_mask = output_mask.at[:, offset:offset + units_per_layer].set(1)
+            ow = lecun_uniform(
+                jax.random.fold_in(ow_key, l),
+                (output_dim, units_per_layer), in_dim=total_output_units,
+            )
+            output_weights = output_weights.at[:, offset:offset + units_per_layer].set(ow)
+    else:
+        # Connect only last hidden layer to the output
+        last_offset = input_dim + (n_layers - 1) * max_units_per_layer
+        output_mask = output_mask.at[:, last_offset:last_offset + units_per_layer].set(1)
+        key, ow_key = jax.random.split(key)
+        ow = lecun_uniform(ow_key, (output_dim, units_per_layer), in_dim=units_per_layer)
+        output_weights = output_weights.at[:, last_offset:last_offset + units_per_layer].set(ow)
+
+    net = eqx.tree_at(
+        lambda n: (n.weights, n.input_indices, n.unit_mask,
+                   n.output_mask, n.output_weights),
+        net,
+        (weights, input_indices, unit_mask, output_mask, output_weights),
+    )
+
+    return build_outgoing_indices(net)
