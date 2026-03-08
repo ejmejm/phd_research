@@ -1,0 +1,44 @@
+experiment: structure-search
+sweep_name: mlp_idbd_sweep
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    hue: optimizer.meta_learning_rate
+
+parameters:
+  mlflow: true
+
+  model.type: mlp
+  model.n_layers: 3
+  model.hidden_dim: 64
+
+  optimizer.name: idbd
+  optimizer.autostep: true
+
+  optimizer.learning_rate:
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  optimizer.meta_learning_rate:
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3]
