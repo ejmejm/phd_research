@@ -237,10 +237,8 @@ def run_experiment(
     log_executor = ThreadPoolExecutor(max_workers=1)
     log_futures = []
 
-    # Capture parent run ID so background thread can log to the correct run
-    import mlflow
-    parent_run_id = mlflow.active_run().info.run_id if mlflow.active_run() else None
-    mlflow_client = mlflow.tracking.MlflowClient() if parent_run_id else None
+    logging_active = (cfg.get('mlflow', False) or cfg.get('wandb', False)
+                      or cfg.get('comet_ml', False))
 
     for _ in range(num_scans):
         # Get preloaded batch (next preload starts automatically)
@@ -256,25 +254,39 @@ def run_experiment(
 
         # metrics.loss: (n_seeds, updates_per_scan)
         per_seed_loss = metrics.loss.mean(axis=1)  # (n_seeds,)
+        per_seed_baseline = metrics.baseline_loss.mean(axis=1)  # (n_seeds,)
+        per_seed_target_mag = metrics.target_magnitude.mean(axis=1)  # (n_seeds,)
         mean_loss = float(per_seed_loss.mean())
-        mean_baseline_loss = float(metrics.baseline_loss.mean())
-        mean_target_magnitude = float(metrics.target_magnitude.mean())
+        mean_baseline_loss = float(per_seed_baseline.mean())
+        mean_target_magnitude = float(per_seed_target_mag.mean())
+        std_loss = float(per_seed_loss.std())
+        std_baseline_loss = float(per_seed_baseline.std())
+        std_target_magnitude = float(per_seed_target_mag.std())
         update_step = int(train_state.step[0].item())
         env_step = update_step * batch_size
 
         # Background logging
-        if parent_run_id:
-            def _log_step(mean_loss, per_seed_loss, mean_baseline_loss,
-                          mean_target_magnitude, env_step, update_step):
-                mlflow_client.log_metric(parent_run_id, 'loss', mean_loss, step=env_step)
-                mlflow_client.log_metric(parent_run_id, 'baseline_loss', mean_baseline_loss, step=env_step)
-                mlflow_client.log_metric(parent_run_id, 'target_magnitude', mean_target_magnitude, step=env_step)
-                mlflow_client.log_metric(parent_run_id, 'update_step', update_step, step=env_step)
+        if logging_active:
+            def _log_step(mean_loss, std_loss, per_seed_loss,
+                          mean_baseline_loss, std_baseline_loss,
+                          mean_target_magnitude, std_target_magnitude,
+                          env_step, update_step):
+                log_metrics({
+                    'loss': mean_loss,
+                    'loss_std': std_loss,
+                    'baseline_loss': mean_baseline_loss,
+                    'baseline_loss_std': std_baseline_loss,
+                    'target_magnitude': mean_target_magnitude,
+                    'target_magnitude_std': std_target_magnitude,
+                    'update_step': update_step,
+                }, cfg, step=env_step)
                 log_child_metrics({'loss': per_seed_loss}, cfg, step=env_step)
 
             log_futures.append(log_executor.submit(
-                _log_step, mean_loss, per_seed_loss.tolist(),
-                mean_baseline_loss, mean_target_magnitude, env_step, update_step))
+                _log_step, mean_loss, std_loss, per_seed_loss.tolist(),
+                mean_baseline_loss, std_baseline_loss,
+                mean_target_magnitude, std_target_magnitude,
+                env_step, update_step))
 
         all_losses.append(mean_loss)
         all_per_seed_losses.append(np.array(per_seed_loss))
@@ -321,6 +333,11 @@ def main(cfg: DictConfig) -> None:
         cfg.seed = [cfg.seed]
     else:
         cfg.seed = list(cfg.seed)
+
+    if cfg.get('log_individual_seeds', False) and not cfg.get('mlflow', False):
+        raise ValueError(
+            'log_individual_seeds requires mlflow logging. '
+            'Set mlflow=true or disable log_individual_seeds.')
 
     set_seed(cfg.seed[0])
     init_child_runs(cfg.seed, cfg)
