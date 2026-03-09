@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 # Resolve relative MLflow tracking URI to absolute before Hydra changes CWD
 _mlflow_uri = os.environ.get('MLFLOW_TRACKING_URI', '')
@@ -35,8 +35,10 @@ from phd.research_utils.logging import (
     finish_experiment,
 )
 from phd.structure_search.data import load_dataset, DataStream
+from phd.structure_search.connectivity_manager import ConnectivityManager
 from phd.structure_search.dynamic_network import (
-    DynamicNetwork, sync_outgoing_weights, init_random_dynamic_network,
+    DynamicNetwork, sync_outgoing_weights, build_outgoing_indices,
+    init_random_dynamic_network,
     count_active_connections, count_active_units,
 )
 
@@ -76,9 +78,9 @@ class DummyStructureTracker(eqx.Module):
 # ---------------------------------------------------------------------------
 
 class TrainState(eqx.Module):
-    model: MLP
+    model: Union[MLP, DynamicNetwork]
     optimizer: EqxOptimizer
-    structure_tracker: DummyStructureTracker
+    structure_tracker: Union[DummyStructureTracker, ConnectivityManager]
     step: jax.Array
     rng: PRNGKeyArray
 
@@ -157,7 +159,16 @@ def prepare_experiment(
             )
             optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
 
-        tracker = DummyStructureTracker(rng=rng_from_string(rng, 'tracker'))
+        if model_type == 'dynamic' and cfg.structure_tracker.get('enabled', False):
+            tracker = ConnectivityManager(
+                model=model,
+                replace_rate=cfg.structure_tracker.replace_rate,
+                decay_rate=cfg.structure_tracker.decay_rate,
+                maturity_threshold=cfg.structure_tracker.maturity_threshold,
+                rng=rng_from_string(rng, 'tracker'),
+            )
+        else:
+            tracker = DummyStructureTracker(rng=rng_from_string(rng, 'tracker'))
 
         train_states.append(TrainState(
             model=model,
@@ -185,8 +196,20 @@ def prepare_experiment(
 # Training step
 # ---------------------------------------------------------------------------
 
-def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
-    """Single training step for jax.lax.scan."""
+def train_step(
+    train_state: TrainState,
+    data,
+    do_restructure: bool = False,
+) -> Tuple[TrainState, StepMetrics]:
+    """Single training step.
+
+    Args:
+        train_state: Current training state.
+        data: Tuple of (images, labels).
+        do_restructure: If True and structure_tracker is a ConnectivityManager,
+            call modify_structure after the utility update. This parameter is
+            static (Python bool) so JAX traces separate paths for True/False.
+    """
     images, labels = data  # (batch_size, input_dim), (batch_size,)
 
     one_hot = jax.nn.one_hot(labels, NUM_CLASSES)  # (batch_size, 10)
@@ -215,9 +238,15 @@ def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
     if isinstance(new_model, DynamicNetwork):
         new_model = sync_outgoing_weights(new_model)
 
-    # Structure tracker (no-op for now)
+    # Structure tracker: always update stats
     new_tracker = train_state.structure_tracker.update_stats(
         new_model, param_inputs)
+
+    # Restructure (only when do_restructure=True and using ConnectivityManager)
+    if do_restructure and isinstance(new_tracker, ConnectivityManager):
+        rng, restructure_rng = jax.random.split(train_state.rng)
+        new_tracker, new_model, new_optimizer = new_tracker.modify_structure(
+            new_model, new_optimizer, rng=restructure_rng)
 
     # Accuracy (pre-update predictions)
     predicted = jnp.argmax(outputs, axis=-1)  # (batch_size,)
@@ -243,12 +272,49 @@ def run_experiment(
     train_state: TrainState,
     streams: List[DataStream],
 ) -> Tuple[TrainState, list, list, list, list]:
-    """Outer training loop: pre-sample data on CPU, train on GPU via vmapped scan."""
+    """Outer training loop: pre-sample data on CPU, train on GPU via vmapped scan.
+
+    When structure_tracker is enabled, the scan body uses a Python for-loop
+    that unrolls prune_frequency steps: (prune_frequency - 1) normal steps
+    followed by 1 restructure step. This avoids a runtime conditional inside
+    jax.lax.scan — JAX traces two static paths at compile time.
+    """
     log_freq = cfg.train.log_freq
     num_scans = cfg.train.total_steps // log_freq
+    prune_frequency = cfg.structure_tracker.get('prune_frequency', log_freq)
+    use_restructure = cfg.structure_tracker.get('enabled', False)
 
-    def scan_steps(state, data):
-        return jax.lax.scan(train_step, state, data, unroll=SCAN_UNROLL)
+    if use_restructure:
+        assert log_freq % prune_frequency == 0, \
+            f'log_freq ({log_freq}) must be divisible by prune_frequency ({prune_frequency})'
+        n_inner_blocks = log_freq // prune_frequency
+
+        def _inner_step(state, data_block):
+            """One restructure cycle: (prune_frequency-1) normal steps + 1 restructure step.
+
+            data_block: (prune_frequency, batch_size, ...) slice of the data.
+            """
+            all_metrics = []
+            for i in range(prune_frequency - 1):
+                state, step_metrics = train_step(state, (data_block[0][i], data_block[1][i]), do_restructure=False)
+                all_metrics.append(step_metrics)
+            state, step_metrics = train_step(state, (data_block[0][-1], data_block[1][-1]), do_restructure=True)
+            all_metrics.append(step_metrics)
+            stacked = jax.tree.map(lambda *args: jnp.stack(args), *all_metrics)
+            return state, stacked
+
+        def scan_steps(state, data):
+            # data: (log_freq, batch_size, ...) — reshape into (n_inner_blocks, prune_frequency, ...)
+            images, labels = data
+            images = images.reshape(n_inner_blocks, prune_frequency, *images.shape[1:])
+            labels = labels.reshape(n_inner_blocks, prune_frequency, *labels.shape[1:])
+            state, metrics = jax.lax.scan(_inner_step, state, (images, labels))
+            # metrics leaves have shape (n_inner_blocks, prune_frequency) — flatten
+            metrics = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), metrics)
+            return state, metrics
+    else:
+        def scan_steps(state, data):
+            return jax.lax.scan(train_step, state, data, unroll=SCAN_UNROLL)
 
     vmapped_scan = jax.jit(jax.vmap(scan_steps))
 

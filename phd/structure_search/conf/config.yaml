@@ -37,9 +37,13 @@ optimizer:
   autostep: true
   meta_learning_rate: 0.002
 
-# Structure tracker (placeholder)
+# Structure tracker (ConnectivityManager for dynamic networks)
 structure_tracker:
   enabled: false
+  replace_rate: 1e-4        # fraction of active units to replace per step (accumulated)
+  decay_rate: 0.99           # EMA decay for utility tracking
+  maturity_threshold: 100    # min steps before a unit can be pruned (-1 to disable)
+  prune_frequency: 100       # restructure every N steps
 
 # Training
 train:
