@@ -1,5 +1,5 @@
 experiment: structure-search
-sweep_name: dynamic_idbd_sweep
+sweep_name: dynamic_idbd_sweep_v2
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
@@ -31,18 +31,19 @@ parameters:
   optimizer.autostep: true
 
   optimizer.learning_rate:
-    - "${eval:2**-9}"
-    - "${eval:2**-8}"
-    - "${eval:2**-7}"
     - "${eval:2**-6}"
     - "${eval:2**-5}"
+    - "${eval:2**-4}"
+    - "${eval:2**-3}"
+    - "${eval:2**-2}"
+    - "${eval:2**-1}"
 
   optimizer.meta_learning_rate:
-    - "${eval:2**-9}"
-    - "${eval:2**-8}"
-    - "${eval:2**-7}"
     - "${eval:2**-6}"
     - "${eval:2**-5}"
+    - "${eval:2**-4}"
+    - "${eval:2**-3}"
+    - "${eval:2**-2}"
 
   seed:
     type: atomic

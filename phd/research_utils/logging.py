@@ -22,6 +22,8 @@ comet_ml = None
 mlflow = None
 experiment_module_name: Optional[str] = None
 _mlflow_child_run_ids: List[str] = []
+_mlflow_run_id: Optional[str] = None
+_mlflow_client = None
 
 
 logger = logging.getLogger(__name__)
@@ -51,10 +53,11 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
         Updated configuration object, or None if no config provided.
     """
     global wandb, comet_ml, mlflow, experiment_module_name
-    
+    global _mlflow_run_id, _mlflow_client
+
     if config and config.get('mlflow', False):
         import mlflow
-        
+
         if os.environ.get('MLFLOW_RUN_ID') and os.environ.get('MLFLOW_TRACKING_URI'):
             # When both are passed this is a sweep, so use the environment variable
             # provided by the sweep script.
@@ -70,12 +73,18 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
             mlflow.set_tracking_uri(os.environ.get('MLFLOW_TRACKING_URI'))
         else:
             mlflow.set_tracking_uri(config.get('mlflow_tracking_uri', MLFLOW_DEFAULT_TRACKING_URI))
-            
+
         print(f'MLFLOW_TRACKING_URI: {mlflow.get_tracking_uri()}')
-        
+
         if os.environ.get('MLFLOW_RUN_ID') is None:
             mlflow.set_experiment(project)
         mlflow.start_run()
+
+        # Cache run ID and client for thread-safe logging (mlflow.log_metrics
+        # uses thread-local active run which breaks from background threads)
+        _mlflow_run_id = mlflow.active_run().info.run_id
+        _mlflow_client = mlflow.tracking.MlflowClient()
+
         raw_dict_config = omegaconf.OmegaConf.to_container(
             config, resolve=True, throw_on_missing=True)
         flat_config = flatten_dict(raw_dict_config)
@@ -341,7 +350,9 @@ def log_metrics(metrics: Dict[str, Union[int, float]], config: DictConfig,
                 v = v.tolist()
             prepped_metrics[f'{prefix}{k}'] = v
         step = int(step) if step is not None else None
-        mlflow.log_metrics(prepped_metrics, step=step)
+        # Use cached client + run ID for thread safety
+        for k, v in prepped_metrics.items():
+            _mlflow_client.log_metric(_mlflow_run_id, k, v, step=step)
     
     if config.get('wandb', False):
         if step is not None:
@@ -470,8 +481,11 @@ def finish_experiment(config: DictConfig) -> None:
     Args:
         config: Hydra configuration object specifying logging framework.
     """
+    global _mlflow_run_id, _mlflow_client
     if config.get('mlflow', False):
         mlflow.end_run()
+        _mlflow_run_id = None
+        _mlflow_client = None
     if config.get('wandb', False):
         wandb.finish()
     if config.get('comet_ml', False):

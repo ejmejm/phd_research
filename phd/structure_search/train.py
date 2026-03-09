@@ -201,7 +201,7 @@ def train_step(train_state: TrainState, data) -> Tuple[TrainState, StepMetrics]:
 
     # Optimizer update (IDBD needs prediction gradients in addition to loss gradients)
     if train_state.optimizer.name == 'idbd':
-        output_grads = jax.grad(
+        output_grads = eqx.filter_grad(
             lambda m: jax.vmap(m)(images)[0].mean(axis=0).sum()
         )(train_state.model)
         updates, new_optimizer = train_state.optimizer.with_update(
@@ -261,10 +261,8 @@ def run_experiment(
     log_executor = ThreadPoolExecutor(max_workers=1)
     log_futures = []
 
-    # Capture parent run ID so background thread can log to the correct run
-    import mlflow
-    parent_run_id = mlflow.active_run().info.run_id
-    mlflow_client = mlflow.tracking.MlflowClient()
+    logging_active = (cfg.get('mlflow', False) or cfg.get('wandb', False)
+                      or cfg.get('comet_ml', False))
 
     for _ in range(num_scans):
         # Pre-sample one cycle of data on CPU per seed
@@ -279,22 +277,30 @@ def run_experiment(
         per_seed_acc = metrics.correct.mean(axis=1)  # (n_seeds,)
         mean_loss = float(per_seed_loss.mean())
         mean_acc = float(per_seed_acc.mean())
+        std_loss = float(per_seed_loss.std())
+        std_acc = float(per_seed_acc.std())
 
         step = int(train_state.step[0].item())
 
-        # Submit logging to background thread (use client API to avoid thread-local active run issue)
-        def _log_step(mean_loss, mean_acc, per_seed_loss, per_seed_acc, step):
-            mlflow_client.log_metric(parent_run_id, 'loss', mean_loss, step=step)
-            mlflow_client.log_metric(parent_run_id, 'accuracy', mean_acc, step=step)
-            log_child_metrics(
-                {'loss': per_seed_loss, 'accuracy': per_seed_acc},
-                cfg, step=step,
-            )
+        # Background logging
+        if logging_active:
+            def _log_step(mean_loss, std_loss, mean_acc, std_acc,
+                          per_seed_loss, per_seed_acc, step):
+                log_metrics({
+                    'loss': mean_loss,
+                    'loss_std': std_loss,
+                    'accuracy': mean_acc,
+                    'accuracy_std': std_acc,
+                }, cfg, step=step)
+                log_child_metrics(
+                    {'loss': per_seed_loss, 'accuracy': per_seed_acc},
+                    cfg, step=step,
+                )
 
-        log_futures.append(log_executor.submit(
-            _log_step, mean_loss, mean_acc,
-            per_seed_loss.tolist(), per_seed_acc.tolist(), step,
-        ))
+            log_futures.append(log_executor.submit(
+                _log_step, mean_loss, std_loss, mean_acc, std_acc,
+                per_seed_loss.tolist(), per_seed_acc.tolist(), step,
+            ))
 
         all_losses.append(mean_loss)
         all_accuracies.append(mean_acc)
@@ -329,6 +335,11 @@ def main(cfg: DictConfig) -> None:
         cfg.seed = [cfg.seed]
     else:
         cfg.seed = list(cfg.seed)
+
+    if cfg.get('log_individual_seeds', False) and not cfg.get('mlflow', False):
+        raise ValueError(
+            'log_individual_seeds requires mlflow logging. '
+            'Set mlflow=true or disable log_individual_seeds.')
 
     set_seed(cfg.seed[0])
     init_child_runs(cfg.seed, cfg)
