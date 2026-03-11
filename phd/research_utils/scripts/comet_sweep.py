@@ -116,6 +116,13 @@ def create_sweep(config_path):
     if 'name' in config:
         config['parameters']['sweep_name'] = config['name']
 
+    # Convert atomic parameters ({value: X}) to fixed string values.
+    # The value is passed as-is to each trial (not swept).
+    for key in list(config['parameters']):
+        entry = config['parameters'][key]
+        if isinstance(entry, dict) and 'value' in entry and 'type' not in entry:
+            config['parameters'][key] = str(entry['value'])
+
     final_configs = []
     config_stack = [config]
     while len(config_stack) > 0:

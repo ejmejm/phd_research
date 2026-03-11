@@ -121,7 +121,7 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
         workspace = config.get('comet_ml_workspace', None)
         if workspace is None:
             workspace = api.get_default_workspace()
-            logger.log(f'CometML workspace not specified, using retrieved default: {workspace}')
+            logger.info(f'CometML workspace not specified, using retrieved default: {workspace}')
         
         # Determine whether experiments should be run online or offline
         experiment_cls = comet_ml.Experiment
