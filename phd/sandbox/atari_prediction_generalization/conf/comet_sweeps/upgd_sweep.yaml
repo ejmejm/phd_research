@@ -38,5 +38,7 @@ parameters:
     - 0.01
     - 0.001
 
+  train.reinit_at_game_boundary: [false, true]
+
   seed:
     value: [1, 2, 3, 4, 5]
