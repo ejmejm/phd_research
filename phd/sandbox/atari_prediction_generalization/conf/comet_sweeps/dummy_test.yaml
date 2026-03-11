@@ -13,10 +13,10 @@ parameters:
 
   optimizer.name: adam
 
-  optimizer.learning_rate: "${eval:2**-15}"
+  optimizer.learning_rate: ["${eval:2**-15}", "${eval:2**-13}", "${eval:2**-11}"]
 
   train.reinit_at_game_boundary: false
   train.total_steps: 5000
 
   seed:
-    value: [1]
+    value: [1, 2, 3]
