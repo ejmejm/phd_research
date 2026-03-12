@@ -33,6 +33,10 @@ Utility Methods
    that cause harm from those that fight it. Should produce the cleanest separation between
    relevant and irrelevant inputs.
 
+4. **UPGD** (first-order Taylor, Elsayed & Mahmood 2023): -(∂L/∂a_i) · a_i.
+   First-order approximation of the true leave-one-out utility. Signed, but uses
+   local gradient information rather than the counterfactual |e+c|-|e| formulation.
+
 Hypotheses
 ----------
 - All three methods should assign higher utility to relevant inputs (0-4) than irrelevant
@@ -83,7 +87,7 @@ N_TEACHER_HIDDEN = 4
 N_STUDENT_INPUTS = 20
 N_STUDENT_HIDDEN = 16
 N_RELEVANT = 5
-N_STEPS = 100_000
+N_STEPS = 50_000
 DRIFT_FREQUENCY = 100
 TRACE_DECAY = 0.999
 SEED = np.random.randint(0, 1000000)
@@ -433,6 +437,47 @@ def compute_utility_approach_e(model, x, y_star, y_hat):
     return U_input, U_hidden
 
 
+def compute_utility_upgd(model, x, loss_grads):
+    """UPGD first-order feature utility (Elsayed & Mahmood 2023).
+
+    u_j ≈ -(∂L/∂a_j) · a_j
+
+    Uses the already-computed loss gradients (w.r.t. weights) to extract
+    activation gradients without an extra backward pass:
+      grad_W1 = outer(∂L/∂z, x), so ∂L/∂z = grad_W1 @ x / ||x||²
+      ∂L/∂x = W1.T @ ∂L/∂z
+      ∂L/∂a = ∂L/∂z / f'(z)
+
+    Args:
+        model: MLP student model
+        x: input vector, shape (N_STUDENT_INPUTS,)
+        loss_grads: gradient of loss w.r.t. model parameters (same pytree as model)
+
+    Returns:
+        (U_input, U_hidden) where:
+          U_input: utility per input, shape (N_STUDENT_INPUTS,)
+          U_hidden: utility per hidden unit, shape (N_STUDENT_HIDDEN,)
+    """
+    W1 = model.layers[0].weight          # (H, N)
+    grad_W1 = loss_grads.layers[0].weight  # (H, N) = outer(∂L/∂z, x)
+
+    # Extract ∂L/∂z from weight gradient: grad_W1 = outer(dL_dz, x)
+    x_norm_sq = jnp.sum(x * x)
+    dL_dz = (grad_W1 @ x) / jnp.maximum(x_norm_sq, 1e-10)  # (H,)
+
+    # Input utility: -(∂L/∂x_i) · x_i
+    dL_dx = W1.T @ dL_dz  # (N,)
+    U_input = -dL_dx * x  # (N,)
+
+    # Hidden utility: -(∂L/∂a_j) · a_j
+    a_hidden = jax.nn.sigmoid(W1 @ x)  # (H,)
+    f_prime = a_hidden * (1.0 - a_hidden)
+    dL_da = dL_dz / jnp.maximum(f_prime, 1e-6)  # (H,)
+    U_hidden = -dL_da * a_hidden  # (H,)
+
+    return U_input, U_hidden
+
+
 def compute_utility_approach_c(model, x, y_star, y_hat):
     """Approach C: Signed-Conserving Redistribution.
 
@@ -543,12 +588,13 @@ def compute_true_loo_utility(model, x, y_star):
 # ==============================================================================
 
 def _train_step_body(model, optimizer, x, y_star,
-                     ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+                     ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_upgd, ema_loo,
                      ema_target_mag, ema_error_reduced,
                      ema_sum_input_a, ema_sum_hidden_a,
                      ema_sum_input_b, ema_sum_hidden_b,
                      ema_sum_input_c, ema_sum_hidden_c,
                      ema_sum_input_e, ema_sum_hidden_e,
+                     ema_sum_input_upgd, ema_sum_hidden_upgd,
                      ema_sum_loo,
                      compute_pred_grads, compute_loo):
     """Core training step logic, shared by SGD and Autostep scan bodies."""
@@ -557,12 +603,16 @@ def _train_step_body(model, optimizer, x, y_star,
     y_hat = y_hat_arr.squeeze()
     mse = (y_star - y_hat) ** 2
 
+    # Compute loss gradients (needed for optimizer update AND UPGD utility)
+    loss_grads = eqx.filter_grad(lambda m: (m(x)[0].squeeze() - y_star) ** 2)(model)
+
     # Compute utilities
     u_contribution = compute_contribution_utility(model, x)
     u_approach_a, u_hidden_a = compute_utility_approach_a(model, x, y_star, y_hat)
     u_approach_b, u_hidden_b = compute_utility_approach_b(model, x, y_star, y_hat)
     u_approach_c, u_hidden_c = compute_utility_approach_c(model, x, y_star, y_hat)
     u_approach_e, u_hidden_e = compute_utility_approach_e(model, x, y_star, y_hat)
+    u_upgd, u_hidden_upgd = compute_utility_upgd(model, x, loss_grads)
 
     # True LOO (optional, 20 extra forward passes)
     if compute_loo:
@@ -576,6 +626,7 @@ def _train_step_body(model, optimizer, x, y_star,
     ema_b = TRACE_DECAY * ema_b + (1 - TRACE_DECAY) * u_approach_b
     ema_c = TRACE_DECAY * ema_c + (1 - TRACE_DECAY) * u_approach_c
     ema_e = TRACE_DECAY * ema_e + (1 - TRACE_DECAY) * u_approach_e
+    ema_upgd = TRACE_DECAY * ema_upgd + (1 - TRACE_DECAY) * u_upgd
 
     # Budget traces: |y*|, error reduced, sum of input/hidden utilities
     error_reduced = jnp.abs(y_star) - jnp.abs(y_star - y_hat)
@@ -589,9 +640,10 @@ def _train_step_body(model, optimizer, x, y_star,
     ema_sum_hidden_c = TRACE_DECAY * ema_sum_hidden_c + (1 - TRACE_DECAY) * jnp.sum(u_hidden_c)
     ema_sum_input_e = TRACE_DECAY * ema_sum_input_e + (1 - TRACE_DECAY) * jnp.sum(u_approach_e)
     ema_sum_hidden_e = TRACE_DECAY * ema_sum_hidden_e + (1 - TRACE_DECAY) * jnp.sum(u_hidden_e)
+    ema_sum_input_upgd = TRACE_DECAY * ema_sum_input_upgd + (1 - TRACE_DECAY) * jnp.sum(u_upgd)
+    ema_sum_hidden_upgd = TRACE_DECAY * ema_sum_hidden_upgd + (1 - TRACE_DECAY) * jnp.sum(u_hidden_upgd)
 
-    # Compute gradients and update
-    loss_grads = eqx.filter_grad(lambda m: (m(x)[0].squeeze() - y_star) ** 2)(model)
+    # Update model
     if compute_pred_grads:
         pred_grads = eqx.filter_grad(lambda m: m(x)[0].squeeze())(model)
         updates, new_optimizer = optimizer.with_update((loss_grads, pred_grads), model)
@@ -600,41 +652,45 @@ def _train_step_body(model, optimizer, x, y_star,
     new_model = eqx.apply_updates(model, updates)
 
     return (new_model, new_optimizer, mse,
-            ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+            ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_upgd, ema_loo,
             ema_target_mag, ema_error_reduced,
             ema_sum_input_a, ema_sum_hidden_a,
             ema_sum_input_b, ema_sum_hidden_b,
             ema_sum_input_c, ema_sum_hidden_c,
             ema_sum_input_e, ema_sum_hidden_e,
+            ema_sum_input_upgd, ema_sum_hidden_upgd,
             ema_sum_loo)
 
 
 def _make_scan_fn(compute_pred_grads, compute_loo):
     """Build a scan body for either SGD or Autostep."""
     def scan_fn(carry, step_data):
-        (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+        (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_upgd, ema_loo,
          ema_target_mag, ema_error_reduced,
          ema_sum_input_a, ema_sum_hidden_a,
          ema_sum_input_b, ema_sum_hidden_b,
          ema_sum_input_c, ema_sum_hidden_c,
          ema_sum_input_e, ema_sum_hidden_e,
+         ema_sum_input_upgd, ema_sum_hidden_upgd,
          ema_sum_loo) = carry
         x, y_star = step_data
 
-        (model, optimizer, mse, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+        (model, optimizer, mse, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_upgd, ema_loo,
          ema_target_mag, ema_error_reduced,
          ema_sum_input_a, ema_sum_hidden_a,
          ema_sum_input_b, ema_sum_hidden_b,
          ema_sum_input_c, ema_sum_hidden_c,
          ema_sum_input_e, ema_sum_hidden_e,
+         ema_sum_input_upgd, ema_sum_hidden_upgd,
          ema_sum_loo) = _train_step_body(
             model, optimizer, x, y_star,
-            ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+            ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_upgd, ema_loo,
             ema_target_mag, ema_error_reduced,
             ema_sum_input_a, ema_sum_hidden_a,
             ema_sum_input_b, ema_sum_hidden_b,
             ema_sum_input_c, ema_sum_hidden_c,
             ema_sum_input_e, ema_sum_hidden_e,
+            ema_sum_input_upgd, ema_sum_hidden_upgd,
             ema_sum_loo,
             compute_pred_grads, compute_loo)
 
@@ -645,19 +701,21 @@ def _make_scan_fn(compute_pred_grads, compute_loo):
         else:
             step_sizes = jnp.zeros(N_STUDENT_INPUTS)
 
-        carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+        carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_upgd, ema_loo,
                  ema_target_mag, ema_error_reduced,
                  ema_sum_input_a, ema_sum_hidden_a,
                  ema_sum_input_b, ema_sum_hidden_b,
                  ema_sum_input_c, ema_sum_hidden_c,
                  ema_sum_input_e, ema_sum_hidden_e,
+                 ema_sum_input_upgd, ema_sum_hidden_upgd,
                  ema_sum_loo)
-        outputs = (mse, ema_contrib, ema_a, ema_b, step_sizes, ema_c, ema_e, ema_loo,
+        outputs = (mse, ema_contrib, ema_a, ema_b, step_sizes, ema_c, ema_e, ema_upgd, ema_loo,
                    ema_target_mag, ema_error_reduced,
                    ema_sum_input_a, ema_sum_hidden_a,
                    ema_sum_input_b, ema_sum_hidden_b,
                    ema_sum_input_c, ema_sum_hidden_c,
                    ema_sum_input_e, ema_sum_hidden_e,
+                   ema_sum_input_upgd, ema_sum_hidden_upgd,
                    ema_sum_loo)
         return carry, outputs
 
@@ -745,6 +803,7 @@ def run_experiment(optimizer_name, seed):
     ema_b = jnp.zeros(N_STUDENT_INPUTS)
     ema_c = jnp.zeros(N_STUDENT_INPUTS)
     ema_e = jnp.zeros(N_STUDENT_INPUTS)
+    ema_upgd = jnp.zeros(N_STUDENT_INPUTS)
     ema_loo = jnp.zeros(N_STUDENT_INPUTS)
     ema_target_mag = jnp.float32(0.0)
     ema_error_reduced = jnp.float32(0.0)
@@ -756,16 +815,19 @@ def run_experiment(optimizer_name, seed):
     ema_sum_hidden_c = jnp.float32(0.0)
     ema_sum_input_e = jnp.float32(0.0)
     ema_sum_hidden_e = jnp.float32(0.0)
+    ema_sum_input_upgd = jnp.float32(0.0)
+    ema_sum_hidden_upgd = jnp.float32(0.0)
     ema_sum_loo = jnp.float32(0.0)
 
     # Build and run the scan
     scan_fn = _make_scan_fn(compute_pred_grads=is_autostep, compute_loo=COMPUTE_TRUE_LOO)
-    init_carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+    init_carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_upgd, ema_loo,
                   ema_target_mag, ema_error_reduced,
                   ema_sum_input_a, ema_sum_hidden_a,
                   ema_sum_input_b, ema_sum_hidden_b,
                   ema_sum_input_c, ema_sum_hidden_c,
                   ema_sum_input_e, ema_sum_hidden_e,
+                  ema_sum_input_upgd, ema_sum_hidden_upgd,
                   ema_sum_loo)
     step_data = (x_all, y_star_all)
 
@@ -793,18 +855,21 @@ def run_experiment(optimizer_name, seed):
     ss_hist = np.concatenate([o[4] for o in all_outputs])
     app_c_hist = np.concatenate([o[5] for o in all_outputs])
     app_e_hist = np.concatenate([o[6] for o in all_outputs])
-    loo_hist = np.concatenate([o[7] for o in all_outputs])
-    target_mag_hist = np.concatenate([o[8] for o in all_outputs])
-    error_reduced_hist = np.concatenate([o[9] for o in all_outputs])
-    sum_input_a_hist = np.concatenate([o[10] for o in all_outputs])
-    sum_hidden_a_hist = np.concatenate([o[11] for o in all_outputs])
-    sum_input_b_hist = np.concatenate([o[12] for o in all_outputs])
-    sum_hidden_b_hist = np.concatenate([o[13] for o in all_outputs])
-    sum_input_c_hist = np.concatenate([o[14] for o in all_outputs])
-    sum_hidden_c_hist = np.concatenate([o[15] for o in all_outputs])
-    sum_input_e_hist = np.concatenate([o[16] for o in all_outputs])
-    sum_hidden_e_hist = np.concatenate([o[17] for o in all_outputs])
-    sum_loo_hist = np.concatenate([o[18] for o in all_outputs])
+    upgd_hist = np.concatenate([o[7] for o in all_outputs])
+    loo_hist = np.concatenate([o[8] for o in all_outputs])
+    target_mag_hist = np.concatenate([o[9] for o in all_outputs])
+    error_reduced_hist = np.concatenate([o[10] for o in all_outputs])
+    sum_input_a_hist = np.concatenate([o[11] for o in all_outputs])
+    sum_hidden_a_hist = np.concatenate([o[12] for o in all_outputs])
+    sum_input_b_hist = np.concatenate([o[13] for o in all_outputs])
+    sum_hidden_b_hist = np.concatenate([o[14] for o in all_outputs])
+    sum_input_c_hist = np.concatenate([o[15] for o in all_outputs])
+    sum_hidden_c_hist = np.concatenate([o[16] for o in all_outputs])
+    sum_input_e_hist = np.concatenate([o[17] for o in all_outputs])
+    sum_hidden_e_hist = np.concatenate([o[18] for o in all_outputs])
+    sum_input_upgd_hist = np.concatenate([o[19] for o in all_outputs])
+    sum_hidden_upgd_hist = np.concatenate([o[20] for o in all_outputs])
+    sum_loo_hist = np.concatenate([o[21] for o in all_outputs])
 
     return {
         'mse_history': mse_hist,
@@ -813,6 +878,7 @@ def run_experiment(optimizer_name, seed):
         'approach_b_traces': app_b_hist,
         'approach_c_traces': app_c_hist,
         'approach_e_traces': app_e_hist,
+        'upgd_traces': upgd_hist,
         'loo_traces': loo_hist,
         'step_size_history': ss_hist if is_autostep else None,
         'target_mag': target_mag_hist,
@@ -825,6 +891,8 @@ def run_experiment(optimizer_name, seed):
         'sum_hidden_c': sum_hidden_c_hist,
         'sum_input_e': sum_input_e_hist,
         'sum_hidden_e': sum_hidden_e_hist,
+        'sum_input_upgd': sum_input_upgd_hist,
+        'sum_hidden_upgd': sum_hidden_upgd_hist,
         'sum_loo': sum_loo_hist,
     }
 
@@ -872,8 +940,8 @@ def plot_results(sgd_results, autostep_results):
     print("Saved fig1_learning_curves.png")
 
     # ---- Figure 2: Input-level utility grid ----
-    utility_names = ['Contribution', 'Approach A', 'Approach B', 'Approach C', 'Approach E']
-    utility_keys = ['contribution_traces', 'approach_a_traces', 'approach_b_traces', 'approach_c_traces', 'approach_e_traces']
+    utility_names = ['Contribution', 'Approach A', 'Approach B', 'Approach C', 'Approach E', 'UPGD']
+    utility_keys = ['contribution_traces', 'approach_a_traces', 'approach_b_traces', 'approach_c_traces', 'approach_e_traces', 'upgd_traces']
     if COMPUTE_TRUE_LOO:
         utility_names.append('True LOO')
         utility_keys.append('loo_traces')
@@ -915,6 +983,7 @@ def plot_results(sgd_results, autostep_results):
         ('Approach B', 'sum_input_b', 'sum_hidden_b'),
         ('Approach C', 'sum_input_c', 'sum_hidden_c'),
         ('Approach E', 'sum_input_e', 'sum_hidden_e'),
+        ('UPGD', 'sum_input_upgd', 'sum_hidden_upgd'),
     ]
     if COMPUTE_TRUE_LOO:
         method_budget_keys.append(('True LOO', 'sum_loo', None))
@@ -941,6 +1010,36 @@ def plot_results(sgd_results, autostep_results):
     fig3.tight_layout()
     fig3.savefig(SCRIPT_DIR / 'fig3_utility_budget.png', dpi=150)
     print("Saved fig3_utility_budget.png")
+
+    # ---- Figure 4: Separation (Cohen's d) over time ----
+    sep_win = 1000
+    kernel = np.ones(sep_win) / sep_win
+    fig4, axes4 = plt.subplots(1, 2, figsize=(14, 5))
+    for col, (results, opt_name) in enumerate(
+        [(sgd_results, 'SGD'), (autostep_results, 'Autostep')]
+    ):
+        ax = axes4[col]
+        for u_key, u_name in zip(utility_keys, utility_names):
+            traces = results[u_key]
+            rel = np.mean(traces[:, :N_RELEVANT], axis=1)
+            irr = np.mean(traces[:, N_RELEVANT:], axis=1)
+            rel_roll = np.convolve(rel, kernel, mode='valid')
+            irr_roll = np.convolve(irr, kernel, mode='valid')
+            rel_var_roll = np.convolve(np.var(traces[:, :N_RELEVANT], axis=1), kernel, mode='valid')
+            irr_var_roll = np.convolve(np.var(traces[:, N_RELEVANT:], axis=1), kernel, mode='valid')
+            pool_std = np.sqrt((rel_var_roll + irr_var_roll) / 2)
+            d_roll = (rel_roll - irr_roll) / (pool_std + 1e-10)
+            steps = np.arange(sep_win - 1, sep_win - 1 + len(d_roll))
+            ax.plot(steps, d_roll, label=u_name, linewidth=1.2)
+        ax.axhline(1.0, color='black', linestyle='--', linewidth=0.8, alpha=0.5, label='d=1')
+        ax.set_title(f'Separation over time ({opt_name})')
+        ax.set_xlabel('Step')
+        ax.set_ylabel("Cohen's d (rolling {})".format(sep_win))
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+    fig4.tight_layout()
+    fig4.savefig(SCRIPT_DIR / 'fig4_separation.png', dpi=150)
+    print("Saved fig4_separation.png")
 
 
 # ==============================================================================
@@ -977,6 +1076,7 @@ if __name__ == '__main__':
             ('Approach B', 'approach_b_traces'),
             ('Approach C', 'approach_c_traces'),
             ('Approach E', 'approach_e_traces'),
+            ('UPGD', 'upgd_traces'),
         ]
         if COMPUTE_TRUE_LOO:
             summary_methods.append(('True LOO', 'loo_traces'))
