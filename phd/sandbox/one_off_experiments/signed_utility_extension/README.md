@@ -19,21 +19,13 @@ $$u_i = \lvert y^* - \sum_{j \neq i} w_j \cdot a_j \rvert - \lvert y^* - \hat{y}
 - $u_i < 0$: feature $i$ is harmful (removing it would decrease error)
 - $\sum_i u_i \leq \lvert y^* \rvert$: total utility bounded by target magnitude
 
-Implemented in `SignedCBPTracker` in `phd/feature_search/core/feature_recycling.py` (line 737) and demonstrated in `signed_utility_experiment.py`.
+Implemented in `SignedCBPTracker` in `phd/feature_search/core/feature_recycling.py` (line 737).
 
 ## Multi-Layer Extension: Shared Output-Layer Step
 
-All three approaches below share the same first step. At the output layer, we work in pre-activation space:
+All approaches share the same first step. At the output layer:
 
-$$z_{\text{out}}^* = f^{-1}(y^*)$$
-
-$$e = z_{\text{out}}^* - z_{\text{out}}$$
-
-$$c_j = w_{j,\text{out}} \cdot a_j$$
-
-$$U_j = \lvert e + c_j \rvert - \lvert e \rvert$$
-
-This is the standard signed utility formula, just applied to pre-activations. The property $\sum_j U_j \leq \lvert z_{\text{out}}^* \rvert$ holds as usual.
+$$e = z_{\text{out}}^* - z_{\text{out}}, \quad c_j = w_{j,\text{out}} \cdot a_j, \quad U_j = \lvert e + c_j \rvert - \lvert e \rvert$$
 
 The question is: **how to propagate these utilities backward through hidden layers.**
 
@@ -41,378 +33,84 @@ The question is: **how to propagate these utilities backward through hidden laye
 
 ## Approach A: Proportional Redistribution
 
-### Description
-
-The simplest option. Each unit distributes its utility to its children in proportion to the magnitude of their contributions, preserving the parent's sign:
-
-For each unit $j$ with utility $U_j$, for each child $k$:
+Each unit distributes its utility to children in proportion to contribution magnitude, preserving the parent's sign:
 
 $$U_{k \leftarrow j} = U_j \cdot \frac{\lvert c_{k \to j} \rvert}{\sum_m \lvert c_{m \to j} \rvert}$$
 
-where $c_{k \to j} = w_{kj} \cdot a_k$.
-
-A unit's total utility is the sum from all parents: $U_k = \sum_j U_{k \leftarrow j}$.
-
-### Pros
-- **Exactly conserves utility**: $\sum_k U_{k \leftarrow j} = U_j$ with no normalization trick needed
-- **Simple to implement and reason about**: one line of math
-- **O(1) per connection**
-- **No activation function derivative needed**: works identically for any activation
-
-### Cons
-- **All children inherit the parent's sign.** If a parent has negative utility (is harmful), every child gets negative utility, regardless of whether the child is causing or mitigating the harm. This is the fundamental limitation.
-- **Different formula than the output layer.** The output layer uses the signed utility formula; redistribution uses proportional splitting. Not a "uniform" approach.
-
-### When It Gives Wrong Answers
-
-When a parent is harmful and its children contribute in *different directions*, Approach A cannot tell which child is causing vs. fighting the harm. A child that partially mitigates a harmful parent still receives negative utility.
+Simple and exactly conserves utility, but **all children inherit the parent's sign** — cannot distinguish which child causes vs. mitigates harm.
 
 > Worked examples: [multilayer_signed_utility.md, Section 4](multilayer_signed_utility.md#4-approach-a-proportional-redistribution)
 
 ---
 
-## Approach B: Recursive Signed Utility (Recommended)
+## Approach B: Recursive Signed Utility
 
-### Description
+Applies the signed utility formula at every layer using a pseudo-error derived from the parent's utility:
 
-Apply the signed utility formula at every layer by defining a "pseudo-error" for each hidden unit based on its parent-level utility:
+$$e_j = \frac{\lvert U_j \rvert}{f'(z_j)}, \quad s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert, \quad U_{k \leftarrow j} = s_{k \to j} \cdot \frac{\lvert U_j \rvert}{\sum_k \lvert s_{k \to j} \rvert}$$
 
-For each unit $j$ with utility $U_j$:
+The pseudo-error $e_j$ is always positive. For harmful units ($U_j < 0$), this means "the pre-activation should increase to reduce harm." Children pushing the pre-activation up get positive utility; those pulling it down get negative. The normalization enforces **absolute conservation**: $\sum_k \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$.
 
-$$e_j = \frac{\lvert U_j \rvert}{f'(z_j)}$$
+Correctly identifies which children cause vs. mitigate harm, unlike A. When $f'(z_j) \to 0$ (saturation), degrades smoothly to a signed version of A.
 
-For each child $k$:
-
-$$c_{k \to j} = w_{kj} \cdot a_k$$
-
-$$s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert$$
-
-$$S = \sum_k \lvert s_{k \to j} \rvert$$
-
-$$U_{k \leftarrow j} = s_{k \to j} \cdot \frac{\lvert U_j \rvert}{S}$$
-
-The pseudo-error $e_j$ is always positive. It represents "how much should this unit's pre-activation increase to improve the network's output?" The magnitude comes from the parent-level utility, and the $1 / f'(z_j)$ factor converts from activation-space to pre-activation-space.
-
-The normalization step ($\cdot \lvert U_j \rvert / S$) ensures $\sum_k \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$ -- utility is conserved in absolute value.
-
-### Why $e_j$ Is Always Positive
-
-This was the key design decision, arrived at after testing several sign conventions. When a unit has *negative* utility (it's harmful), it means its activation should move in the direction that reduces harm. For a unit producing too-negative an activation (which hurts the output), $e_j > 0$ means "the pre-activation should increase." The signed utility formula then naturally gives:
-- Positive scores to children that push the pre-activation up (toward improvement)
-- Negative scores to children that push it down (causing the harm)
-
-If we instead used $e_j = U_j / f'(z_j)$ (preserving sign), the pseudo-error for harmful units would point *further into the harmful direction*, producing inverted sign assignments.
-
-> Detailed derivation of why the sign flip matters, with a worked counterexample: [multilayer_signed_utility.md, Sections 5.3-5.6](multilayer_signed_utility.md#5-approach-b-recursive-signed-utility) (the "Clean Algorithm" and "Harmful Case (Revised, no sign flip)" subsections)
-
-### Pros
-- **Same formula at every layer**: signed utility formula + normalization
-- **Correctly identifies which children cause vs. mitigate harm**: unlike A, a child that partially counteracts a harmful parent gets positive utility
-- **Conserves utility** (via normalization): $\sum_k \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$
-- **O(1) per connection**
-- **Graceful saturation behavior**: when $f'(z_j) \to 0$ (saturated activation), $e_j \to \infty$, and the formula converges to a signed version of Approach A (proportional to $\lvert c_{k \to j} \rvert$ with signs based on $\text{sign}(c_{k \to j})$). This is a smooth degradation, not a failure mode.
-
-### Cons
-- **Requires $f'(z_j)$ and $f^{-1}(y^*)$**: needs the activation function's derivative and the inverse (for the output layer). Standard activations (sigmoid, tanh, ReLU) all have these, but it's an assumption.
-- **Normalization is an approximation**: the raw signed utility sum $\sum_k s_{k \to j}$ doesn't naturally equal $\lvert U_j \rvert$, so we force conservation via normalization. This means the per-child values are *scaled* versions of the true counterfactual utilities.
-- **$e_j$ direction is a heuristic**: "always positive" works correctly in the examples tested, but the pseudo-error doesn't have the clean interpretation of the output-layer error (where there's a real target). It could produce unexpected behavior in networks with unusual structure.
-
-### Edge Cases
-- **$f'(z_j) = 0$** (full saturation): $e_j \to \infty$, formula degrades to signed Approach A. Well-behaved.
-- **$U_j = 0$**: $e_j = 0$, all $s_{k \to j} = \lvert c_{k \to j} \rvert$, normalization distributes $0$. All children get $U_{k \leftarrow j} = 0$. Well-behaved.
-- **$S = 0$** (all contributions zero): set all $U_{k \leftarrow j} = 0$.
-- **$f^{-1}(y^*)$ undefined** (e.g., $y^* = 0$ or $1$ for sigmoid): clip to a large finite value.
-
-### Budget Property
-
-At each redistribution, $\sum_k \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$. So utility magnitude is conserved at every layer. The maximum total utility across the whole network is bounded by $\text{depth} \cdot \lvert z_{\text{out}}^* \rvert$, where depth is the longest path from output to input. This makes utility values comparable across layers.
-
-> Full worked examples (linear and sigmoid): [multilayer_signed_utility.md, Sections 5 and 8](multilayer_signed_utility.md#5-approach-b-recursive-signed-utility)
->
-> Formal algorithm specification: [multilayer_signed_utility.md, Section 9](multilayer_signed_utility.md#9-final-algorithm-approach-b-recursive-signed-utility)
-
----
-
-## Approach D: Gradient-Weighted Utility
-
-### Description
-
-Use each child's gradient-based influence on the parent's activation to distribute utility:
-
-For each unit $j$ with utility $U_j$, for each child $k$:
-
-$$g_{k \to j} = f'(z_j) \cdot w_{kj} \cdot a_k$$
-
-$$U_{k \leftarrow j} = U_j \cdot \frac{g_{k \to j}}{\sum_m \lvert g_{m \to j} \rvert}$$
-
-This is a first-order Taylor approximation: "if child $k$'s activation changed slightly, how much would parent $j$'s activation change?"
-
-### Pros
-- **Preserves sign**: children with negative gradient-contributions get opposite-sign utility
-- **Conserves utility** (via normalization)
-- **O(1) per connection**
-- **Naturally incorporates the activation derivative**: saturated parents automatically weight children less
-
-### Cons
-- **Gradients measure marginal sensitivity, not actual contribution.** This is the critical flaw. A child can have a large *current contribution* to a parent (it's the reason the parent has its current value) while having a gradient that points in the *opposite direction*. The gradient tells you what a small perturbation would do; it doesn't tell you what the child is actually doing.
-- **Gives wrong answers in the harmful-feature case.** In the tested example, a child that is the primary *cause* of a parent's harmful activation gets *positive* utility, because its gradient opposes the parent's current value. The gradient correctly says "increasing this child would decrease the parent" but ignores that the child at its *current value* is what made the parent harmful.
-
-### Why It Fails
-
-The root cause is a distinction between **marginal** and **actual** contribution. Signed utility (Approach B) measures actual contribution: "what would the error be if this child's contribution were removed?" Gradient weighting measures marginal contribution: "what would happen if this child's value changed by epsilon?" These diverge when a child's contribution has a different sign than its gradient (e.g., a child contributes $c = -2.0$ but its gradient is also negative, meaning increasing the child would push even more negative -- the gradient and the contribution both push the parent down, but the *utility formula* based on the gradient assigns opposite credit from what the actual-contribution formula assigns).
-
-A variant using actual contributions instead of gradients ($g_{k \to j} = c_{k \to j}$) reduces to a signed version of Approach A, which has the same double-negative problem.
-
-> Detailed failure analysis with worked example: [multilayer_signed_utility.md, Section 6](multilayer_signed_utility.md#6-approach-d-gradient-weighted-utility)
-
----
-
-## Summary
-
-| | Approach A | Approach B | Approach C | Approach D |
-|---|---|---|---|---|
-| **Formula** | Proportional split | Signed utility + abs normalization | Signed utility + signed normalization | Gradient-weighted split |
-| **Signed conservation** | Yes | No (absolute only) | **Yes** | No |
-| **Correct signs (harmful case)** | No | Yes | **Yes (when well-conditioned)** | No |
-| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes |
-| **Same formula every layer** | No | Yes | Yes (with fallback) | No |
-| **Activation derivative needed** | No | Yes | Yes | Yes |
-| **O(1) per connection** | Yes | Yes | Yes | Yes |
-| **Saturation behavior** | N/A | Degrades to signed-A | Degrades to A | Gradients vanish |
-| **Recommendation** | Baseline | Correct signs baseline | **Primary candidate** | Not recommended |
-
-## The Signed Conservation Gap
-
-The original desiderata (Section 1) include **finite budget** with cross-layer comparison. The strongest version of this property is **signed conservation**: if the network reduces absolute error by $E = \lvert y^* \rvert - \lvert y^* - \hat{y} \rvert$, then the utilities at *every layer* should sum to exactly $E$. This means utility is a complete decomposition of credit — nothing is created or lost as we propagate backward.
-
-Approach B only achieves **absolute conservation**: $\sum_k \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$. The *signed* sum $\sum_k U_{k \leftarrow j}$ can differ from $U_j$ because the normalization $s_k \cdot \lvert U_j \rvert / \sum \lvert s_k \rvert$ distributes $\lvert U_j \rvert$ worth of magnitude but allows the signed total to shrink when children have mixed-sign contributions. In practice, this means $\sum U_{\text{input}} < \sum U_{\text{hidden}} < E_{\text{reduced}}$ — utility "leaks" at each layer through cancellation.
-
-Additionally, even at the output layer, the leave-one-out utilities $U_j = \lvert e + c_j \rvert - \lvert e \rvert$ don't sum to $E = \lvert y^* \rvert - \lvert e \rvert$. The leave-one-out sum is $\sum_j (\lvert e + c_j \rvert - \lvert e \rvert)$, which equals error reduced only when all features contribute in the same direction (no overshooting). So signed conservation requires fixing *both* the output layer and the redistribution.
-
-### Why signed conservation matters
-
-Without it, a unit's utility depends on which layer it sits in. A hidden unit with utility 0.5 and an input with utility 0.5 don't represent the same amount of credit for reducing error — the hidden unit's utility was attenuated when redistributed to inputs. This breaks cross-layer comparison, which was the whole point of having a budget.
+> Detailed derivation: [multilayer_signed_utility.md, Sections 5-8](multilayer_signed_utility.md#5-approach-b-recursive-signed-utility)
 
 ---
 
 ## Approach C: Signed-Conserving Redistribution
 
-### The key formula
-
-Every proportional redistribution that preserves the signed sum must take the form:
+Same raw scores as B, but normalized to preserve the **signed** sum:
 
 $$U_{k \leftarrow j} = s_k \cdot \frac{U_j}{\sum_m s_{m \to j}}$$
 
-This is the *only* scaling that gives $\sum_k U_{k \leftarrow j} = U_j$ while keeping utilities proportional to the raw scores $s_k$. (Proof: $\sum_k s_k \cdot U_j / \sum s_m = U_j$.)
+This is the only scaling that gives $\sum_k U_{k \leftarrow j} = U_j$ while keeping utilities proportional to $s_k$. However, when children's contributions nearly cancel ($\sum s_k \approx 0$), the division blows up. Falls back to Approach A when ill-conditioned.
 
-### Full algorithm
+---
 
-**Output layer** (rescaled to sum to error reduced):
+## Approach D: Gradient-Weighted Utility (Not Recommended)
 
-$$e = y^* - \hat{y}$$
+Distributes utility using gradient-based influence: $g_{k \to j} = f'(z_j) \cdot w_{kj} \cdot a_k$.
 
-$$E = \lvert y^* \rvert - \lvert e \rvert$$
+**Fails because gradients measure marginal sensitivity, not actual contribution.** A child that is the primary cause of a parent's harmful activation can get positive utility because its gradient opposes the current value. The gradient says "increasing this child would help" but ignores that the child at its current value is what caused the harm.
 
-$$c_j = w_{\text{out},j} \cdot a_j$$
-
-$$u_j = \lvert e + c_j \rvert - \lvert e \rvert$$
-
-$$U_j = u_j \cdot \frac{E}{\sum_m u_m}$$
-
-**Hidden layers** (signed normalization):
-
-$$e_j = \frac{\lvert U_j \rvert}{f'(z_j)}$$
-
-$$s_k = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert$$
-
-$$S_{\text{signed}} = \sum_m s_{m \to j}$$
-
-$$U_{k \leftarrow j} = s_k \cdot \frac{U_j}{S_{\text{signed}}}$$
-
-### The cancellation problem
-
-When children's contributions nearly cancel ($\sum s_k \approx 0$), the scaling factor $U_j / \sum s_k$ blows up. This happens when the unit's pre-activation $z_j \approx 0$ (because for large pseudo-error, $s_k \approx c_k$ and $\sum c_k = z_j$). In this regime, the unit is at the steepest part of the sigmoid, and small differences between children get amplified into huge utility swings.
-
-This is a fundamental tension, not a fixable edge case:
-- **Signed conservation** requires $\sum U_{k \leftarrow j} = U_j$
-- **Correct child signs** means some $U_{k \leftarrow j} > 0$ and some $< 0$
-- **Bounded magnitudes** requires individual $\lvert U_{k \leftarrow j} \rvert$ stays reasonable
-
-When children partially cancel, satisfying the first two forces the third to fail. You cannot decompose a large signed total into mixed-sign pieces that sum to it without some pieces being larger than the total.
-
-### Practical solution: fallback to Approach A
-
-Approach A *also* has signed conservation ($\sum_k U_j \cdot \lvert c_k \rvert / \sum \lvert c_m \rvert = U_j$), just without child-level sign discrimination. Use it as a fallback when the signed normalization is ill-conditioned:
-
-$$r = \frac{\lvert S_{\text{signed}} \rvert}{\sum \lvert s_k \rvert}$$
-
-If $r > \text{threshold}$ (children mostly aligned):
-
-$$U_{k \leftarrow j} = s_k \cdot \frac{U_j}{S_{\text{signed}}}$$
-
-Otherwise (children nearly cancel):
-
-$$U_{k \leftarrow j} = U_j \cdot \frac{\lvert c_k \rvert}{\sum \lvert c_m \rvert}$$
-
-Both branches preserve $\sum U_{k \leftarrow j} = U_j$. The threshold controls the tradeoff: lower threshold allows more sign discrimination but risks larger magnitudes.
-
-### Properties
-
-| | Approach A | Approach B | **Approach C** |
-|---|---|---|---|
-| **Signed conservation** | Yes | No (absolute only) | **Yes** |
-| **Correct child signs** | No | Yes | **Yes (when well-conditioned)** |
-| **Bounded magnitudes** | Yes | Yes | No (can amplify near cancellation) |
-| **Same formula every layer** | No | Yes | Yes (with fallback) |
-| **O(1) per connection** | Yes | Yes | Yes |
-
-### Why not sequential decomposition?
-
-An alternative: remove children one at a time in some order and assign utility by telescoping ($U_k = \lvert R_{\text{prev}} \rvert - \lvert R_{\text{prev}} - c_k \rvert$). This sums to the right total by construction. But the per-child values depend on the ordering — the first child removed gets credit for the "easy" part of the error, and the last gets credit for the "hard" part. This makes the decomposition arbitrary.
+> Failure analysis: [multilayer_signed_utility.md, Section 6](multilayer_signed_utility.md#6-approach-d-gradient-weighted-utility)
 
 ---
 
 ## Approach E: Calibrated Pseudo-Error
 
-### Motivation
+Instead of computing scores and normalizing, **choose the pseudo-error $e_j$ so that raw scores already sum to the target utility**. No normalization needed.
 
-Approaches B and C both compute raw signed utility scores $s_k = \lvert e_j + c_k \rvert - \lvert e_j \rvert$ and then **normalize** them to enforce conservation. The normalization requires dividing by $\sum s_k$ (C) or $\sum \lvert s_k \rvert$ (B). When children's contributions nearly cancel ($\sum s_k \approx 0$), this division blows up.
+The function $g(e) = \sum_k (\lvert e + c_k \rvert - \lvert e \rvert)$ is continuous and piecewise-linear, ranging from $\sum \lvert c_k \rvert$ at $e=0$ to $\pm z_j$ as $e \to \pm\infty$. For any feasible target $T$, there exists a unique $e_j$ such that $g(e_j) = T$, found analytically via the piecewise-linear structure (sort breakpoints, solve linear equation per segment).
 
-The key insight: the sum $g(e) = \sum_k (\lvert e + c_k \rvert - \lvert e \rvert)$ is a function of the pseudo-error $e$. Instead of fixing $e$ and normalizing the scores, we can **choose $e$ so that the raw scores already sum to the target utility**. No normalization needed, no division by small numbers.
+This naturally interpolates between A-like behavior (small $e_j$, scores $\approx \lvert c_k \rvert$) and B-like behavior (large $e_j$, scores $\approx \text{sign}(e_j) \cdot c_k$). Falls back to A when $U_j$ is outside the feasible range (rare with calibrated output-layer utilities).
 
-### The calibration function
+> Detailed derivation: sections above on calibration function and analytical solution
 
-For a set of contributions $\{c_k\}$ and pseudo-error $e$:
+---
 
-$$g(e) = \sum_k \left(\lvert e + c_k \rvert - \lvert e \rvert\right)$$
+## The Signed Conservation Gap
 
-Properties of $g$:
-- $g(0) = \sum \lvert c_k \rvert$ (maximum — all contributions counted by magnitude)
-- $g(e) \to \sum c_k = z_j$ as $e \to +\infty$ (the pre-activation)
-- $g(e) \to -\sum c_k = -z_j$ as $e \to -\infty$
-- $g$ is continuous and piecewise-linear
-- $g$ is monotonically non-increasing for $e \geq 0$, monotonically non-decreasing for $e \leq 0$
-- Maximum at $e = 0$, with range $[-\lvert z_j \rvert, \sum \lvert c_k \rvert]$
+Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$). The signed sum can shrink at each layer through cancellation. Approaches C and E achieve signed conservation ($\sum U_{k \leftarrow j} = U_j$), making utility comparable across layers.
 
-So for any target $T \in [-\lvert z_j \rvert, \sum \lvert c_k \rvert]$, there exists a unique $e$ (with the appropriate sign) such that $g(e) = T$. The individual scores $s_k = \lvert e + c_k \rvert - \lvert e \rvert$ then sum to $T$ by construction.
+---
 
-### Intuition: automatic A ↔ B transition
-
-The calibrated $e_j$ naturally controls the character of the decomposition:
-
-- **Large $\lvert e_j \rvert$** (target far from $\sum \lvert c_k \rvert$): scores approach $\text{sign}(e_j) \cdot c_k$, giving full sign discrimination between children. Behaves like Approach B.
-- **Small $\lvert e_j \rvert$** (target near $\sum \lvert c_k \rvert$): scores approach $\lvert c_k \rvert$, all positive. Behaves like Approach A.
-- **$e_j = 0$** (target exactly $\sum \lvert c_k \rvert$): pure magnitude decomposition, identical to A.
-
-This transition happens automatically based on the target value — no thresholds, no blending weights.
-
-### Output layer (calibrated)
-
-At the output layer, we want hidden-unit utilities that sum to the error reduced:
-
-$$E = \lvert y^* \rvert - \lvert y^* - \hat{y} \rvert$$
-
-$$c_j = w_{\text{out},j} \cdot a_j$$
-
-Find $e_{\text{out}} \geq 0$ such that $\sum_j (\lvert e_{\text{out}} + c_j \rvert - \lvert e_{\text{out}} \rvert) = E$.
-
-The hidden-unit utilities are then $U_j = \lvert e_{\text{out}} + c_j \rvert - \lvert e_{\text{out}} \rvert$.
-
-**Feasibility**: We need $E \in [-\lvert \hat{y} \rvert, \sum \lvert c_j \rvert]$. The upper bound holds because $E \leq \lvert \hat{y} \rvert \leq \sum \lvert c_j \rvert$. The lower bound holds by the triangle inequality ($\lvert y^* \rvert + \lvert \hat{y} \rvert \geq \lvert y^* - \hat{y} \rvert$). So the output-layer calibration is **always feasible**.
-
-**Difference from C's output layer**: C computes $u_j = \lvert e_{\text{true}} + c_j \rvert - \lvert e_{\text{true}} \rvert$ with the actual error $e_{\text{true}}$, then rescales by $E / \sum u_j$. If one unit has $u_j$ much larger than its share, the rescaling amplifies it. Approach E instead adjusts the pseudo-error so that the raw scores are already the right size.
-
-### Hidden layers (calibrated)
-
-For each hidden unit $j$ with utility $U_j$ and children's contributions $c_k = W_{jk} \cdot x_k$ (where $\sum c_k = z_j$):
-
-Find $e_j$ such that $\sum_k (\lvert e_j + c_k \rvert - \lvert e_j \rvert) = U_j$.
-
-The per-child utilities are $U_{k \leftarrow j} = \lvert e_j + c_k \rvert - \lvert e_j \rvert$ — no normalization.
-
-**Sign of $e_j$**: For $U_j \geq 0$, search $e_j \geq 0$ (where $g$ decreases from $\sum \lvert c_k \rvert$ to $z_j$). For $U_j < 0$, search $e_j \leq 0$ (where $g$ decreases from $\sum \lvert c_k \rvert$ to $-z_j$).
-
-**Feasibility**: Requires $\lvert U_j \rvert \leq \lvert z_j \rvert$ or $\text{sign}(U_j) \neq \text{sign}(z_j)$, plus $\lvert U_j \rvert \leq \sum \lvert c_k \rvert$ (always true). When infeasible, fall back to Approach A for that parent. Both branches conserve.
-
-**When does the fallback trigger?** When $U_j$ and $z_j$ have the same sign and $\lvert U_j \rvert > \lvert z_j \rvert$. This means the parent needs more utility than the children's signed sum can deliver. With the calibrated output layer producing naturally-sized $U_j$, this should be rare.
-
-### Finding $e_j$: analytical piecewise-linear solution
-
-$g(e) = \sum_k (\lvert e + c_k \rvert - \lvert e \rvert)$ is piecewise linear in $e$, with breakpoints at $e = -c_k$ for each $c_k$. On each half-line ($e \geq 0$ or $e \leq 0$), $g$ is monotonically non-increasing.
-
-For $e \geq 0$, the breakpoints occur at $\lvert c_k \rvert$ for each negative $c_k$ (the points where $e + c_k$ changes sign). Between consecutive breakpoints, $g$ has constant slope. To find $e_j$:
-
-1. Sort the breakpoints (magnitudes of negative contributions) in ascending order: $b_0 \leq b_1 \leq \ldots \leq b_{m-1}$
-2. In segment $i$ (between breakpoints $b_{i-1}$ and $b_i$, with $b_{-1} = 0$), the formula is: $g(e) = P + N - 2B_i - 2(m - i) \cdot e$, where $P = \sum_{c_k > 0} c_k$, $N = \sum_{c_k < 0} \lvert c_k \rvert$, and $B_i = \sum_{j < i} b_j$
-3. Solve the linear equation: $e = (P + N - 2B_i - \text{target}) / (2(m - i))$
-4. Check that $e$ falls within segment $i$'s bounds. The first valid segment gives the exact solution.
-
-For $e \leq 0$: use the identity $g_c(-d) = g_{-c}(d)$ — negate all contributions and search $d \geq 0$, then set $e_j = -d$.
-
-This is fully analytical — no iterations, no bisection. The sort is $O(K \log K)$ where $K$ is the fan-in, and the segment search is $O(K)$. The implementation is JAX-friendly: vectorized segment checking, vmappable over hidden units, compatible with `jax.lax.scan`.
-
-### Why this resolves the three-way tradeoff
-
-Approaches A, B, and C face a fundamental tension:
-
-| | Signed conservation | Correct child signs | Bounded magnitudes |
-|---|---|---|---|
-| A | Yes | No | Yes |
-| B | No | Yes | Yes |
-| C | Yes | Yes | No |
-
-C's unbounded magnitudes come from dividing by $\sum s_k$ — a consequence of fixing $e_j$ first and then forcing conservation via normalization. Approach E eliminates the division entirely by choosing $e_j$ such that conservation holds naturally. The individual scores are bounded: each $\lvert s_k \rvert \leq \lvert c_k \rvert$ (the contribution magnitude), because the signed utility of a single feature never exceeds its absolute contribution.
-
-| | Signed conservation | Correct child signs | Bounded magnitudes |
-|---|---|---|---|
-| **E** | **Yes** | **Yes** | **Yes** |
-
-The "trick" is that E doesn't fix $e_j$ from the chain rule and then normalize — it treats $e_j$ as a free parameter chosen to satisfy conservation directly. The per-child sign discrimination comes from the same signed utility formula as B and C; the boundedness comes from not needing normalization.
-
-### Pros
-- **Achieves all three properties**: signed conservation, correct child signs, bounded magnitudes
-- **No normalization step**: raw scores sum to the target by construction
-- **Same formula at every layer**: signed utility formula with calibrated pseudo-error
-- **Smooth automatic transition**: naturally interpolates between A-like (small $e_j$) and B-like (large $e_j$) behavior based on the target
-- **No thresholds or hyperparameters**: the calibration is fully determined by the target utility and contributions
-
-### Cons
-- **Sort overhead**: requires sorting each hidden unit's negative contributions ($O(K \log K)$ per unit). Still $O(1)$ per connection in terms of scaling, and much cheaper than the bisection approach originally considered (~2-3× overhead vs B/C, not 15-20×).
-- **Fallback needed**: when $U_j$ is outside the feasible range $[-\lvert z_j \rvert, \sum \lvert c_k \rvert]$, must fall back to Approach A. This should be rare with calibrated output-layer utilities.
-- **Pseudo-error lacks direct interpretation**: B's $e_j = \lvert U_j \rvert / f'(z_j)$ has a chain-rule interpretation. E's $e_j$ is defined implicitly by the conservation constraint. It's the value that "makes the algebra work," not a quantity with an independent physical meaning.
-
-### Edge cases
-- **$U_j = 0$**: $g(0) = \sum \lvert c_k \rvert > 0$, so we need $e_j$ very large (pushing $g \to z_j$). If $z_j = 0$ as well, any $e_j$ gives $g = 0$ in the limit. All children get $U_{k \leftarrow j} \approx 0$. Well-behaved.
-- **$\sum \lvert c_k \rvert = 0$**: all contributions zero. $U_j$ must be 0 (from output layer). All children get 0. Well-behaved.
-- **Single child**: $g(e) = \lvert e + c_1 \rvert - \lvert e \rvert$. Target is $U_j$. Solution always exists when $\lvert U_j \rvert \leq \lvert c_1 \rvert$. Child gets full parent utility.
-
-### Summary table
+## Comparison
 
 | | A | B | C | D | **E** |
 |---|---|---|---|---|---|
-| **Formula** | Proportional split | Signed utility + abs norm | Signed utility + signed norm | Gradient-weighted | **Signed utility + calibrated $e$** |
-| **Signed conservation** | Yes | No (absolute only) | **Yes** | No | **Yes** |
+| **Signed conservation** | Yes | No (absolute only) | Yes | No | **Yes** |
 | **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | **Yes** |
 | **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | **Yes** |
 | **Same formula every layer** | No | Yes | Yes (with fallback) | No | **Yes (with fallback)** |
 | **Activation derivative needed** | No | Yes | Yes | Yes | **No** |
-| **O(1) per connection** | Yes | Yes | Yes | Yes | **Yes (~15× constant)** |
-| **Saturation behavior** | N/A | Degrades to signed-A | Degrades to A | Gradients vanish | **Handled naturally** |
-| **Recommendation** | Baseline | Correct signs baseline | Signed conservation baseline | Not recommended | **Primary candidate** |
+
+Approach E resolves the three-way tradeoff between signed conservation, correct child signs, and bounded magnitudes that forces A/B/C to sacrifice one property.
 
 ---
-
-## Recommended Plan
-
-1. **Implement Approach E** as the primary algorithm (calibrated pseudo-error)
-2. **Keep Approaches A, B, C** as baselines for comparison
-3. Test on the tracking task from `multilayer_experiment.py`
-4. Verify: Figure 3 (budget plot) should show $\sum U_{\text{hidden}} \approx \sum U_{\text{input}} \approx E_{\text{reduced}}$ for Approach E
-5. Compare stability and sign discrimination against C (should match C's conservation and sign accuracy without C's spikes)
-6. Compare against true LOO traces (should match LOO's slightly-negative irrelevant features)
 
 ## Files
 
 - `initial_notes.md` -- early brainstorming and problem framing
 - `multilayer_signed_utility.md` -- detailed derivations, worked examples, and formal algorithm specification
-- `multilayer_experiment.py` -- experiment comparing approaches A, B, C on nonlinear tracking task
+- `multilayer_experiment.py` -- experiment comparing approaches A, B, C, E, UPGD, and SI on nonlinear tracking task
