@@ -78,8 +78,9 @@ When the positive and negative children nearly cancel, you're decomposing a numb
 | Approach A | Yes | No | Yes |
 | Approach B | No | Yes | Yes |
 | Approach C | Yes | Yes | No |
+| **Approach E** | **Yes** | **Yes** | **Yes** |
 
-Each approach sacrifices exactly one property. No linear redistribution of the form $U_{k \leftarrow j} = \alpha_k \cdot U_j$ can achieve all three when children cancel.
+Approaches A–C each sacrifice exactly one property. No **normalization-based** redistribution of the form $U_{k \leftarrow j} = \alpha_k \cdot U_j / \sum \alpha_m$ can achieve all three when children cancel. Approach E sidesteps this by eliminating normalization entirely — it chooses the pseudo-error $e_j$ so that the raw scores already sum to $U_j$, requiring no division.
 
 ## Analysis: what does pruning actually need?
 
@@ -154,12 +155,36 @@ A cheaper approximation: use the chain rule. The effect of zeroing input $k$ on 
 
 ### Summary of the state of things
 
-We have not fully succeeded yet. The clearest statement is:
-
 - **Approach B works well for within-layer ranking** but cannot compare across layers and cannot identify actively harmful features
-- **Approach C has the right algebraic properties** for cross-layer comparison and harmful feature identification, but numerical amplification near cancellation produces spikes that may corrupt pruning decisions
-- **The amplification is structurally unavoidable** for any linear redistribution that has both signed conservation and correct child signs — the three-way tradeoff is real
+- **Approach C has the right algebraic properties** for cross-layer comparison and harmful feature identification, but numerical amplification near cancellation produces spikes that corrupt the running average
+- **The amplification is structurally unavoidable** for any normalization-based redistribution — the three-way tradeoff is real for approaches that fix $e_j$ and then divide by $\sum s_k$
+- **Approach E (calibrated pseudo-error)** sidesteps the tradeoff entirely by choosing $e_j$ so that the raw scores already sum to the target. Achieves conservation, correct signs, and bounded magnitudes simultaneously. This is the most promising candidate and should be implemented and tested next
 
-The most promising path forward seems to be **improving C's robustness** rather than abandoning conservation. The soft blending idea (smooth interpolation between A and C based on alignment) keeps conservation while reducing worst-case amplification. And some of C's apparent "volatility" may be genuine signal about features being transiently harmful — we should verify this rather than assuming it's all noise.
+### Approach E: Calibrated Pseudo-Error (new direction)
 
-The key experiment to run next: compare C's input utilities against the true leave-one-out input utilities (via extra forward passes) on a subset of steps. If they agree on average, C is correct and we just need better aggregation. If they disagree, the decomposition itself is introducing bias that needs fixing.
+The three-way tradeoff above applies to **normalization-based** approaches: those that compute raw scores with a fixed pseudo-error and then divide by their sum to enforce conservation. The division is the source of the blowup.
+
+Approach E takes a different route. The function $g(e) = \sum_k (|e + c_k| - |e|)$ varies continuously from $\sum |c_k|$ (at $e = 0$) to $\sum c_k = z_j$ (as $e \to \infty$). Instead of fixing $e_j$ and normalizing, find $e_j$ such that $g(e_j) = U_j$ — the raw scores sum to the target utility by construction. No normalization, no division by small numbers, no blowup.
+
+This achieves all three properties simultaneously:
+- **Conservation**: $\sum s_k = U_j$ by construction
+- **Correct signs**: same signed utility formula as B and C
+- **Bounded magnitudes**: each $|s_k| \leq |c_k|$, no amplification
+
+The calibrated $e_j$ also produces a natural smooth transition:
+- When the target is close to $\sum |c_k|$, $e_j$ is small, and scores $\approx |c_k|$ (A-like: all positive, proportional)
+- When the target is close to $z_j$, $e_j$ is large, and scores $\approx \text{sign}(e_j) \cdot c_k$ (B-like: full sign discrimination)
+
+The transition is data-driven — no thresholds, no blending weights. When children nearly cancel ($z_j \approx 0$), the feasible range for $U_j$ is narrow, and $e_j$ stays small, automatically falling back to an A-like decomposition. This is the correct behavior: when children cancel, per-child sign attribution is inherently uncertain.
+
+The cost is ~15–20× more computation per step (bisection to find $e_j$), but this is fully vectorizable and the constant is small. A fallback to A is needed when $U_j$ falls outside the feasible range $[-|z_j|, \sum |c_k|]$, but with calibrated output-layer utilities this should be rare.
+
+The key experiment: implement Approach E and compare its traces against C and true LOO. It should match C's conservation and LOO's sign discrimination while being as stable as B.
+
+### True LOO comparison (completed)
+
+Comparing against true leave-one-out utilities (via 20 extra forward passes per step, EMA-traced) confirmed:
+- True LOO shows irrelevant features as **slightly negative** (Jensen's inequality effect), confirming that conservation should force this.
+- True LOO traces are **noisy but spike-free** — C's spikes are numerical amplification artifacts, not genuine signal.
+- True LOO budget roughly tracks error reduced, though not perfectly (LOO is not an exact additive decomposition due to interaction effects).
+- LOO serves as the gold standard reference for evaluating decomposition methods.
