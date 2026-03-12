@@ -272,13 +272,144 @@ An alternative: remove children one at a time in some order and assign utility b
 
 ---
 
+## Approach E: Calibrated Pseudo-Error
+
+### Motivation
+
+Approaches B and C both compute raw signed utility scores $s_k = \lvert e_j + c_k \rvert - \lvert e_j \rvert$ and then **normalize** them to enforce conservation. The normalization requires dividing by $\sum s_k$ (C) or $\sum \lvert s_k \rvert$ (B). When children's contributions nearly cancel ($\sum s_k \approx 0$), this division blows up.
+
+The key insight: the sum $g(e) = \sum_k (\lvert e + c_k \rvert - \lvert e \rvert)$ is a function of the pseudo-error $e$. Instead of fixing $e$ and normalizing the scores, we can **choose $e$ so that the raw scores already sum to the target utility**. No normalization needed, no division by small numbers.
+
+### The calibration function
+
+For a set of contributions $\{c_k\}$ and pseudo-error $e$:
+
+$$g(e) = \sum_k \left(\lvert e + c_k \rvert - \lvert e \rvert\right)$$
+
+Properties of $g$:
+- $g(0) = \sum \lvert c_k \rvert$ (maximum — all contributions counted by magnitude)
+- $g(e) \to \sum c_k = z_j$ as $e \to +\infty$ (the pre-activation)
+- $g(e) \to -\sum c_k = -z_j$ as $e \to -\infty$
+- $g$ is continuous and piecewise-linear
+- $g$ is monotonically non-increasing for $e \geq 0$, monotonically non-decreasing for $e \leq 0$
+- Maximum at $e = 0$, with range $[-\lvert z_j \rvert, \sum \lvert c_k \rvert]$
+
+So for any target $T \in [-\lvert z_j \rvert, \sum \lvert c_k \rvert]$, there exists a unique $e$ (with the appropriate sign) such that $g(e) = T$. The individual scores $s_k = \lvert e + c_k \rvert - \lvert e \rvert$ then sum to $T$ by construction.
+
+### Intuition: automatic A ↔ B transition
+
+The calibrated $e_j$ naturally controls the character of the decomposition:
+
+- **Large $\lvert e_j \rvert$** (target far from $\sum \lvert c_k \rvert$): scores approach $\text{sign}(e_j) \cdot c_k$, giving full sign discrimination between children. Behaves like Approach B.
+- **Small $\lvert e_j \rvert$** (target near $\sum \lvert c_k \rvert$): scores approach $\lvert c_k \rvert$, all positive. Behaves like Approach A.
+- **$e_j = 0$** (target exactly $\sum \lvert c_k \rvert$): pure magnitude decomposition, identical to A.
+
+This transition happens automatically based on the target value — no thresholds, no blending weights.
+
+### Output layer (calibrated)
+
+At the output layer, we want hidden-unit utilities that sum to the error reduced:
+
+$$E = \lvert y^* \rvert - \lvert y^* - \hat{y} \rvert$$
+
+$$c_j = w_{\text{out},j} \cdot a_j$$
+
+Find $e_{\text{out}} \geq 0$ such that $\sum_j (\lvert e_{\text{out}} + c_j \rvert - \lvert e_{\text{out}} \rvert) = E$.
+
+The hidden-unit utilities are then $U_j = \lvert e_{\text{out}} + c_j \rvert - \lvert e_{\text{out}} \rvert$.
+
+**Feasibility**: We need $E \in [-\lvert \hat{y} \rvert, \sum \lvert c_j \rvert]$. The upper bound holds because $E \leq \lvert \hat{y} \rvert \leq \sum \lvert c_j \rvert$. The lower bound holds by the triangle inequality ($\lvert y^* \rvert + \lvert \hat{y} \rvert \geq \lvert y^* - \hat{y} \rvert$). So the output-layer calibration is **always feasible**.
+
+**Difference from C's output layer**: C computes $u_j = \lvert e_{\text{true}} + c_j \rvert - \lvert e_{\text{true}} \rvert$ with the actual error $e_{\text{true}}$, then rescales by $E / \sum u_j$. If one unit has $u_j$ much larger than its share, the rescaling amplifies it. Approach E instead adjusts the pseudo-error so that the raw scores are already the right size.
+
+### Hidden layers (calibrated)
+
+For each hidden unit $j$ with utility $U_j$ and children's contributions $c_k = W_{jk} \cdot x_k$ (where $\sum c_k = z_j$):
+
+Find $e_j$ such that $\sum_k (\lvert e_j + c_k \rvert - \lvert e_j \rvert) = U_j$.
+
+The per-child utilities are $U_{k \leftarrow j} = \lvert e_j + c_k \rvert - \lvert e_j \rvert$ — no normalization.
+
+**Sign of $e_j$**: For $U_j \geq 0$, search $e_j \geq 0$ (where $g$ decreases from $\sum \lvert c_k \rvert$ to $z_j$). For $U_j < 0$, search $e_j \leq 0$ (where $g$ decreases from $\sum \lvert c_k \rvert$ to $-z_j$).
+
+**Feasibility**: Requires $\lvert U_j \rvert \leq \lvert z_j \rvert$ or $\text{sign}(U_j) \neq \text{sign}(z_j)$, plus $\lvert U_j \rvert \leq \sum \lvert c_k \rvert$ (always true). When infeasible, fall back to Approach A for that parent. Both branches conserve.
+
+**When does the fallback trigger?** When $U_j$ and $z_j$ have the same sign and $\lvert U_j \rvert > \lvert z_j \rvert$. This means the parent needs more utility than the children's signed sum can deliver. With the calibrated output layer producing naturally-sized $U_j$, this should be rare.
+
+### Finding $e_j$: analytical piecewise-linear solution
+
+$g(e) = \sum_k (\lvert e + c_k \rvert - \lvert e \rvert)$ is piecewise linear in $e$, with breakpoints at $e = -c_k$ for each $c_k$. On each half-line ($e \geq 0$ or $e \leq 0$), $g$ is monotonically non-increasing.
+
+For $e \geq 0$, the breakpoints occur at $\lvert c_k \rvert$ for each negative $c_k$ (the points where $e + c_k$ changes sign). Between consecutive breakpoints, $g$ has constant slope. To find $e_j$:
+
+1. Sort the breakpoints (magnitudes of negative contributions) in ascending order: $b_0 \leq b_1 \leq \ldots \leq b_{m-1}$
+2. In segment $i$ (between breakpoints $b_{i-1}$ and $b_i$, with $b_{-1} = 0$), the formula is: $g(e) = P + N - 2B_i - 2(m - i) \cdot e$, where $P = \sum_{c_k > 0} c_k$, $N = \sum_{c_k < 0} \lvert c_k \rvert$, and $B_i = \sum_{j < i} b_j$
+3. Solve the linear equation: $e = (P + N - 2B_i - \text{target}) / (2(m - i))$
+4. Check that $e$ falls within segment $i$'s bounds. The first valid segment gives the exact solution.
+
+For $e \leq 0$: use the identity $g_c(-d) = g_{-c}(d)$ — negate all contributions and search $d \geq 0$, then set $e_j = -d$.
+
+This is fully analytical — no iterations, no bisection. The sort is $O(K \log K)$ where $K$ is the fan-in, and the segment search is $O(K)$. The implementation is JAX-friendly: vectorized segment checking, vmappable over hidden units, compatible with `jax.lax.scan`.
+
+### Why this resolves the three-way tradeoff
+
+Approaches A, B, and C face a fundamental tension:
+
+| | Signed conservation | Correct child signs | Bounded magnitudes |
+|---|---|---|---|
+| A | Yes | No | Yes |
+| B | No | Yes | Yes |
+| C | Yes | Yes | No |
+
+C's unbounded magnitudes come from dividing by $\sum s_k$ — a consequence of fixing $e_j$ first and then forcing conservation via normalization. Approach E eliminates the division entirely by choosing $e_j$ such that conservation holds naturally. The individual scores are bounded: each $\lvert s_k \rvert \leq \lvert c_k \rvert$ (the contribution magnitude), because the signed utility of a single feature never exceeds its absolute contribution.
+
+| | Signed conservation | Correct child signs | Bounded magnitudes |
+|---|---|---|---|
+| **E** | **Yes** | **Yes** | **Yes** |
+
+The "trick" is that E doesn't fix $e_j$ from the chain rule and then normalize — it treats $e_j$ as a free parameter chosen to satisfy conservation directly. The per-child sign discrimination comes from the same signed utility formula as B and C; the boundedness comes from not needing normalization.
+
+### Pros
+- **Achieves all three properties**: signed conservation, correct child signs, bounded magnitudes
+- **No normalization step**: raw scores sum to the target by construction
+- **Same formula at every layer**: signed utility formula with calibrated pseudo-error
+- **Smooth automatic transition**: naturally interpolates between A-like (small $e_j$) and B-like (large $e_j$) behavior based on the target
+- **No thresholds or hyperparameters**: the calibration is fully determined by the target utility and contributions
+
+### Cons
+- **Sort overhead**: requires sorting each hidden unit's negative contributions ($O(K \log K)$ per unit). Still $O(1)$ per connection in terms of scaling, and much cheaper than the bisection approach originally considered (~2-3× overhead vs B/C, not 15-20×).
+- **Fallback needed**: when $U_j$ is outside the feasible range $[-\lvert z_j \rvert, \sum \lvert c_k \rvert]$, must fall back to Approach A. This should be rare with calibrated output-layer utilities.
+- **Pseudo-error lacks direct interpretation**: B's $e_j = \lvert U_j \rvert / f'(z_j)$ has a chain-rule interpretation. E's $e_j$ is defined implicitly by the conservation constraint. It's the value that "makes the algebra work," not a quantity with an independent physical meaning.
+
+### Edge cases
+- **$U_j = 0$**: $g(0) = \sum \lvert c_k \rvert > 0$, so we need $e_j$ very large (pushing $g \to z_j$). If $z_j = 0$ as well, any $e_j$ gives $g = 0$ in the limit. All children get $U_{k \leftarrow j} \approx 0$. Well-behaved.
+- **$\sum \lvert c_k \rvert = 0$**: all contributions zero. $U_j$ must be 0 (from output layer). All children get 0. Well-behaved.
+- **Single child**: $g(e) = \lvert e + c_1 \rvert - \lvert e \rvert$. Target is $U_j$. Solution always exists when $\lvert U_j \rvert \leq \lvert c_1 \rvert$. Child gets full parent utility.
+
+### Summary table
+
+| | A | B | C | D | **E** |
+|---|---|---|---|---|---|
+| **Formula** | Proportional split | Signed utility + abs norm | Signed utility + signed norm | Gradient-weighted | **Signed utility + calibrated $e$** |
+| **Signed conservation** | Yes | No (absolute only) | **Yes** | No | **Yes** |
+| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | **Yes** |
+| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | **Yes** |
+| **Same formula every layer** | No | Yes | Yes (with fallback) | No | **Yes (with fallback)** |
+| **Activation derivative needed** | No | Yes | Yes | Yes | **No** |
+| **O(1) per connection** | Yes | Yes | Yes | Yes | **Yes (~15× constant)** |
+| **Saturation behavior** | N/A | Degrades to signed-A | Degrades to A | Gradients vanish | **Handled naturally** |
+| **Recommendation** | Baseline | Correct signs baseline | Signed conservation baseline | Not recommended | **Primary candidate** |
+
+---
+
 ## Recommended Plan
 
-1. **Implement Approach C** as the primary algorithm (signed conservation with A-fallback)
-2. **Keep Approaches A and B** as baselines for comparison
+1. **Implement Approach E** as the primary algorithm (calibrated pseudo-error)
+2. **Keep Approaches A, B, C** as baselines for comparison
 3. Test on the tracking task from `multilayer_experiment.py`
-4. Verify: Figure 3 (budget plot) should show $\sum U_{\text{hidden}} \approx \sum U_{\text{input}} \approx E_{\text{reduced}}$ for Approach C
-5. Compare sign discrimination across approaches when teacher weights drift
+4. Verify: Figure 3 (budget plot) should show $\sum U_{\text{hidden}} \approx \sum U_{\text{input}} \approx E_{\text{reduced}}$ for Approach E
+5. Compare stability and sign discrimination against C (should match C's conservation and sign accuracy without C's spikes)
+6. Compare against true LOO traces (should match LOO's slightly-negative irrelevant features)
 
 ## Files
 

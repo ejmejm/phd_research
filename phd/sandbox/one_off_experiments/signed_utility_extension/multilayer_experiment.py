@@ -84,7 +84,7 @@ N_STUDENT_INPUTS = 20
 N_STUDENT_HIDDEN = 16
 N_RELEVANT = 5
 N_STEPS = 100_000
-DRIFT_FREQUENCY = 50
+DRIFT_FREQUENCY = 100
 TRACE_DECAY = 0.999
 SEED = np.random.randint(0, 1000000)
 SCAN_CHUNK = 5000  # Steps per scan chunk (for progress updates)
@@ -93,6 +93,9 @@ SCAN_CHUNK = 5000  # Steps per scan chunk (for progress updates)
 SGD_LR = 0.01
 AUTOSTEP_INIT_LR = 1.0
 AUTOSTEP_META_LR = 0.005
+
+# Whether to compute true leave-one-out utilities (20 extra forward passes per step)
+COMPUTE_TRUE_LOO = True
 
 # ==============================================================================
 # Teacher functions
@@ -256,6 +259,180 @@ def compute_utility_approach_b(model, x, y_star, y_hat):
 ALIGNMENT_THRESHOLD = 0.1  # fallback to Approach A when |Σs| / Σ|s| < threshold
 
 
+# ==============================================================================
+# Approach E: Calibrated Pseudo-Error (analytical, no iterations)
+# ==============================================================================
+
+def _find_e_nonneg(contributions, target):
+    """Find e >= 0 such that g(e) = Σ(|e + c_k| - e) = target.
+
+    g is piecewise linear with breakpoints at |c_k| for each negative c_k.
+    Between breakpoints, g has constant slope, so we solve a linear equation
+    in the correct segment. No iterations needed.
+
+    g(0) = Σ|c_k|, g(∞) → Σc_k = z.
+    Feasible when z <= target <= Σ|c_k|.
+
+    Args:
+        contributions: shape (K,)
+        target: scalar
+
+    Returns:
+        (e, feasible) where e >= 0 is the solution and feasible is a bool.
+    """
+    K = contributions.shape[0]
+
+    P = jnp.sum(jnp.maximum(contributions, 0.0))    # sum of positive contributions
+    neg_mags = jnp.maximum(-contributions, 0.0)       # |c_k| for negatives, 0 for positives
+    N = jnp.sum(neg_mags)                              # sum of negative magnitudes
+    z = P - N                                          # Σc_k
+
+    # Feasibility: z <= target <= P + N
+    feasible_range = (target >= z - 1e-6) & (target <= P + N + 1e-6)
+
+    # Sort negative magnitudes ascending, padding positives with large sentinel
+    padded = jnp.where(contributions < 0, -contributions, jnp.float32(1e30))
+    sorted_b = jnp.sort(padded)
+    # sorted_b = [b_0, b_1, ..., b_{m-1}, 1e30, ..., 1e30]
+    # where b_i are actual negative magnitudes in ascending order
+
+    # Cumulative sums (clip sentinel values to avoid overflow)
+    cum = jnp.cumsum(jnp.minimum(sorted_b, 1e20))
+    B = jnp.concatenate([jnp.array([0.0]), cum[:-1]])  # B[i] = sum of first i breakpoints
+
+    # Count of actual negative contributions
+    m = jnp.sum((contributions < 0).astype(jnp.float32))
+
+    # In segment i (i breakpoints crossed), g(e) = P + N - 2*B[i] - 2*(m-i)*e
+    # Solving: e = (P + N - 2*B[i] - target) / (2*(m - i))
+    remaining = jnp.maximum(m - jnp.arange(K, dtype=jnp.float32), 0.0)
+    numer = P + N - 2.0 * B - target
+    safe_denom = jnp.maximum(2.0 * remaining, 1.0)
+    e_cand = numer / safe_denom
+
+    # Segment i covers [left[i], right[i])
+    left_bounds = jnp.concatenate([jnp.array([0.0]), sorted_b[:-1]])
+    right_bounds = sorted_b
+
+    eps = 1e-6
+    valid = ((e_cand >= left_bounds - eps) &
+             (e_cand <= right_bounds + eps) &
+             (e_cand >= -eps) &
+             (remaining > 0.5))
+
+    # Select first valid segment (argmax on bools returns first True, 0 if none)
+    first_idx = jnp.argmax(valid)
+    e_segment = jnp.maximum(e_cand[first_idx], 0.0)
+    segment_ok = valid[first_idx]
+
+    # Edge case: target ≈ z (asymptotic, all negatives crossed, g = z)
+    asymptotic_ok = (jnp.abs(target - z) < eps)
+    last_bp_idx = jnp.maximum(m.astype(jnp.int32) - 1, 0)
+    e_asymptotic = jnp.where(m > 0.5, sorted_b[last_bp_idx] + 1.0, 0.0)
+
+    e_out = jnp.where(segment_ok, e_segment,
+                       jnp.where(asymptotic_ok, e_asymptotic, 0.0))
+    feasible = (segment_ok | asymptotic_ok) & feasible_range
+
+    return e_out, feasible
+
+
+def _calibrate_pseudo_error(contributions, target):
+    """Find e such that g(e) = Σ(|e + c_k| - |e|) = target.
+
+    For target >= z = Σc_k: search e >= 0 (g decreases from Σ|c_k| to z).
+    For target < z: search e <= 0 by negating contributions
+    (g_c(-d) = g_{-c}(d), so find d >= 0 for negated c, return e = -d).
+
+    Args:
+        contributions: shape (K,)
+        target: scalar
+
+    Returns:
+        (e, feasible) where feasible indicates whether calibration succeeded.
+    """
+    z = jnp.sum(contributions)
+    search_positive = (target >= z)
+
+    # When searching e <= 0, negate contributions: g_c(-d) = g_{-c}(d)
+    c = jnp.where(search_positive, contributions, -contributions)
+    d, feas = _find_e_nonneg(c, target)
+    e = jnp.where(search_positive, d, -d)
+    return e, feas
+
+
+def compute_utility_approach_e(model, x, y_star, y_hat):
+    """Approach E: Calibrated Pseudo-Error.
+
+    Instead of computing raw scores and normalizing (which blows up when children
+    cancel), find the pseudo-error e such that the raw scores naturally sum to the
+    target utility. No normalization needed.
+
+    g(e) = Σ(|e + c_k| - |e|) is piecewise linear and monotonic, so the solution
+    is found analytically by locating the correct linear segment.
+
+    Output layer: find e_out such that Σ U_j = E_reduced.
+    Hidden layer: for each unit j, find e_j such that Σ U_{k←j} = U_j.
+    Falls back to Approach A when calibration is infeasible.
+
+    Args:
+        model: MLP student model
+        x: input vector, shape (N_STUDENT_INPUTS,)
+        y_star: teacher target, scalar
+        y_hat: student prediction, scalar
+
+    Returns:
+        (U_input, U_hidden) where:
+          U_input: utility per input, shape (N_STUDENT_INPUTS,)
+          U_hidden: utility per hidden unit, shape (N_STUDENT_HIDDEN,)
+    """
+    W1 = model.layers[0].weight       # (H, N)
+    w_out = model.layers[1].weight.squeeze(0)  # (H,)
+
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    # === Output layer: calibrate e_out ===
+    e_true = y_star - y_hat
+    c_out = w_out * a_hidden                      # (H,)
+    E_reduced = jnp.abs(y_star) - jnp.abs(e_true)
+
+    e_out, out_feasible = _calibrate_pseudo_error(c_out, E_reduced)
+    # When feasible (always, by triangle inequality): raw scores sum to E_reduced
+    # When infeasible (shouldn't happen): fall back to standard LOO + rescaling
+    U_hidden_calib = jnp.abs(e_out + c_out) - jnp.abs(e_out)
+
+    # Fallback: standard LOO rescaled (same as C's output layer)
+    u_raw = jnp.abs(e_true + c_out) - jnp.abs(e_true)
+    u_raw_sum = jnp.sum(u_raw)
+    scale = jnp.where(jnp.abs(u_raw_sum) > 1e-10, E_reduced / u_raw_sum, 1.0)
+    U_hidden_fallback = u_raw * scale
+
+    U_hidden = jnp.where(out_feasible, U_hidden_calib, U_hidden_fallback)
+
+    # === Hidden layer: calibrate e_j for each hidden unit ===
+    contributions = W1 * x[None, :]   # (H, N)
+
+    # vmap calibration over hidden units
+    e_j, feasible_j = jax.vmap(_calibrate_pseudo_error)(contributions, U_hidden)
+    # e_j: (H,), feasible_j: (H,)
+
+    # Raw scores from calibrated pseudo-errors (no normalization)
+    U_from_j_calib = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+    # shape: (H, N)
+
+    # Fallback to Approach A for infeasible units
+    abs_contrib = jnp.abs(contributions)
+    abs_contrib_sum = jnp.maximum(jnp.sum(abs_contrib, axis=1, keepdims=True), 1e-10)
+    U_from_j_fallback = U_hidden[:, None] * abs_contrib / abs_contrib_sum
+
+    use_calib = feasible_j[:, None].astype(jnp.float32)
+    U_from_j = use_calib * U_from_j_calib + (1.0 - use_calib) * U_from_j_fallback
+
+    U_input = jnp.sum(U_from_j, axis=0)  # (N,)
+    return U_input, U_hidden
+
+
 def compute_utility_approach_c(model, x, y_star, y_hat):
     """Approach C: Signed-Conserving Redistribution.
 
@@ -327,17 +504,53 @@ def compute_utility_approach_c(model, x, y_star, y_hat):
     return U_input, U_hidden
 
 
+def compute_true_loo_utility(model, x, y_star):
+    """True leave-one-out utility at the input level via extra forward passes.
+
+    For each input k, zero it out, do a full forward pass, and compute:
+      u_k = |y* - y_hat_without_k| - |y* - y_hat|
+
+    Uses vmap over inputs to parallelize the 20 forward passes.
+
+    Args:
+        model: MLP student model
+        x: input vector, shape (N_STUDENT_INPUTS,)
+        y_star: teacher target, scalar
+
+    Returns:
+        utility per input, shape (N_STUDENT_INPUTS,)
+    """
+    y_hat = model(x)[0].squeeze()
+    base_error = jnp.abs(y_star - y_hat)
+
+    # Build all masked inputs at once: (N_STUDENT_INPUTS, N_STUDENT_INPUTS)
+    # Row k has x with element k zeroed out
+    mask = 1.0 - jnp.eye(N_STUDENT_INPUTS)  # (N, N)
+    x_masked_all = mask * x[None, :]  # broadcast: (N, N)
+
+    # vmap the forward pass over the batch of masked inputs
+    def forward_one(x_masked):
+        return model(x_masked)[0].squeeze()
+
+    y_hat_masked = jax.vmap(forward_one)(x_masked_all)  # (N_STUDENT_INPUTS,)
+    errors_without = jnp.abs(y_star - y_hat_masked)  # (N_STUDENT_INPUTS,)
+
+    return errors_without - base_error
+
+
 # ==============================================================================
 # Scanned training steps
 # ==============================================================================
 
 def _train_step_body(model, optimizer, x, y_star,
-                     ema_contrib, ema_a, ema_b, ema_c,
+                     ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
                      ema_target_mag, ema_error_reduced,
                      ema_sum_input_a, ema_sum_hidden_a,
                      ema_sum_input_b, ema_sum_hidden_b,
                      ema_sum_input_c, ema_sum_hidden_c,
-                     compute_pred_grads):
+                     ema_sum_input_e, ema_sum_hidden_e,
+                     ema_sum_loo,
+                     compute_pred_grads, compute_loo):
     """Core training step logic, shared by SGD and Autostep scan bodies."""
     # Forward pass
     y_hat_arr, _ = model(x)
@@ -349,12 +562,20 @@ def _train_step_body(model, optimizer, x, y_star,
     u_approach_a, u_hidden_a = compute_utility_approach_a(model, x, y_star, y_hat)
     u_approach_b, u_hidden_b = compute_utility_approach_b(model, x, y_star, y_hat)
     u_approach_c, u_hidden_c = compute_utility_approach_c(model, x, y_star, y_hat)
+    u_approach_e, u_hidden_e = compute_utility_approach_e(model, x, y_star, y_hat)
+
+    # True LOO (optional, 20 extra forward passes)
+    if compute_loo:
+        u_loo = compute_true_loo_utility(model, x, y_star)
+        ema_loo = TRACE_DECAY * ema_loo + (1 - TRACE_DECAY) * u_loo
+        ema_sum_loo = TRACE_DECAY * ema_sum_loo + (1 - TRACE_DECAY) * jnp.sum(u_loo)
 
     # Update EMA traces
     ema_contrib = TRACE_DECAY * ema_contrib + (1 - TRACE_DECAY) * u_contribution
     ema_a = TRACE_DECAY * ema_a + (1 - TRACE_DECAY) * u_approach_a
     ema_b = TRACE_DECAY * ema_b + (1 - TRACE_DECAY) * u_approach_b
     ema_c = TRACE_DECAY * ema_c + (1 - TRACE_DECAY) * u_approach_c
+    ema_e = TRACE_DECAY * ema_e + (1 - TRACE_DECAY) * u_approach_e
 
     # Budget traces: |y*|, error reduced, sum of input/hidden utilities
     error_reduced = jnp.abs(y_star) - jnp.abs(y_star - y_hat)
@@ -366,6 +587,8 @@ def _train_step_body(model, optimizer, x, y_star,
     ema_sum_hidden_b = TRACE_DECAY * ema_sum_hidden_b + (1 - TRACE_DECAY) * jnp.sum(u_hidden_b)
     ema_sum_input_c = TRACE_DECAY * ema_sum_input_c + (1 - TRACE_DECAY) * jnp.sum(u_approach_c)
     ema_sum_hidden_c = TRACE_DECAY * ema_sum_hidden_c + (1 - TRACE_DECAY) * jnp.sum(u_hidden_c)
+    ema_sum_input_e = TRACE_DECAY * ema_sum_input_e + (1 - TRACE_DECAY) * jnp.sum(u_approach_e)
+    ema_sum_hidden_e = TRACE_DECAY * ema_sum_hidden_e + (1 - TRACE_DECAY) * jnp.sum(u_hidden_e)
 
     # Compute gradients and update
     loss_grads = eqx.filter_grad(lambda m: (m(x)[0].squeeze() - y_star) ** 2)(model)
@@ -377,35 +600,43 @@ def _train_step_body(model, optimizer, x, y_star,
     new_model = eqx.apply_updates(model, updates)
 
     return (new_model, new_optimizer, mse,
-            ema_contrib, ema_a, ema_b, ema_c,
-            ema_target_mag, ema_error_reduced,
-            ema_sum_input_a, ema_sum_hidden_a,
-            ema_sum_input_b, ema_sum_hidden_b,
-            ema_sum_input_c, ema_sum_hidden_c)
-
-
-def _make_scan_fn(compute_pred_grads):
-    """Build a scan body for either SGD or Autostep."""
-    def scan_fn(carry, step_data):
-        (model, optimizer, ema_contrib, ema_a, ema_b, ema_c,
-         ema_target_mag, ema_error_reduced,
-         ema_sum_input_a, ema_sum_hidden_a,
-         ema_sum_input_b, ema_sum_hidden_b,
-         ema_sum_input_c, ema_sum_hidden_c) = carry
-        x, y_star = step_data
-
-        (model, optimizer, mse, ema_contrib, ema_a, ema_b, ema_c,
-         ema_target_mag, ema_error_reduced,
-         ema_sum_input_a, ema_sum_hidden_a,
-         ema_sum_input_b, ema_sum_hidden_b,
-         ema_sum_input_c, ema_sum_hidden_c) = _train_step_body(
-            model, optimizer, x, y_star,
-            ema_contrib, ema_a, ema_b, ema_c,
+            ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
             ema_target_mag, ema_error_reduced,
             ema_sum_input_a, ema_sum_hidden_a,
             ema_sum_input_b, ema_sum_hidden_b,
             ema_sum_input_c, ema_sum_hidden_c,
-            compute_pred_grads)
+            ema_sum_input_e, ema_sum_hidden_e,
+            ema_sum_loo)
+
+
+def _make_scan_fn(compute_pred_grads, compute_loo):
+    """Build a scan body for either SGD or Autostep."""
+    def scan_fn(carry, step_data):
+        (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+         ema_target_mag, ema_error_reduced,
+         ema_sum_input_a, ema_sum_hidden_a,
+         ema_sum_input_b, ema_sum_hidden_b,
+         ema_sum_input_c, ema_sum_hidden_c,
+         ema_sum_input_e, ema_sum_hidden_e,
+         ema_sum_loo) = carry
+        x, y_star = step_data
+
+        (model, optimizer, mse, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+         ema_target_mag, ema_error_reduced,
+         ema_sum_input_a, ema_sum_hidden_a,
+         ema_sum_input_b, ema_sum_hidden_b,
+         ema_sum_input_c, ema_sum_hidden_c,
+         ema_sum_input_e, ema_sum_hidden_e,
+         ema_sum_loo) = _train_step_body(
+            model, optimizer, x, y_star,
+            ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
+            ema_target_mag, ema_error_reduced,
+            ema_sum_input_a, ema_sum_hidden_a,
+            ema_sum_input_b, ema_sum_hidden_b,
+            ema_sum_input_c, ema_sum_hidden_c,
+            ema_sum_input_e, ema_sum_hidden_e,
+            ema_sum_loo,
+            compute_pred_grads, compute_loo)
 
         # Extract first-layer step sizes (zeros for SGD, actual for Autostep)
         if compute_pred_grads:
@@ -414,16 +645,20 @@ def _make_scan_fn(compute_pred_grads):
         else:
             step_sizes = jnp.zeros(N_STUDENT_INPUTS)
 
-        carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c,
+        carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
                  ema_target_mag, ema_error_reduced,
                  ema_sum_input_a, ema_sum_hidden_a,
                  ema_sum_input_b, ema_sum_hidden_b,
-                 ema_sum_input_c, ema_sum_hidden_c)
-        outputs = (mse, ema_contrib, ema_a, ema_b, step_sizes, ema_c,
+                 ema_sum_input_c, ema_sum_hidden_c,
+                 ema_sum_input_e, ema_sum_hidden_e,
+                 ema_sum_loo)
+        outputs = (mse, ema_contrib, ema_a, ema_b, step_sizes, ema_c, ema_e, ema_loo,
                    ema_target_mag, ema_error_reduced,
                    ema_sum_input_a, ema_sum_hidden_a,
                    ema_sum_input_b, ema_sum_hidden_b,
-                   ema_sum_input_c, ema_sum_hidden_c)
+                   ema_sum_input_c, ema_sum_hidden_c,
+                   ema_sum_input_e, ema_sum_hidden_e,
+                   ema_sum_loo)
         return carry, outputs
 
     return scan_fn
@@ -509,6 +744,8 @@ def run_experiment(optimizer_name, seed):
     ema_a = jnp.zeros(N_STUDENT_INPUTS)
     ema_b = jnp.zeros(N_STUDENT_INPUTS)
     ema_c = jnp.zeros(N_STUDENT_INPUTS)
+    ema_e = jnp.zeros(N_STUDENT_INPUTS)
+    ema_loo = jnp.zeros(N_STUDENT_INPUTS)
     ema_target_mag = jnp.float32(0.0)
     ema_error_reduced = jnp.float32(0.0)
     ema_sum_input_a = jnp.float32(0.0)
@@ -517,14 +754,19 @@ def run_experiment(optimizer_name, seed):
     ema_sum_hidden_b = jnp.float32(0.0)
     ema_sum_input_c = jnp.float32(0.0)
     ema_sum_hidden_c = jnp.float32(0.0)
+    ema_sum_input_e = jnp.float32(0.0)
+    ema_sum_hidden_e = jnp.float32(0.0)
+    ema_sum_loo = jnp.float32(0.0)
 
     # Build and run the scan
-    scan_fn = _make_scan_fn(compute_pred_grads=is_autostep)
-    init_carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c,
+    scan_fn = _make_scan_fn(compute_pred_grads=is_autostep, compute_loo=COMPUTE_TRUE_LOO)
+    init_carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c, ema_e, ema_loo,
                   ema_target_mag, ema_error_reduced,
                   ema_sum_input_a, ema_sum_hidden_a,
                   ema_sum_input_b, ema_sum_hidden_b,
-                  ema_sum_input_c, ema_sum_hidden_c)
+                  ema_sum_input_c, ema_sum_hidden_c,
+                  ema_sum_input_e, ema_sum_hidden_e,
+                  ema_sum_loo)
     step_data = (x_all, y_star_all)
 
     @eqx.filter_jit
@@ -550,14 +792,19 @@ def run_experiment(optimizer_name, seed):
     app_b_hist = np.concatenate([o[3] for o in all_outputs])
     ss_hist = np.concatenate([o[4] for o in all_outputs])
     app_c_hist = np.concatenate([o[5] for o in all_outputs])
-    target_mag_hist = np.concatenate([o[6] for o in all_outputs])
-    error_reduced_hist = np.concatenate([o[7] for o in all_outputs])
-    sum_input_a_hist = np.concatenate([o[8] for o in all_outputs])
-    sum_hidden_a_hist = np.concatenate([o[9] for o in all_outputs])
-    sum_input_b_hist = np.concatenate([o[10] for o in all_outputs])
-    sum_hidden_b_hist = np.concatenate([o[11] for o in all_outputs])
-    sum_input_c_hist = np.concatenate([o[12] for o in all_outputs])
-    sum_hidden_c_hist = np.concatenate([o[13] for o in all_outputs])
+    app_e_hist = np.concatenate([o[6] for o in all_outputs])
+    loo_hist = np.concatenate([o[7] for o in all_outputs])
+    target_mag_hist = np.concatenate([o[8] for o in all_outputs])
+    error_reduced_hist = np.concatenate([o[9] for o in all_outputs])
+    sum_input_a_hist = np.concatenate([o[10] for o in all_outputs])
+    sum_hidden_a_hist = np.concatenate([o[11] for o in all_outputs])
+    sum_input_b_hist = np.concatenate([o[12] for o in all_outputs])
+    sum_hidden_b_hist = np.concatenate([o[13] for o in all_outputs])
+    sum_input_c_hist = np.concatenate([o[14] for o in all_outputs])
+    sum_hidden_c_hist = np.concatenate([o[15] for o in all_outputs])
+    sum_input_e_hist = np.concatenate([o[16] for o in all_outputs])
+    sum_hidden_e_hist = np.concatenate([o[17] for o in all_outputs])
+    sum_loo_hist = np.concatenate([o[18] for o in all_outputs])
 
     return {
         'mse_history': mse_hist,
@@ -565,6 +812,8 @@ def run_experiment(optimizer_name, seed):
         'approach_a_traces': app_a_hist,
         'approach_b_traces': app_b_hist,
         'approach_c_traces': app_c_hist,
+        'approach_e_traces': app_e_hist,
+        'loo_traces': loo_hist,
         'step_size_history': ss_hist if is_autostep else None,
         'target_mag': target_mag_hist,
         'error_reduced': error_reduced_hist,
@@ -574,6 +823,9 @@ def run_experiment(optimizer_name, seed):
         'sum_hidden_b': sum_hidden_b_hist,
         'sum_input_c': sum_input_c_hist,
         'sum_hidden_c': sum_hidden_c_hist,
+        'sum_input_e': sum_input_e_hist,
+        'sum_hidden_e': sum_hidden_e_hist,
+        'sum_loo': sum_loo_hist,
     }
 
 
@@ -619,10 +871,14 @@ def plot_results(sgd_results, autostep_results):
     )
     print("Saved fig1_learning_curves.png")
 
-    # ---- Figure 2: Input-level utility (2x4 grid) ----
-    fig2, axes = plt.subplots(2, 4, figsize=(20, 9))
-    utility_names = ['Contribution', 'Approach A', 'Approach B', 'Approach C']
-    utility_keys = ['contribution_traces', 'approach_a_traces', 'approach_b_traces', 'approach_c_traces']
+    # ---- Figure 2: Input-level utility grid ----
+    utility_names = ['Contribution', 'Approach A', 'Approach B', 'Approach C', 'Approach E']
+    utility_keys = ['contribution_traces', 'approach_a_traces', 'approach_b_traces', 'approach_c_traces', 'approach_e_traces']
+    if COMPUTE_TRUE_LOO:
+        utility_names.append('True LOO')
+        utility_keys.append('loo_traces')
+    n_cols = len(utility_names)
+    fig2, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 9))
 
     for row, (results, opt_name) in enumerate(
         [(sgd_results, 'SGD'), (autostep_results, 'Autostep')]
@@ -641,9 +897,9 @@ def plot_results(sgd_results, autostep_results):
             ax.grid(True, alpha=0.3)
 
     # Legend on last subplot
-    axes[0, 3].plot([], [], color='blue', linewidth=2, label='Relevant (0-4)')
-    axes[0, 3].plot([], [], color='red', linewidth=2, label='Irrelevant (5-19)')
-    axes[0, 3].legend()
+    axes[0, -1].plot([], [], color='blue', linewidth=2, label='Relevant (0-4)')
+    axes[0, -1].plot([], [], color='red', linewidth=2, label='Irrelevant (5-19)')
+    axes[0, -1].legend()
 
     fig2.tight_layout()
     fig2.savefig(
@@ -652,13 +908,18 @@ def plot_results(sgd_results, autostep_results):
     )
     print("Saved fig2_utility_traces.png")
 
-    # ---- Figure 3: Utility budget per method (2x3 grid: optimizers × methods) ----
+    # ---- Figure 3: Utility budget per method ----
+    # Each method gets: (name, input_sum_key, hidden_sum_key_or_None)
     method_budget_keys = [
         ('Approach A', 'sum_input_a', 'sum_hidden_a'),
         ('Approach B', 'sum_input_b', 'sum_hidden_b'),
         ('Approach C', 'sum_input_c', 'sum_hidden_c'),
+        ('Approach E', 'sum_input_e', 'sum_hidden_e'),
     ]
-    fig3, axes3 = plt.subplots(2, 3, figsize=(18, 9))
+    if COMPUTE_TRUE_LOO:
+        method_budget_keys.append(('True LOO', 'sum_loo', None))
+    n_budget_cols = len(method_budget_keys)
+    fig3, axes3 = plt.subplots(2, n_budget_cols, figsize=(6 * n_budget_cols, 9))
 
     for row, (results, opt_name) in enumerate(
         [(sgd_results, 'SGD'), (autostep_results, 'Autostep')]
@@ -667,7 +928,8 @@ def plot_results(sgd_results, autostep_results):
             ax = axes3[row, col]
             ax.plot(results['target_mag'], label='|y*|', linewidth=1.5, color='black')
             ax.plot(results['error_reduced'], label='error reduced', linewidth=1.5, color='tab:green')
-            ax.plot(results[hidden_key], label='Σ U_hidden', linewidth=1.5, color='tab:orange')
+            if hidden_key is not None:
+                ax.plot(results[hidden_key], label='Σ U_hidden', linewidth=1.5, color='tab:orange')
             ax.plot(results[input_key], label='Σ U_input', linewidth=1.5, color='tab:blue')
             ax.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
             ax.set_title(f'{method_name} ({opt_name})')
@@ -709,16 +971,41 @@ if __name__ == '__main__':
     for name, results in [('SGD', sgd_results), ('Autostep', autostep_results)]:
         mse = np.mean(results['mse_history'][last_5k])
         print(f"\n{name} -- Final MSE (last 5k): {mse:.4f}")
-        for u_name, u_key in [
+        summary_methods = [
             ('Contribution', 'contribution_traces'),
             ('Approach A', 'approach_a_traces'),
             ('Approach B', 'approach_b_traces'),
             ('Approach C', 'approach_c_traces'),
-        ]:
-            traces = results[u_key][last_5k]
-            rel_mean = np.mean(traces[:, :N_RELEVANT])
-            irr_mean = np.mean(traces[:, N_RELEVANT:])
-            print(f"  {u_name}: relevant={rel_mean:.5f}, irrelevant={irr_mean:.5f}, "
-                  f"ratio={rel_mean / (abs(irr_mean) + 1e-10):.1f}x")
+            ('Approach E', 'approach_e_traces'),
+        ]
+        if COMPUTE_TRUE_LOO:
+            summary_methods.append(('True LOO', 'loo_traces'))
+        for u_name, u_key in summary_methods:
+            traces = results[u_key]  # (N_STEPS, N_INPUT)
+            last_traces = traces[last_5k]
+            rel_mean = np.mean(last_traces[:, :N_RELEVANT])
+            irr_mean = np.mean(last_traces[:, N_RELEVANT:])
+            gap = rel_mean - irr_mean
+            # Cohen's d: separation quality normalized by spread
+            rel_std = np.std(last_traces[:, :N_RELEVANT])
+            irr_std = np.std(last_traces[:, N_RELEVANT:])
+            pooled_std = np.sqrt((rel_std**2 + irr_std**2) / 2)
+            d = gap / (pooled_std + 1e-10)
+            # Speed of separation: first step where rolling d > 1.0
+            win = 1000
+            if len(traces) >= win:
+                rel_roll = np.convolve(np.mean(traces[:, :N_RELEVANT], axis=1), np.ones(win)/win, mode='valid')
+                irr_roll = np.convolve(np.mean(traces[:, N_RELEVANT:], axis=1), np.ones(win)/win, mode='valid')
+                rel_std_roll = np.convolve(np.var(traces[:, :N_RELEVANT], axis=1), np.ones(win)/win, mode='valid') ** 0.5
+                irr_std_roll = np.convolve(np.var(traces[:, N_RELEVANT:], axis=1), np.ones(win)/win, mode='valid') ** 0.5
+                pool_roll = np.sqrt((rel_std_roll**2 + irr_std_roll**2) / 2)
+                d_roll = (rel_roll - irr_roll) / (pool_roll + 1e-10)
+                sep_idx = np.where(d_roll > 1.0)[0]
+                sep_step = int(sep_idx[0]) + win if len(sep_idx) > 0 else None
+            else:
+                sep_step = None
+            sep_str = f"{sep_step}" if sep_step is not None else "never"
+            print(f"  {u_name}: rel={rel_mean:.5f}, irr={irr_mean:.5f}, "
+                  f"gap={gap:.5f}, d={d:.2f}, d>1 @ step {sep_str}")
 
     print("\nDone.")
