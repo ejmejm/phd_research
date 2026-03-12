@@ -168,7 +168,9 @@ def compute_utility_approach_a(model, x, y_star, y_hat):
         y_hat: student prediction, scalar
 
     Returns:
-        utility per input, shape (N_STUDENT_INPUTS,)
+        (U_input, U_hidden) where:
+          U_input: utility per input, shape (N_STUDENT_INPUTS,)
+          U_hidden: utility per hidden unit, shape (N_STUDENT_HIDDEN,)
     """
     W1 = model.layers[0].weight  # (N_STUDENT_HIDDEN, N_STUDENT_INPUTS)
     w_out = model.layers[1].weight.squeeze(0)  # (N_STUDENT_HIDDEN,)
@@ -192,7 +194,7 @@ def compute_utility_approach_a(model, x, y_star, y_hat):
 
     # U_{k<-j} = U_j * frac[j, k], then sum over j
     U_input = jnp.sum(U_hidden[:, None] * frac, axis=0)  # (N_STUDENT_INPUTS,)
-    return U_input
+    return U_input, U_hidden
 
 
 def compute_utility_approach_b(model, x, y_star, y_hat):
@@ -251,13 +253,90 @@ def compute_utility_approach_b(model, x, y_star, y_hat):
     return U_input, U_hidden
 
 
+ALIGNMENT_THRESHOLD = 0.1  # fallback to Approach A when |Σs| / Σ|s| < threshold
+
+
+def compute_utility_approach_c(model, x, y_star, y_hat):
+    """Approach C: Signed-Conserving Redistribution.
+
+    Same raw scores as Approach B, but normalized to preserve signed sum:
+      U_{k<-j} = s_{k->j} * U_j / Σ_m s_{m->j}
+    Falls back to Approach A when children nearly cancel (Σs ≈ 0).
+    Output-layer utilities are rescaled so Σ U_j = error_reduced.
+
+    Args:
+        model: MLP student model
+        x: input vector, shape (N_STUDENT_INPUTS,)
+        y_star: teacher target, scalar
+        y_hat: student prediction, scalar
+
+    Returns:
+        (U_input, U_hidden) where:
+          U_input: utility per input, shape (N_STUDENT_INPUTS,)
+          U_hidden: utility per hidden unit, shape (N_STUDENT_HIDDEN,)
+    """
+    W1 = model.layers[0].weight  # (N_STUDENT_HIDDEN, N_STUDENT_INPUTS)
+    w_out = model.layers[1].weight.squeeze(0)  # (N_STUDENT_HIDDEN,)
+
+    # Hidden pre-activations and activations
+    z_hidden = W1 @ x  # (N_STUDENT_HIDDEN,)
+    a_hidden = jax.nn.sigmoid(z_hidden)  # (N_STUDENT_HIDDEN,)
+
+    # Output-layer: raw leave-one-out utilities, then rescale to sum to error_reduced
+    e = y_star - y_hat
+    c_j = w_out * a_hidden  # (N_STUDENT_HIDDEN,)
+    u_raw = jnp.abs(e + c_j) - jnp.abs(e)  # (N_STUDENT_HIDDEN,)
+    error_reduced = jnp.abs(y_star) - jnp.abs(e)
+    u_raw_sum = jnp.sum(u_raw)
+    # Rescale: U_j = u_j * E / Σu_j. When Σu_j ≈ 0, error_reduced ≈ 0 too, so just use raw.
+    scale = jnp.where(jnp.abs(u_raw_sum) > 1e-10, error_reduced / u_raw_sum, 1.0)
+    U_hidden = u_raw * scale  # (N_STUDENT_HIDDEN,)
+
+    # Sigmoid derivative
+    f_prime = a_hidden * (1.0 - a_hidden)
+    f_prime_safe = jnp.maximum(f_prime, 1e-6)
+
+    # Pseudo-error per hidden unit (always positive, same as B)
+    e_j = jnp.abs(U_hidden) / f_prime_safe  # (N_STUDENT_HIDDEN,)
+
+    # Raw signed utility scores (same as B)
+    contributions = W1 * x[None, :]  # (N_STUDENT_HIDDEN, N_STUDENT_INPUTS)
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+
+    # Signed normalization: U_{k<-j} = s_k * U_j / Σ s_k
+    s_signed_sum = jnp.sum(s_raw, axis=1, keepdims=True)  # (N_STUDENT_HIDDEN, 1)
+    s_abs_sum = jnp.sum(jnp.abs(s_raw), axis=1, keepdims=True)
+
+    # Alignment ratio: how well-conditioned is the signed normalization?
+    alignment = jnp.abs(s_signed_sum) / jnp.maximum(s_abs_sum, 1e-10)
+
+    # Signed normalization (Approach C)
+    s_signed_safe = jnp.where(jnp.abs(s_signed_sum) > 1e-10, s_signed_sum, 1.0)
+    U_signed = s_raw * U_hidden[:, None] / s_signed_safe
+
+    # Approach A fallback: U_{k<-j} = U_j * |c_k| / Σ|c_m|
+    abs_contrib = jnp.abs(contributions)
+    abs_contrib_sum = jnp.maximum(jnp.sum(abs_contrib, axis=1, keepdims=True), 1e-10)
+    U_fallback = U_hidden[:, None] * abs_contrib / abs_contrib_sum
+
+    # Blend: use signed normalization when well-conditioned, A otherwise
+    use_signed = (alignment > ALIGNMENT_THRESHOLD).astype(jnp.float32)
+    U_from_j = use_signed * U_signed + (1.0 - use_signed) * U_fallback
+
+    U_input = jnp.sum(U_from_j, axis=0)  # (N_STUDENT_INPUTS,)
+    return U_input, U_hidden
+
+
 # ==============================================================================
 # Scanned training steps
 # ==============================================================================
 
 def _train_step_body(model, optimizer, x, y_star,
-                     ema_c, ema_a, ema_b,
-                     ema_target_mag, ema_sum_input_b, ema_sum_hidden_b, ema_error_reduced,
+                     ema_contrib, ema_a, ema_b, ema_c,
+                     ema_target_mag, ema_error_reduced,
+                     ema_sum_input_a, ema_sum_hidden_a,
+                     ema_sum_input_b, ema_sum_hidden_b,
+                     ema_sum_input_c, ema_sum_hidden_c,
                      compute_pred_grads):
     """Core training step logic, shared by SGD and Autostep scan bodies."""
     # Forward pass
@@ -267,20 +346,26 @@ def _train_step_body(model, optimizer, x, y_star,
 
     # Compute utilities
     u_contribution = compute_contribution_utility(model, x)
-    u_approach_a = compute_utility_approach_a(model, x, y_star, y_hat)
+    u_approach_a, u_hidden_a = compute_utility_approach_a(model, x, y_star, y_hat)
     u_approach_b, u_hidden_b = compute_utility_approach_b(model, x, y_star, y_hat)
+    u_approach_c, u_hidden_c = compute_utility_approach_c(model, x, y_star, y_hat)
 
     # Update EMA traces
-    ema_c = TRACE_DECAY * ema_c + (1 - TRACE_DECAY) * u_contribution
+    ema_contrib = TRACE_DECAY * ema_contrib + (1 - TRACE_DECAY) * u_contribution
     ema_a = TRACE_DECAY * ema_a + (1 - TRACE_DECAY) * u_approach_a
     ema_b = TRACE_DECAY * ema_b + (1 - TRACE_DECAY) * u_approach_b
+    ema_c = TRACE_DECAY * ema_c + (1 - TRACE_DECAY) * u_approach_c
 
     # Budget traces: |y*|, error reduced, sum of input/hidden utilities
     error_reduced = jnp.abs(y_star) - jnp.abs(y_star - y_hat)
     ema_target_mag = TRACE_DECAY * ema_target_mag + (1 - TRACE_DECAY) * jnp.abs(y_star)
+    ema_error_reduced = TRACE_DECAY * ema_error_reduced + (1 - TRACE_DECAY) * error_reduced
+    ema_sum_input_a = TRACE_DECAY * ema_sum_input_a + (1 - TRACE_DECAY) * jnp.sum(u_approach_a)
+    ema_sum_hidden_a = TRACE_DECAY * ema_sum_hidden_a + (1 - TRACE_DECAY) * jnp.sum(u_hidden_a)
     ema_sum_input_b = TRACE_DECAY * ema_sum_input_b + (1 - TRACE_DECAY) * jnp.sum(u_approach_b)
     ema_sum_hidden_b = TRACE_DECAY * ema_sum_hidden_b + (1 - TRACE_DECAY) * jnp.sum(u_hidden_b)
-    ema_error_reduced = TRACE_DECAY * ema_error_reduced + (1 - TRACE_DECAY) * error_reduced
+    ema_sum_input_c = TRACE_DECAY * ema_sum_input_c + (1 - TRACE_DECAY) * jnp.sum(u_approach_c)
+    ema_sum_hidden_c = TRACE_DECAY * ema_sum_hidden_c + (1 - TRACE_DECAY) * jnp.sum(u_hidden_c)
 
     # Compute gradients and update
     loss_grads = eqx.filter_grad(lambda m: (m(x)[0].squeeze() - y_star) ** 2)(model)
@@ -292,22 +377,34 @@ def _train_step_body(model, optimizer, x, y_star,
     new_model = eqx.apply_updates(model, updates)
 
     return (new_model, new_optimizer, mse,
-            ema_c, ema_a, ema_b,
-            ema_target_mag, ema_sum_input_b, ema_sum_hidden_b, ema_error_reduced)
+            ema_contrib, ema_a, ema_b, ema_c,
+            ema_target_mag, ema_error_reduced,
+            ema_sum_input_a, ema_sum_hidden_a,
+            ema_sum_input_b, ema_sum_hidden_b,
+            ema_sum_input_c, ema_sum_hidden_c)
 
 
 def _make_scan_fn(compute_pred_grads):
     """Build a scan body for either SGD or Autostep."""
     def scan_fn(carry, step_data):
-        (model, optimizer, ema_c, ema_a, ema_b,
-         ema_target_mag, ema_sum_input_b, ema_sum_hidden_b, ema_error_reduced) = carry
+        (model, optimizer, ema_contrib, ema_a, ema_b, ema_c,
+         ema_target_mag, ema_error_reduced,
+         ema_sum_input_a, ema_sum_hidden_a,
+         ema_sum_input_b, ema_sum_hidden_b,
+         ema_sum_input_c, ema_sum_hidden_c) = carry
         x, y_star = step_data
 
-        (model, optimizer, mse, ema_c, ema_a, ema_b,
-         ema_target_mag, ema_sum_input_b, ema_sum_hidden_b, ema_error_reduced) = _train_step_body(
+        (model, optimizer, mse, ema_contrib, ema_a, ema_b, ema_c,
+         ema_target_mag, ema_error_reduced,
+         ema_sum_input_a, ema_sum_hidden_a,
+         ema_sum_input_b, ema_sum_hidden_b,
+         ema_sum_input_c, ema_sum_hidden_c) = _train_step_body(
             model, optimizer, x, y_star,
-            ema_c, ema_a, ema_b,
-            ema_target_mag, ema_sum_input_b, ema_sum_hidden_b, ema_error_reduced,
+            ema_contrib, ema_a, ema_b, ema_c,
+            ema_target_mag, ema_error_reduced,
+            ema_sum_input_a, ema_sum_hidden_a,
+            ema_sum_input_b, ema_sum_hidden_b,
+            ema_sum_input_c, ema_sum_hidden_c,
             compute_pred_grads)
 
         # Extract first-layer step sizes (zeros for SGD, actual for Autostep)
@@ -317,10 +414,16 @@ def _make_scan_fn(compute_pred_grads):
         else:
             step_sizes = jnp.zeros(N_STUDENT_INPUTS)
 
-        carry = (model, optimizer, ema_c, ema_a, ema_b,
-                 ema_target_mag, ema_sum_input_b, ema_sum_hidden_b, ema_error_reduced)
-        outputs = (mse, ema_c, ema_a, ema_b, step_sizes,
-                   ema_target_mag, ema_sum_input_b, ema_sum_hidden_b, ema_error_reduced)
+        carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c,
+                 ema_target_mag, ema_error_reduced,
+                 ema_sum_input_a, ema_sum_hidden_a,
+                 ema_sum_input_b, ema_sum_hidden_b,
+                 ema_sum_input_c, ema_sum_hidden_c)
+        outputs = (mse, ema_contrib, ema_a, ema_b, step_sizes, ema_c,
+                   ema_target_mag, ema_error_reduced,
+                   ema_sum_input_a, ema_sum_hidden_a,
+                   ema_sum_input_b, ema_sum_hidden_b,
+                   ema_sum_input_c, ema_sum_hidden_c)
         return carry, outputs
 
     return scan_fn
@@ -402,18 +505,26 @@ def run_experiment(optimizer_name, seed):
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
 
     # EMA accumulators
-    ema_c = jnp.zeros(N_STUDENT_INPUTS)
+    ema_contrib = jnp.zeros(N_STUDENT_INPUTS)
     ema_a = jnp.zeros(N_STUDENT_INPUTS)
     ema_b = jnp.zeros(N_STUDENT_INPUTS)
+    ema_c = jnp.zeros(N_STUDENT_INPUTS)
     ema_target_mag = jnp.float32(0.0)
+    ema_error_reduced = jnp.float32(0.0)
+    ema_sum_input_a = jnp.float32(0.0)
+    ema_sum_hidden_a = jnp.float32(0.0)
     ema_sum_input_b = jnp.float32(0.0)
     ema_sum_hidden_b = jnp.float32(0.0)
-    ema_error_reduced = jnp.float32(0.0)
+    ema_sum_input_c = jnp.float32(0.0)
+    ema_sum_hidden_c = jnp.float32(0.0)
 
     # Build and run the scan
     scan_fn = _make_scan_fn(compute_pred_grads=is_autostep)
-    init_carry = (model, optimizer, ema_c, ema_a, ema_b,
-                  ema_target_mag, ema_sum_input_b, ema_sum_hidden_b, ema_error_reduced)
+    init_carry = (model, optimizer, ema_contrib, ema_a, ema_b, ema_c,
+                  ema_target_mag, ema_error_reduced,
+                  ema_sum_input_a, ema_sum_hidden_a,
+                  ema_sum_input_b, ema_sum_hidden_b,
+                  ema_sum_input_c, ema_sum_hidden_c)
     step_data = (x_all, y_star_all)
 
     @eqx.filter_jit
@@ -438,21 +549,31 @@ def run_experiment(optimizer_name, seed):
     app_a_hist = np.concatenate([o[2] for o in all_outputs])
     app_b_hist = np.concatenate([o[3] for o in all_outputs])
     ss_hist = np.concatenate([o[4] for o in all_outputs])
-    target_mag_hist = np.concatenate([o[5] for o in all_outputs])
-    sum_input_b_hist = np.concatenate([o[6] for o in all_outputs])
-    sum_hidden_b_hist = np.concatenate([o[7] for o in all_outputs])
-    error_reduced_hist = np.concatenate([o[8] for o in all_outputs])
+    app_c_hist = np.concatenate([o[5] for o in all_outputs])
+    target_mag_hist = np.concatenate([o[6] for o in all_outputs])
+    error_reduced_hist = np.concatenate([o[7] for o in all_outputs])
+    sum_input_a_hist = np.concatenate([o[8] for o in all_outputs])
+    sum_hidden_a_hist = np.concatenate([o[9] for o in all_outputs])
+    sum_input_b_hist = np.concatenate([o[10] for o in all_outputs])
+    sum_hidden_b_hist = np.concatenate([o[11] for o in all_outputs])
+    sum_input_c_hist = np.concatenate([o[12] for o in all_outputs])
+    sum_hidden_c_hist = np.concatenate([o[13] for o in all_outputs])
 
     return {
         'mse_history': mse_hist,
         'contribution_traces': contrib_hist,
         'approach_a_traces': app_a_hist,
         'approach_b_traces': app_b_hist,
+        'approach_c_traces': app_c_hist,
         'step_size_history': ss_hist if is_autostep else None,
         'target_mag': target_mag_hist,
+        'error_reduced': error_reduced_hist,
+        'sum_input_a': sum_input_a_hist,
+        'sum_hidden_a': sum_hidden_a_hist,
         'sum_input_b': sum_input_b_hist,
         'sum_hidden_b': sum_hidden_b_hist,
-        'error_reduced': error_reduced_hist,
+        'sum_input_c': sum_input_c_hist,
+        'sum_hidden_c': sum_hidden_c_hist,
     }
 
 
@@ -498,10 +619,10 @@ def plot_results(sgd_results, autostep_results):
     )
     print("Saved fig1_learning_curves.png")
 
-    # ---- Figure 2: Input-level utility (2x3 grid) ----
-    fig2, axes = plt.subplots(2, 3, figsize=(16, 9))
-    utility_names = ['Contribution', 'Approach A', 'Approach B']
-    utility_keys = ['contribution_traces', 'approach_a_traces', 'approach_b_traces']
+    # ---- Figure 2: Input-level utility (2x4 grid) ----
+    fig2, axes = plt.subplots(2, 4, figsize=(20, 9))
+    utility_names = ['Contribution', 'Approach A', 'Approach B', 'Approach C']
+    utility_keys = ['contribution_traces', 'approach_a_traces', 'approach_b_traces', 'approach_c_traces']
 
     for row, (results, opt_name) in enumerate(
         [(sgd_results, 'SGD'), (autostep_results, 'Autostep')]
@@ -520,9 +641,9 @@ def plot_results(sgd_results, autostep_results):
             ax.grid(True, alpha=0.3)
 
     # Legend on last subplot
-    axes[0, 2].plot([], [], color='blue', linewidth=2, label='Relevant (0-4)')
-    axes[0, 2].plot([], [], color='red', linewidth=2, label='Irrelevant (5-19)')
-    axes[0, 2].legend()
+    axes[0, 3].plot([], [], color='blue', linewidth=2, label='Relevant (0-4)')
+    axes[0, 3].plot([], [], color='red', linewidth=2, label='Irrelevant (5-19)')
+    axes[0, 3].legend()
 
     fig2.tight_layout()
     fig2.savefig(
@@ -531,22 +652,29 @@ def plot_results(sgd_results, autostep_results):
     )
     print("Saved fig2_utility_traces.png")
 
-    # ---- Figure 3: Utility budget (target mag vs sum of utilities) ----
-    fig3, (ax3a, ax3b) = plt.subplots(1, 2, figsize=(14, 5))
+    # ---- Figure 3: Utility budget per method (2x3 grid: optimizers × methods) ----
+    method_budget_keys = [
+        ('Approach A', 'sum_input_a', 'sum_hidden_a'),
+        ('Approach B', 'sum_input_b', 'sum_hidden_b'),
+        ('Approach C', 'sum_input_c', 'sum_hidden_c'),
+    ]
+    fig3, axes3 = plt.subplots(2, 3, figsize=(18, 9))
 
-    for ax, (results, opt_name) in zip(
-        [ax3a, ax3b], [(sgd_results, 'SGD'), (autostep_results, 'Autostep')]
+    for row, (results, opt_name) in enumerate(
+        [(sgd_results, 'SGD'), (autostep_results, 'Autostep')]
     ):
-        ax.plot(results['target_mag'], label='|y*| (target magnitude)', linewidth=1.5, color='black')
-        ax.plot(results['error_reduced'], label='|y*| - |error| (error reduced)', linewidth=1.5, color='tab:green')
-        ax.plot(results['sum_hidden_b'], label='Σ U_hidden (Approach B)', linewidth=1.5, color='tab:orange')
-        ax.plot(results['sum_input_b'], label='Σ U_input (Approach B)', linewidth=1.5, color='tab:blue')
-        ax.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
-        ax.set_title(f'Utility Budget ({opt_name})')
-        ax.set_xlabel('Step')
-        ax.set_ylabel('EMA Trace')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        for col, (method_name, input_key, hidden_key) in enumerate(method_budget_keys):
+            ax = axes3[row, col]
+            ax.plot(results['target_mag'], label='|y*|', linewidth=1.5, color='black')
+            ax.plot(results['error_reduced'], label='error reduced', linewidth=1.5, color='tab:green')
+            ax.plot(results[hidden_key], label='Σ U_hidden', linewidth=1.5, color='tab:orange')
+            ax.plot(results[input_key], label='Σ U_input', linewidth=1.5, color='tab:blue')
+            ax.axhline(0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
+            ax.set_title(f'{method_name} ({opt_name})')
+            ax.set_xlabel('Step')
+            ax.set_ylabel('EMA Trace')
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
 
     fig3.tight_layout()
     fig3.savefig(SCRIPT_DIR / 'fig3_utility_budget.png', dpi=150)
@@ -585,6 +713,7 @@ if __name__ == '__main__':
             ('Contribution', 'contribution_traces'),
             ('Approach A', 'approach_a_traces'),
             ('Approach B', 'approach_b_traces'),
+            ('Approach C', 'approach_c_traces'),
         ]:
             traces = results[u_key][last_5k]
             rel_mean = np.mean(traces[:, :N_RELEVANT])
