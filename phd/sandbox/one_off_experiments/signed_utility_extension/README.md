@@ -157,11 +157,43 @@ $$\tilde{U}_{k \leftarrow j} = s_{k \to j} \cdot \frac{U_j}{\sum_m s_{m \to j}},
 
 ---
 
-## Approach H: Coherence-Weighted Decomposition
+## Approach H: Activation-Absorbed Signed Utility
+
+Approach B always scales children's scores so that $\sum |U_{k \leftarrow j}| = |U_j|$ — forcing all of the parent's utility onto its children. But when children's contributions cancel and the activation function has $f(0) \neq 0$ (e.g., $\sigma(0) = 0.5$), the unit produces useful output even with zero net input. That utility belongs to the activation function, not the children.
+
+**Key insight:** The activation function can act as a utility source (like a bias). Utility should be allowed to *decrease* as it propagates backward — the deficit is utility the activation function earned. Utility should never *increase* (children cannot create utility the parent doesn't have).
+
+**Algorithm.** Same raw scores as B, with one change to the normalization:
+
+$$e_j = \frac{\lvert U_j \rvert}{f'(z_j)}, \quad s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert$$
+
+$$U_{k \leftarrow j} = s_{k \to j} \cdot \min\!\left(1,\; \frac{\lvert U_j \rvert}{\sum_m \lvert s_{m \to j} \rvert}\right)$$
+
+The single change from B: replace $|U_j|/S$ with $\min(1, |U_j|/S)$. Don't scale up, only scale down.
+
+- When $S \leq |U_j|$: raw scores used directly. The deficit $|U_j| - S$ is absorbed by the activation function.
+- When $S > |U_j|$: scores scaled down to fit the budget. Identical to Approach B in this regime.
+
+**Motivating example.** Sigmoid unit, $c_A = +1$, $c_B = -1$, $z = 0$, $a = 0.5$, $U_j = 2$. Pseudo-error $e_j = 8$. Scores: $s_A = +1$, $s_B = -1$. $S = 2 = |U_j|$, so $\min(1, 2/2) = 1$ — no scaling. Children get $+1$ and $-1$ (sum $= 0$). The deficit of 2 is the activation function's contribution: $\sigma(0) = 0.5$ produced the output, not the children.
+
+**Properties:**
+
+- **Bounded:** $\sum_k |U_{k \leftarrow j}| \leq |U_j|$. Utility never grows through propagation.
+- **Correct signs:** same as B — children causing harm get negative utility, those mitigating get positive.
+- **Same formula every layer** (signed utility formula + capped normalization).
+- **$O(1)$ per connection.**
+- **Graceful degradation at saturation:** $e_j \to \infty$, scores $\to c_k$, cap engages, reduces to signed proportional redistribution.
+- **No blow-up.** When $S = 0$, all scores are zero and the min is irrelevant.
+
+**Property relaxed (by design):** Signed conservation. $\sum_k U_{k \leftarrow j}$ may be less than $U_j$. The deficit is utility absorbed by the activation function — not lost, just not attributable to any child.
+
+---
+
+## Approach I: Coherence-Weighted Decomposition
 
 Approaches C/E/F/G all wrestle with the same fundamental tension: signed conservation ($\sum U_{k \leftarrow j} = U_j$) requires dividing by $\sum s_k$, which blows up when children's contributions cancel. This tension is **intrinsic** — any decomposition proportional to scores $s_k$ must divide by their sum to conserve the signed total. No choice of pseudo-error or normalization can avoid this.
 
-Approach H sidesteps the problem entirely by **not using the signed utility formula at hidden layers**. The LOO formula $|e + c_k| - |e|$ is meaningful at the output (where $e$ is a real error), but at hidden layers the "pseudo-error" is artificial. When the pseudo-error is large relative to contributions (the typical regime), the scores converge to $s_k \approx \text{sign}(e) \cdot c_k$ anyway — just the raw contributions. The nonlinear regime only matters when $U_j$ is small, where there's little utility to distribute.
+Approach I sidesteps the problem entirely by **not using the signed utility formula at hidden layers**. The LOO formula $|e + c_k| - |e|$ is meaningful at the output (where $e$ is a real error), but at hidden layers the "pseudo-error" is artificial. When the pseudo-error is large relative to contributions (the typical regime), the scores converge to $s_k \approx \text{sign}(e) \cdot c_k$ anyway — just the raw contributions. The nonlinear regime only matters when $U_j$ is small, where there's little utility to distribute.
 
 **Core idea.** Blend two natural decompositions of $U_j$ using the **coherence** $\beta = |z_j| / \sum |c_m|$ as interpolation weight:
 
@@ -196,16 +228,17 @@ Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} 
 
 ## Comparison
 
-| | A | B | C | D | E | F | G | **H** |
-|---|---|---|---|---|---|---|---|---|
-| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | Approximate | **Yes (exact)** |
-| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | Yes | **Yes** |
-| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | Yes | **Yes ($\leq 9/8\times$)** |
-| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | Yes (with fallback) | **Yes (no fallback)** |
-| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | No (uses $f^{-1}$) | **No** |
-| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | Yes | **Yes (cheapest)** |
+| | A | B | C | D | E | F | G | H | I |
+|---|---|---|---|---|---|---|---|---|---|
+| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | Approximate | No (by design) | Yes (exact) |
+| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | Yes | Yes | Yes |
+| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | Yes | Yes | Yes ($\leq 9/8\times$) |
+| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | Yes (with fallback) | Yes | Yes (no fallback) |
+| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | No (uses $f^{-1}$) | Yes | No |
+| **Activation absorption** | No | No | No | No | No | No | No | Yes | No |
+| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | Yes | Yes | Yes (cheapest) |
 
-Approach H resolves all three desiderata (signed conservation, bounded magnitudes, correct signs) simultaneously, without pseudo-errors, activation derivatives, or fallback logic. Approaches E/F/G achieve similar behavior in practice but with more complex machinery. E is exact but expensive; F/G are approximate; H is exact and the simplest.
+Approaches H and I represent two different philosophies. H acknowledges that activation functions can be utility sources (like biases) and lets utility decrease through layers — it uses B's signed utility formula but removes the forced scale-up. I achieves exact signed conservation with no blow-up by sidestepping the signed utility formula entirely. H is conceptually simpler (one-line change to B); I is algebraically simpler (no pseudo-error or derivative).
 
 ---
 
@@ -213,4 +246,4 @@ Approach H resolves all three desiderata (signed conservation, bounded magnitude
 
 - `initial_notes.md` -- early brainstorming and problem framing
 - `multilayer_signed_utility.md` -- detailed derivations, worked examples, and formal algorithm specification
-- `multilayer_experiment.py` -- experiment comparing approaches A, B, C, E, F, G, H, UPGD, and SI on nonlinear tracking task
+- `multilayer_experiment.py` -- experiment comparing approaches A, B, C, E, F, G, I, UPGD, and SI on nonlinear tracking task

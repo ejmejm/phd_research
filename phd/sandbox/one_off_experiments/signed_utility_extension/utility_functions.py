@@ -400,14 +400,43 @@ def approach_e_utility(model, x, y_star, y_hat, loss_grads, updates):
 
 
 def approach_h_utility(model, x, y_star, y_hat, loss_grads, updates):
-    """Approach H: Coherence-Weighted Decomposition.
+    """Approach H: Activation-Absorbed Signed Utility.
+
+    Same raw scores as B, but only scales down (never up). The activation
+    function absorbs the deficit when children's scores sum to less than |U_j|.
+
+    U_{k←j} = s_k * min(1, |U_j| / Σ|s_m|)
+    """
+    W1 = model.layers[0].weight  # (H, N)
+    w_out = model.layers[1].weight.squeeze(0)  # (H,)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    _, _, U_hidden = _output_layer_loo(w_out, a_hidden, y_star, y_hat)
+
+    f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
+    e_j = jnp.abs(U_hidden) / f_prime
+
+    contributions = W1 * x[None, :]  # (H, N)
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+
+    # Cap: scale = min(1, |U_j| / Σ|s_k|) — never scale up
+    s_abs_sum = jnp.sum(jnp.abs(s_raw), axis=1, keepdims=True)
+    scale = jnp.minimum(1.0, jnp.abs(U_hidden[:, None]) / jnp.maximum(s_abs_sum, 1e-10))
+    U_from_j = s_raw * scale
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+
+def approach_i_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach I: Coherence-Weighted Decomposition.
 
     Blends signed (c_k / z_j) and absolute (|c_k| / Σ|c_m|) decompositions using
     the coherence β = |z_j| / Σ|c_m| as interpolation weight. Exact signed
     conservation with no blow-up — the singularity in c_k/z_j cancels algebraically.
 
-    U_{k←j} = U_j * [β * c_k/z_j + (1-β) * |c_k|/Σ|c_m|]
-            = U_j / Σ|c_m| * [sign(z_j)*c_k + (1-β)*|c_k|]
+    U_{k←j} = U_j / Σ|c_m| * [sign(z_j)*c_k + (1-β)*|c_k|]
 
     No pseudo-error, no activation derivative, no normalization step.
     """
