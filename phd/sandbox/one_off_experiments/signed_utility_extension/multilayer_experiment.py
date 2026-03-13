@@ -23,7 +23,8 @@ Utility Methods
 7. **Approach E** (Calibrated Pseudo-Error): calibrates pseudo-error so scores sum to target.
 8. **Approach F** (Capped Signed): C's signed normalization with magnitude cap instead of fallback.
 9. **Approach G** (Target Propagation): real pre-activation targets via f^{-1}, signed normalization + cap.
-10. **True LOO**: 20 extra forward passes per step (optional).
+10. **Approach H** (Coherence-Weighted): blends signed/absolute decomposition via coherence β = |z_j|/Σ|c_k|.
+11. **True LOO**: 20 extra forward passes per step (optional).
 """
 
 import jax
@@ -43,7 +44,7 @@ from phd.jax_core.optimizers import EqxOptimizer, optax_idbd
 from phd.sandbox.one_off_experiments.signed_utility_extension.utility_functions import (
     contribution_utility, upgd_utility, si_utility,
     approach_a_utility, approach_b_utility, approach_c_utility,
-    approach_e_utility, approach_f_utility, approach_g_utility,
+    approach_e_utility, approach_f_utility, approach_g_utility, approach_h_utility,
     true_loo_utility,
 )
 
@@ -84,6 +85,7 @@ UTILITY_METHODS = [
     ('Approach E',   'approach_e_traces',   'sum_input_e',     'sum_hidden_e',     approach_e_utility,  False),
     ('Approach F',   'approach_f_traces',   'sum_input_f',     'sum_hidden_f',     approach_f_utility,  False),
     ('Approach G',   'approach_g_traces',   'sum_input_g',     'sum_hidden_g',     approach_g_utility,  False),
+    ('Approach H',   'approach_h_traces',   'sum_input_h',     'sum_hidden_h',     approach_h_utility,  False),
 ]
 
 

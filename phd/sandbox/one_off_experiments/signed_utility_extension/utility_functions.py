@@ -399,6 +399,44 @@ def approach_e_utility(model, x, y_star, y_hat, loss_grads, updates):
     return U_input, U_hidden
 
 
+def approach_h_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach H: Coherence-Weighted Decomposition.
+
+    Blends signed (c_k / z_j) and absolute (|c_k| / Σ|c_m|) decompositions using
+    the coherence β = |z_j| / Σ|c_m| as interpolation weight. Exact signed
+    conservation with no blow-up — the singularity in c_k/z_j cancels algebraically.
+
+    U_{k←j} = U_j * [β * c_k/z_j + (1-β) * |c_k|/Σ|c_m|]
+            = U_j / Σ|c_m| * [sign(z_j)*c_k + (1-β)*|c_k|]
+
+    No pseudo-error, no activation derivative, no normalization step.
+    """
+    W1 = model.layers[0].weight  # (H, N)
+    w_out = model.layers[1].weight.squeeze(0)  # (H,)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    # Output layer: standard LOO
+    _, _, U_hidden = _output_layer_loo(w_out, a_hidden, y_star, y_hat)
+
+    # Hidden layer: coherence-weighted decomposition
+    contributions = W1 * x[None, :]  # (H, N) — c_k = W1[j,k] * x[k]
+    z_j = jnp.sum(contributions, axis=1, keepdims=True)  # (H, 1) — pre-activation (input-driven)
+    Sigma = jnp.sum(jnp.abs(contributions), axis=1, keepdims=True)  # (H, 1)
+
+    # β = |z_j| / Σ|c_m|, safe division
+    Sigma_safe = jnp.maximum(Sigma, 1e-10)
+    beta = jnp.abs(z_j) / Sigma_safe  # (H, 1)
+
+    # U_{k←j} = U_j / Σ|c_m| * [sign(z_j)*c_k + (1-β)*|c_k|]
+    sign_z = jnp.sign(z_j)  # (H, 1)
+    weights = (sign_z * contributions + (1.0 - beta) * jnp.abs(contributions)) / Sigma_safe
+    U_from_j = U_hidden[:, None] * weights  # (H, N)
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+
 def true_loo_utility(model, x, y_star, y_hat, loss_grads, updates):
     """True leave-one-out utility via N extra forward passes (vmapped)."""
     n_inputs = x.shape[0]

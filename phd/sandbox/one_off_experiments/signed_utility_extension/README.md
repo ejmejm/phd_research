@@ -157,6 +157,37 @@ $$\tilde{U}_{k \leftarrow j} = s_{k \to j} \cdot \frac{U_j}{\sum_m s_{m \to j}},
 
 ---
 
+## Approach H: Coherence-Weighted Decomposition
+
+Approaches C/E/F/G all wrestle with the same fundamental tension: signed conservation ($\sum U_{k \leftarrow j} = U_j$) requires dividing by $\sum s_k$, which blows up when children's contributions cancel. This tension is **intrinsic** — any decomposition proportional to scores $s_k$ must divide by their sum to conserve the signed total. No choice of pseudo-error or normalization can avoid this.
+
+Approach H sidesteps the problem entirely by **not using the signed utility formula at hidden layers**. The LOO formula $|e + c_k| - |e|$ is meaningful at the output (where $e$ is a real error), but at hidden layers the "pseudo-error" is artificial. When the pseudo-error is large relative to contributions (the typical regime), the scores converge to $s_k \approx \text{sign}(e) \cdot c_k$ anyway — just the raw contributions. The nonlinear regime only matters when $U_j$ is small, where there's little utility to distribute.
+
+**Core idea.** Blend two natural decompositions of $U_j$ using the **coherence** $\beta = |z_j| / \sum |c_m|$ as interpolation weight:
+
+- **Signed decomposition** $c_k / z_j$: exact proportions, blows up when $z_j \to 0$
+- **Absolute decomposition** $|c_k| / \sum|c_m|$: always safe, loses sign information
+
+$$U_{k \leftarrow j} = U_j \left[\beta \cdot \frac{c_k}{z_j} + (1 - \beta) \cdot \frac{|c_k|}{\Sigma}\right], \quad \beta = \frac{|z_j|}{\Sigma}, \quad \Sigma = \sum_m |c_m|$$
+
+The singularity cancels algebraically: $\beta \cdot c_k / z_j = c_k \cdot \text{sign}(z_j) / \Sigma$, giving the equivalent form:
+
+$$U_{k \leftarrow j} = \frac{U_j}{\Sigma}\Big[\text{sign}(z_j) \cdot c_k + (1 - \beta) \cdot |c_k|\Big]$$
+
+No division by anything that can vanish (only $\Sigma = 0$, which means all contributions are zero).
+
+**Properties:**
+
+- **Exact signed conservation:** $\sum_k U_{k \leftarrow j} = U_j$ (both terms in the blend sum to 1)
+- **No blow-up:** the $c_k / z_j$ singularity is cancelled by the $\beta = |z_j|/\Sigma$ prefactor
+- **Correct signs:** children aligned with $z_j$ get $U_j$'s sign (enabling); children opposing get the opposite sign (fighting). When $U_j < 0$, enablers get negative utility, fighters get positive
+- **Bounded magnitudes:** worst-case amplification is $9/8 = 1.125\times$ per child (for 2 children); in practice negligible
+- **No pseudo-error, no activation derivative:** works directly with pre-activation contributions
+- **$O(1)$ per connection, simplest formula of all approaches**
+- **Graceful interpolation:** $\beta = 1$ (no cancellation) → pure signed decomposition; $\beta = 0$ (total cancellation) → Approach A
+
+---
+
 ## The Signed Conservation Gap
 
 Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$). The signed sum can shrink at each layer through cancellation. Approaches C and E achieve signed conservation ($\sum U_{k \leftarrow j} = U_j$), making utility comparable across layers.
@@ -165,16 +196,16 @@ Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} 
 
 ## Comparison
 
-| | A | B | C | D | E | F | **G** |
-|---|---|---|---|---|---|---|---|
-| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | **Approximate** |
-| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | **Yes** |
-| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | **Yes** |
-| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | **Yes (with fallback)** |
-| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | **No** (uses $f^{-1}$) |
-| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | **Yes** |
+| | A | B | C | D | E | F | G | **H** |
+|---|---|---|---|---|---|---|---|---|
+| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | Approximate | **Yes (exact)** |
+| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | Yes | **Yes** |
+| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | Yes | **Yes ($\leq 9/8\times$)** |
+| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | Yes (with fallback) | **Yes (no fallback)** |
+| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | No (uses $f^{-1}$) | **No** |
+| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | Yes | **Yes (cheapest)** |
 
-Approach E resolves the three-way tradeoff exactly. Approaches F and G achieve the same in practice with much simpler computation. G differs from F by using target-propagation-derived errors instead of the $\lvert U_j \rvert / f'(z_j)$ pseudo-error, correctly handling activation nonlinearity without needing the derivative.
+Approach H resolves all three desiderata (signed conservation, bounded magnitudes, correct signs) simultaneously, without pseudo-errors, activation derivatives, or fallback logic. Approaches E/F/G achieve similar behavior in practice but with more complex machinery. E is exact but expensive; F/G are approximate; H is exact and the simplest.
 
 ---
 
@@ -182,4 +213,4 @@ Approach E resolves the three-way tradeoff exactly. Approaches F and G achieve t
 
 - `initial_notes.md` -- early brainstorming and problem framing
 - `multilayer_signed_utility.md` -- detailed derivations, worked examples, and formal algorithm specification
-- `multilayer_experiment.py` -- experiment comparing approaches A, B, C, E, UPGD, and SI on nonlinear tracking task
+- `multilayer_experiment.py` -- experiment comparing approaches A, B, C, E, F, G, H, UPGD, and SI on nonlinear tracking task
