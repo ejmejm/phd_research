@@ -244,6 +244,118 @@ def approach_c_utility(model, x, y_star, y_hat, loss_grads, updates):
     return U_input, U_hidden
 
 
+def approach_f_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach F: Capped Signed Redistribution.
+
+    Same raw scores as B, signed normalization as C, but caps each child's
+    utility magnitude at |U_j| instead of using an alignment-based fallback.
+    Falls back to Approach A only when Σs_k = 0.
+    """
+    W1 = model.layers[0].weight
+    w_out = model.layers[1].weight.squeeze(0)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    # Output layer: rescale LOO utilities to sum to error_reduced (same as C)
+    e = y_star - y_hat
+    c_j = w_out * a_hidden
+    u_raw = jnp.abs(e + c_j) - jnp.abs(e)
+    error_reduced = jnp.abs(y_star) - jnp.abs(e)
+    u_raw_sum = jnp.sum(u_raw)
+    scale = jnp.where(jnp.abs(u_raw_sum) > 1e-10, error_reduced / u_raw_sum, 1.0)
+    U_hidden = u_raw * scale
+
+    f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
+    e_j = jnp.abs(U_hidden) / f_prime
+
+    contributions = W1 * x[None, :]
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+
+    # Signed normalization: U_{k<-j} = s_k * U_j / Σs_k
+    s_signed_sum = jnp.sum(s_raw, axis=1, keepdims=True)
+    can_normalize = jnp.abs(s_signed_sum) > 1e-10
+    s_signed_safe = jnp.where(can_normalize, s_signed_sum, 1.0)
+    U_signed = s_raw * U_hidden[:, None] / s_signed_safe
+
+    # Cap: |U_{k<-j}| <= |U_j|
+    U_capped = jnp.clip(U_signed, -jnp.abs(U_hidden[:, None]), jnp.abs(U_hidden[:, None]))
+
+    # Fallback to Approach A when Σs_k = 0
+    abs_contrib = jnp.abs(contributions)
+    U_fallback = U_hidden[:, None] * abs_contrib / jnp.maximum(jnp.sum(abs_contrib, axis=1, keepdims=True), 1e-10)
+
+    use_signed = can_normalize.astype(jnp.float32)
+    U_from_j = use_signed * U_capped + (1.0 - use_signed) * U_fallback
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+
+def approach_g_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach G: Target Propagation Utility.
+
+    Computes a real pre-activation target for each hidden unit by inverting the
+    activation function (target propagation style), then applies the signed utility
+    formula with that error. Scores are scaled to conserve signed utility, with
+    F-style capping to prevent blow-up.
+
+    When the target activation is outside the activation function's range (e.g.
+    sigmoid output not in (0,1)), uses a large error (±1e6) in the needed direction,
+    which makes scores proportional to signed contributions.
+    """
+    W1 = model.layers[0].weight  # (H, N)
+    w_out = model.layers[1].weight.squeeze(0)  # (H,)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    # Output layer: standard LOO
+    _, _, U_hidden = _output_layer_loo(w_out, a_hidden, y_star, y_hat)
+
+    # Target propagation: a_j* = a_j + U_j / w_{j,out}
+    # This is the activation that would shift j's output contribution by U_j
+    w_safe = jnp.where(jnp.abs(w_out) > 1e-6, w_out, jnp.ones_like(w_out))
+    delta_a = jnp.where(jnp.abs(w_out) > 1e-6, U_hidden / w_safe, 0.0)
+    a_target = a_hidden + delta_a
+
+    # Invert sigmoid: z_j* = logit(a_j*)
+    # When a_j* is outside (0, 1), use ±1e6 error in the needed direction
+    LARGE_ERROR = 1e6
+    eps = 1e-6
+    in_range = (a_target > eps) & (a_target < 1.0 - eps)
+    a_clipped = jnp.clip(a_target, eps, 1.0 - eps)
+    z_target_normal = jnp.log(a_clipped / (1.0 - a_clipped))
+    z_target_saturated = z_hidden + jnp.sign(delta_a) * LARGE_ERROR
+    z_target = jnp.where(in_range, z_target_normal, z_target_saturated)
+
+    # When w_out ≈ 0: unit doesn't connect to output, e_j = 0
+    z_target = jnp.where(jnp.abs(w_out) < 1e-6, z_hidden, z_target)
+
+    e_j = z_target - z_hidden  # (H,)
+
+    # Raw LOO scores for children
+    contributions = W1 * x[None, :]  # (H, N)
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+
+    # Signed normalization: U_{k<-j} = s_k * U_j / Σs_k
+    s_signed_sum = jnp.sum(s_raw, axis=1, keepdims=True)
+    can_normalize = jnp.abs(s_signed_sum) > 1e-10
+    s_signed_safe = jnp.where(can_normalize, s_signed_sum, 1.0)
+    U_signed = s_raw * U_hidden[:, None] / s_signed_safe
+
+    # Cap magnitude at |U_j| (F-style, prevents blow-up when Σs ≈ 0)
+    U_capped = jnp.clip(U_signed, -jnp.abs(U_hidden[:, None]), jnp.abs(U_hidden[:, None]))
+
+    # Fallback to Approach A when Σs = 0
+    abs_contrib = jnp.abs(contributions)
+    U_fallback = U_hidden[:, None] * abs_contrib / jnp.maximum(jnp.sum(abs_contrib, axis=1, keepdims=True), 1e-10)
+
+    use_signed = can_normalize.astype(jnp.float32)
+    U_from_j = use_signed * U_capped + (1.0 - use_signed) * U_fallback
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+
 def approach_e_utility(model, x, y_star, y_hat, loss_grads, updates):
     """Approach E: Calibrated Pseudo-Error.
 

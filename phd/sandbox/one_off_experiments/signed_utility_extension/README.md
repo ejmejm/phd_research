@@ -89,6 +89,74 @@ This naturally interpolates between A-like behavior (small $e_j$, scores $\appro
 
 ---
 
+## Approach F: Capped Signed Redistribution
+
+A simpler alternative to E that starts from C's signed normalization but prevents the blow-up by capping individual utilities.
+
+**Algorithm.** For unit $j$ with utility $U_j$, distributing to children $k$:
+
+1. Compute raw scores as in B (pseudo-error always positive):
+
+$$e_j = \frac{\lvert U_j \rvert}{f'(z_j)}, \quad s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert$$
+
+2. Apply C's signed normalization:
+
+$$\tilde{U}_{k \leftarrow j} = s_{k \to j} \cdot \frac{U_j}{\sum_m s_{m \to j}}$$
+
+3. Cap each child's utility magnitude at the parent's:
+
+$$U_{k \leftarrow j} = \text{sign}(\tilde{U}_{k \leftarrow j}) \cdot \min\!\big(\lvert \tilde{U}_{k \leftarrow j} \rvert,\; \lvert U_j \rvert\big)$$
+
+**Why this works.** When $\sum s_k$ is well-behaved (not near zero), the normalization in step 2 produces reasonable magnitudes and the cap in step 3 never activates — the method behaves identically to C with exact signed conservation. When $\sum s_k \approx 0$ (children's contributions nearly cancel), step 2 would normally produce enormous utilities; the cap clips them to $\lvert U_j \rvert$, preventing blow-up at the cost of losing exact signed conservation for that node.
+
+**What it sacrifices.** After capping, $\sum_k U_{k \leftarrow j} \neq U_j$ in general. The signed sum will be *closer* to $U_j$ than Approach B's signed sum (which can shrink substantially through cancellation), but it won't be exact when caps activate. The total magnitude $\sum_k \lvert U_{k \leftarrow j} \rvert$ is also no longer constrained to equal $\lvert U_j \rvert$ — it can be less (utility is "lost" to capping) but never more per child.
+
+**Edge case ($\sum s_k = 0$).** Falls back to Approach A (proportional redistribution by $\lvert c_k \rvert$).
+
+**Compared to E:** No sorting of breakpoints, no piecewise-linear solve — just the same score computation as B/C plus a single clamp per child. $O(1)$ per connection with a much smaller constant. The tradeoff is approximate rather than exact signed conservation when the cap activates.
+
+---
+
+## Approach G: Target Propagation Utility
+
+Instead of manufacturing a pseudo-error from $\lvert U_j \rvert / f'(z_j)$ (B/C/F) or solving for a calibrated one (E), compute a **real pre-activation target** by inverting the activation function — target propagation style.
+
+**Algorithm.** For unit $j$ with utility $U_j$ and parent weight $w_{j,\text{out}}$:
+
+1. Compute the target activation (what $a_j$ should have been to shift $j$'s output contribution by $U_j$):
+
+$$a_j^* = a_j + \frac{U_j}{w_{j,\text{out}}}$$
+
+2. Invert the activation to get the target pre-activation:
+
+$$z_j^* = f^{-1}(a_j^*)$$
+
+If $a_j^*$ is outside the range of $f$ (e.g. $a_j^* \notin (0,1)$ for sigmoid), set $z_j^* = z_j \pm 10^6$ in the direction of the needed change.
+
+3. The pre-activation error:
+
+$$e_j = z_j^* - z_j$$
+
+4. Standard LOO scores with this error:
+
+$$s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert$$
+
+5. Signed normalization with cap (as in F):
+
+$$\tilde{U}_{k \leftarrow j} = s_{k \to j} \cdot \frac{U_j}{\sum_m s_{m \to j}}, \quad U_{k \leftarrow j} = \text{clip}\!\big(\tilde{U}_{k \leftarrow j},\; -\lvert U_j \rvert,\; \lvert U_j \rvert\big)$$
+
+**Why this is different from B/C/F.** Those approaches derive the pseudo-error from the utility magnitude and the activation derivative: $e_j = \lvert U_j \rvert / f'(z_j)$. This is a first-order linear approximation of the true nonlinear relationship. Approach G computes the exact nonlinear inverse $f^{-1}(a_j^*)$, which:
+
+- Correctly handles the nonlinearity of the activation (large differences in pre-activation space near saturation that are small in activation space, and vice versa)
+- Naturally encodes the **sign** of the needed change (the error points toward the target, not just "away from current")
+- Does not need $f'(z_j)$ — it needs $f^{-1}$ instead (logit for sigmoid)
+
+**Saturation behavior.** When the target activation is unattainable ($a_j^*$ outside the sigmoid's range), the error is set to $\pm 10^6$. In this regime, $s_k \approx \text{sign}(e_j) \cdot c_k$ — scores become proportional to signed contributions. After normalization, $U_k \approx c_k \cdot U_j / z_j$. This is a natural graceful degradation: when the activation function can't express the needed change, utility is distributed proportionally to how much each child contributes.
+
+**Multi-parent units.** When unit $j$ feeds multiple parents $p$ with weights $w_{jp}$, the target activation shift becomes $\delta_a = \sum_p U_{j \to p} / w_{jp}$. Different parents may request conflicting shifts. For a single hidden layer (as in the experiment), each unit has one parent, so this does not arise.
+
+---
+
 ## The Signed Conservation Gap
 
 Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$). The signed sum can shrink at each layer through cancellation. Approaches C and E achieve signed conservation ($\sum U_{k \leftarrow j} = U_j$), making utility comparable across layers.
@@ -97,15 +165,16 @@ Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} 
 
 ## Comparison
 
-| | A | B | C | D | **E** |
-|---|---|---|---|---|---|
-| **Signed conservation** | Yes | No (absolute only) | Yes | No | **Yes** |
-| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | **Yes** |
-| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | **Yes** |
-| **Same formula every layer** | No | Yes | Yes (with fallback) | No | **Yes (with fallback)** |
-| **Activation derivative needed** | No | Yes | Yes | Yes | **No** |
+| | A | B | C | D | E | F | **G** |
+|---|---|---|---|---|---|---|---|
+| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | **Approximate** |
+| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | **Yes** |
+| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | **Yes** |
+| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | **Yes (with fallback)** |
+| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | **No** (uses $f^{-1}$) |
+| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | **Yes** |
 
-Approach E resolves the three-way tradeoff between signed conservation, correct child signs, and bounded magnitudes that forces A/B/C to sacrifice one property.
+Approach E resolves the three-way tradeoff exactly. Approaches F and G achieve the same in practice with much simpler computation. G differs from F by using target-propagation-derived errors instead of the $\lvert U_j \rvert / f'(z_j)$ pseudo-error, correctly handling activation nonlinearity without needing the derivative.
 
 ---
 
