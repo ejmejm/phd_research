@@ -5,7 +5,8 @@ Multi-Layer Signed Utility Experiment (Multi-Seed, Vmapped)
 Same setup as multilayer_experiment.py but vmaps training over N_SEEDS
 independent seeds, then plots means with 95% confidence intervals.
 
-Configure N_SEEDS and MASTER_SEED at the top of the file.
+All constants, utility methods, and core training logic are imported from
+multilayer_experiment.py so they stay in sync automatically.
 """
 
 import jax
@@ -22,63 +23,28 @@ from pathlib import Path
 
 from phd.jax_core.models import MLP
 from phd.jax_core.optimizers import EqxOptimizer, optax_idbd
-from phd.sandbox.one_off_experiments.signed_utility_extension.utility_functions import (
-    contribution_utility, upgd_utility, si_utility,
-    approach_a_utility, approach_b_utility, approach_c_utility,
-    approach_e_utility, approach_f_utility,
-    true_loo_utility,
+
+# Import all shared definitions from the single-seed experiment
+from phd.sandbox.one_off_experiments.signed_utility_extension.multilayer_experiment import (
+    N_TEACHER_INPUTS, N_TEACHER_HIDDEN, N_STUDENT_INPUTS, N_STUDENT_HIDDEN,
+    N_RELEVANT, N_STEPS, DRIFT_FREQUENCY, TRACE_DECAY, SCAN_CHUNK,
+    SGD_LR, AUTOSTEP_INIT_LR, AUTOSTEP_META_LR,
+    COMPUTE_TRUE_LOO, UTILITY_METHODS,
+    init_teacher, _make_scan_fn, _init_ema_budget,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # ==============================================================================
-# Constants
-# ==============================================================================
-N_TEACHER_INPUTS = 5
-N_TEACHER_HIDDEN = 4
-N_STUDENT_INPUTS = 20
-N_STUDENT_HIDDEN = 16
-N_RELEVANT = 5
-N_STEPS = 50_000
-DRIFT_FREQUENCY = 100
-TRACE_DECAY = 0.999
-SCAN_CHUNK = 5000
-
 # Multi-seed config
+# ==============================================================================
 N_SEEDS = 30
 MASTER_SEED = 42
 
-# Optimizer hyperparameters
-SGD_LR = 0.01
-AUTOSTEP_INIT_LR = 1.0
-AUTOSTEP_META_LR = 0.005
-
-COMPUTE_TRUE_LOO = True
-
-# Utility method registry: (display_name, trace_key, budget_input_key, budget_hidden_key, fn, needs_updates)
-UTILITY_METHODS = [
-    ('Contribution', 'contribution_traces', None,              None,               contribution_utility, False),
-    ('UPGD',         'upgd_traces',         'sum_input_upgd',  'sum_hidden_upgd',  upgd_utility,        False),
-    ('SI',           'si_traces',           'sum_input_si',    'sum_hidden_si',    si_utility,          True),
-    ('Approach A',   'approach_a_traces',   'sum_input_a',     'sum_hidden_a',     approach_a_utility,  False),
-    ('Approach B',   'approach_b_traces',   'sum_input_b',     'sum_hidden_b',     approach_b_utility,  False),
-    ('Approach C',   'approach_c_traces',   'sum_input_c',     'sum_hidden_c',     approach_c_utility,  False),
-    ('Approach E',   'approach_e_traces',   'sum_input_e',     'sum_hidden_e',     approach_e_utility,  False),
-    ('Approach F',   'approach_f_traces',   'sum_input_f',     'sum_hidden_f',     approach_f_utility,  False),
-]
-
 
 # ==============================================================================
-# Teacher and data generation (pure JAX, vmappable)
+# Data generation (pure JAX, vmappable)
 # ==============================================================================
-
-def init_teacher(key):
-    """Initialize teacher network with random +/-1 weights."""
-    k1, k2 = jax.random.split(key)
-    W1 = jax.random.randint(k1, (N_TEACHER_HIDDEN, N_TEACHER_INPUTS), 0, 2).astype(jnp.float32) * 2 - 1
-    W2 = jax.random.randint(k2, (1, N_TEACHER_HIDDEN), 0, 2).astype(jnp.float32) * 2 - 1
-    return W1, W2
-
 
 def _make_sign_schedule(key):
     """Generate sign flip schedule (pure JAX, vmappable)."""
@@ -110,106 +76,8 @@ def _precompute_data(key):
 
 
 # ==============================================================================
-# Scanned training steps
-# ==============================================================================
-
-def _train_step_body(model, optimizer, x, y_star, ema, budget,
-                     compute_pred_grads, compute_loo):
-    """Core training step: compute utilities, update EMA traces, update model."""
-    y_hat_arr, _ = model(x)
-    y_hat = y_hat_arr.squeeze()
-    mse = (y_star - y_hat) ** 2
-
-    loss_grads = eqx.filter_grad(lambda m: (m(x)[0].squeeze() - y_star) ** 2)(model)
-
-    # Pre-update utilities
-    utilities = {}
-    for _, trace_key, _, _, fn, needs_updates in UTILITY_METHODS:
-        if not needs_updates:
-            utilities[trace_key] = fn(model, x, y_star, y_hat, loss_grads, None)
-
-    # Optimizer update
-    if compute_pred_grads:
-        pred_grads = eqx.filter_grad(lambda m: m(x)[0].squeeze())(model)
-        updates, new_optimizer = optimizer.with_update((loss_grads, pred_grads), model)
-    else:
-        updates, new_optimizer = optimizer.with_update(loss_grads, model)
-
-    # Post-update utilities
-    for _, trace_key, _, _, fn, needs_updates in UTILITY_METHODS:
-        if needs_updates:
-            utilities[trace_key] = fn(model, x, y_star, y_hat, loss_grads, updates)
-
-    if compute_loo:
-        utilities['loo_traces'] = true_loo_utility(model, x, y_star, y_hat, loss_grads, None)
-
-    # Update EMA input traces
-    ema = {k: TRACE_DECAY * ema[k] + (1 - TRACE_DECAY) * utilities[k][0]
-           if k in utilities else ema[k] for k in ema}
-
-    # Update budget traces
-    error_reduced = jnp.abs(y_star) - jnp.abs(y_star - y_hat)
-    budget_updates = {'target_mag': jnp.abs(y_star), 'error_reduced': error_reduced}
-    for _, _, bik, bhk, _, _ in UTILITY_METHODS:
-        if bik is not None:
-            trace_key = [tk for _, tk, ik, _, _, _ in UTILITY_METHODS if ik == bik][0]
-            u_input, u_hidden = utilities[trace_key]
-            budget_updates[bik] = jnp.sum(u_input)
-            if bhk is not None:
-                budget_updates[bhk] = jnp.sum(u_hidden)
-    if compute_loo:
-        budget_updates['sum_loo'] = jnp.sum(utilities['loo_traces'][0])
-    budget = {k: TRACE_DECAY * budget[k] + (1 - TRACE_DECAY) * budget_updates[k]
-              if k in budget_updates else budget[k] for k in budget}
-
-    new_model = eqx.apply_updates(model, updates)
-    return new_model, new_optimizer, mse, ema, budget
-
-
-def _make_scan_fn(compute_pred_grads, compute_loo):
-    """Build a scan body for either SGD or Autostep."""
-    def scan_fn(carry, step_data):
-        model, optimizer, ema, budget = carry
-        x, y_star = step_data
-
-        model, optimizer, mse, ema, budget = _train_step_body(
-            model, optimizer, x, y_star, ema, budget,
-            compute_pred_grads, compute_loo)
-
-        if compute_pred_grads:
-            beta_leaves = jax.tree.leaves(optimizer.state.beta)
-            step_sizes = jnp.exp(beta_leaves[0]).mean(axis=0)
-        else:
-            step_sizes = jnp.zeros(N_STUDENT_INPUTS)
-
-        carry = (model, optimizer, ema, budget)
-        outputs = (mse, step_sizes, ema, budget)
-        return carry, outputs
-
-    return scan_fn
-
-
-# ==============================================================================
 # Multi-seed training loop
 # ==============================================================================
-
-def _init_ema_budget():
-    """Create initial EMA trace and budget dictionaries."""
-    trace_keys = [tk for _, tk, _, _, _, _ in UTILITY_METHODS]
-    if COMPUTE_TRUE_LOO:
-        trace_keys.append('loo_traces')
-    ema = {k: jnp.zeros(N_STUDENT_INPUTS) for k in trace_keys}
-
-    budget = {'target_mag': jnp.float32(0.0), 'error_reduced': jnp.float32(0.0)}
-    for _, _, ik, hk, _, _ in UTILITY_METHODS:
-        if ik is not None:
-            budget[ik] = jnp.float32(0.0)
-        if hk is not None:
-            budget[hk] = jnp.float32(0.0)
-    if COMPUTE_TRUE_LOO:
-        budget['sum_loo'] = jnp.float32(0.0)
-    return ema, budget
-
 
 def _stack_pytrees(*pytrees):
     """Stack N pytrees into a batched pytree (leading dim = N).
@@ -235,8 +103,6 @@ def run_experiment(optimizer_name, master_seed, n_seeds):
     # Precompute data for all seeds (vmapped)
     print(f"  Precomputing data for {n_seeds} seeds...")
     x_batch, y_batch = jax.jit(jax.vmap(_precompute_data))(data_keys)
-    # x_batch: (N_SEEDS, N_STEPS, N_STUDENT_INPUTS)
-    # y_batch: (N_SEEDS, N_STEPS)
 
     # Initialize carries for each seed (Python loop, then stack)
     is_autostep = optimizer_name == 'autostep'
