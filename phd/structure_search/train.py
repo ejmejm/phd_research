@@ -162,7 +162,8 @@ def prepare_experiment(
         if model_type == 'dynamic' and cfg.structure_tracker.get('enabled', False):
             tracker = ConnectivityManager(
                 model=model,
-                replace_rate=cfg.structure_tracker.replace_rate,
+                prune_rate=cfg.structure_tracker.prune_rate,
+                connection_budget=cfg.structure_tracker.connection_budget,
                 decay_rate=cfg.structure_tracker.decay_rate,
                 maturity_threshold=cfg.structure_tracker.maturity_threshold,
                 rng=rng_from_string(rng, 'tracker'),

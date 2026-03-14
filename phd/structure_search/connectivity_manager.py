@@ -1,11 +1,14 @@
 """Connectivity manager for DynamicNetwork structure search.
 
 Tracks per-unit utility and periodically prunes low-utility units,
-replacing them with new randomly-connected units. Modeled after
-CBPTracker from feature_search, adapted for sparse padded connectivity.
+generating new randomly-connected units. Uses a connection budget
+invariant: active_connections + budget = constant.
+
+Strategy functions (utility_fn, generate_fn, utility_init_fn) are
+stored as static fields and can be swapped at construction time.
 """
 
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 import equinox as eqx
 import jax
@@ -13,142 +16,350 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float, Int, Bool, PRNGKeyArray
 
 from phd.jax_core.optimizers import EqxOptimizer
-from phd.structure_search.dynamic_network import DynamicNetwork, build_outgoing_indices
+from phd.jax_core.utils import tree_replace
+from phd.structure_search.dynamic_network import (
+    DynamicNetwork, build_outgoing_indices,
+)
 
+
+EPSILON = 1e-8
+MAX_FLOAT = jnp.finfo(jnp.float32).max
+
+
+# ---------------------------------------------------------------------------
+# Strategy functions (module-level, swappable via static fields)
+# ---------------------------------------------------------------------------
+
+def contribution_utility(
+    model: DynamicNetwork,
+    buffer: Float[Array, 'batch_size buffer_size'],
+) -> Float[Array, 'max_layers max_units_per_layer']:
+    """Contribution utility: mean(|activation|) * sum(|outgoing_weights|).
+
+    Outgoing weights include both hidden-to-hidden (from outgoing_weights
+    cache) and hidden-to-output (from output_weights * output_mask).
+    """
+    # Buffer positions for all hidden unit slots: (max_layers, max_units_per_layer)
+    layers = jnp.arange(model.max_layers)
+    units = jnp.arange(model.max_units_per_layer)
+    buf_positions = (
+        model.input_dim
+        + layers[:, None] * model.max_units_per_layer
+        + units[None, :]
+    )
+
+    # Mean absolute activation across batch
+    activations = buffer[:, buf_positions]  # (batch, max_layers, max_units)
+    mean_abs_act = jnp.abs(activations).mean(axis=0)
+
+    # Hidden-to-hidden: sum |outgoing_weights| across all consuming layers and fan_out slots
+    # outgoing_weights shape: (max_layers, buffer_size, max_fan_out)
+    h2h_all = jnp.abs(model.outgoing_weights).sum(axis=(0, 2))  # (buffer_size,)
+    h2h = h2h_all[buf_positions]
+
+    # Hidden-to-output: sum |output_weights * output_mask| across output dims
+    h2o_all = (
+        jnp.abs(model.output_weights) * model.output_mask.astype(jnp.float32)
+    ).sum(axis=0)  # (buffer_size,)
+    h2o = h2o_all[buf_positions]
+
+    step_utility = mean_abs_act * (h2h + h2o)
+    step_utility = step_utility * model.unit_mask.astype(jnp.float32)
+    return step_utility
+
+
+def median_utility_init(
+    unit_stats_utility: Float[Array, 'max_layers max_units_per_layer'],
+    unit_mask: Int[Array, 'max_layers max_units_per_layer'],
+) -> Float[Array, '']:
+    """Compute median utility across active units for initializing new units."""
+    # Replace inactive slots with NaN so they don't affect median
+    active_utility = jnp.where(
+        unit_mask.astype(jnp.bool_),
+        unit_stats_utility,
+        jnp.nan,
+    )
+    return jnp.nanmedian(active_utility)
+
+
+def random_generate(
+    model: DynamicNetwork,
+    unit_stats: 'UnitStats',
+    budget: Float[Array, ''],
+    max_new_units: int,
+    init_utility: Float[Array, ''],
+    rng: PRNGKeyArray,
+) -> Tuple[DynamicNetwork, 'UnitStats', Float[Array, ''], Bool[Array, 'max_layers max_units_per_layer']]:
+    """Generate new units in inactive slots, spending from the connection budget.
+
+    Fully vectorized: samples all candidate slots at once via vmap,
+    then uses cumulative cost to determine which fit in the budget.
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    input_dim = model.input_dim
+    buffer_size = model.buffer_size
+    output_dim = model.output_dim
+
+    rng, slot_rng, sample_rng = jax.random.split(rng, 3)
+
+    # --- 6a: Find and shuffle inactive slots ---
+    inactive = (model.unit_mask == 0)  # (max_layers, max_units)
+    inactive_flat = inactive.reshape(-1)  # (max_layers * max_units,)
+    n_total_slots = max_layers * max_units
+
+    # Shuffle inactive slots to front via noise + argsort
+    noise = jax.random.uniform(slot_rng, (n_total_slots,))
+    sort_key = jnp.where(inactive_flat, noise, 2.0)  # active slots go to back
+    perm = jnp.argsort(sort_key)
+    cand_flat_idx = perm[:max_new_units]
+    cand_layers = cand_flat_idx // max_units
+    cand_units = cand_flat_idx % max_units
+    cand_valid = inactive_flat[cand_flat_idx]  # True if slot is actually inactive
+
+    # --- 6b: Per-layer available source masks ---
+    # layer_available[l, pos] = True if buffer position pos is available to layer l
+    # Inputs are always available; hidden unit at (l2, u) available if l2 < l and active
+    hidden_layers = jnp.arange(max_layers)  # (max_layers,)
+    hidden_units_arr = jnp.arange(max_units)  # (max_units,)
+    hidden_buf_pos = (
+        input_dim
+        + hidden_layers[:, None] * max_units
+        + hidden_units_arr[None, :]
+    )  # (max_layers, max_units)
+
+    # For each target layer l, hidden layer l2 is available if l2 < l
+    # shape: (max_layers_target, max_layers_source, max_units)
+    target_layers = jnp.arange(max_layers)[:, None, None]
+    source_layers = hidden_layers[None, :, None]
+    source_active = model.unit_mask[None, :, :]  # (1, max_layers, max_units)
+    hidden_available = (source_layers < target_layers) & (source_active == 1)
+    # (max_layers, max_layers, max_units) -> flatten source dims to buffer positions
+
+    # Build full layer_available: (max_layers, buffer_size)
+    layer_available = jnp.zeros((max_layers, buffer_size), dtype=jnp.bool_)
+    layer_available = layer_available.at[:, :input_dim].set(True)
+    # Scatter hidden availability
+    for_scatter = hidden_available.reshape(max_layers, max_layers * max_units)
+    hidden_buf_flat = hidden_buf_pos.reshape(-1)  # (max_layers * max_units,)
+    layer_available = layer_available.at[:, hidden_buf_flat].set(for_scatter)
+
+    # --- 6c: Vectorized connection sampling ---
+    sample_keys = jax.random.split(sample_rng, max_new_units)
+
+    def sample_one_unit(key, cand_layer):
+        """Sample connections for one candidate unit. Pure function for vmap."""
+        key1, key2, key3 = jax.random.split(key, 3)
+
+        avail = layer_available[cand_layer]  # (buffer_size,)
+        n_available = jnp.sum(avail)
+
+        # Number of connections: uniform from 1 to min(n_available, max_conns)
+        max_possible = jnp.minimum(n_available, max_conns)
+        # Clamp to at least 1 to avoid randint(1, 1) issues when no sources
+        max_possible = jnp.maximum(max_possible, 1)
+        n_conns = jax.random.randint(key1, (), 1, max_possible + 1)
+
+        # Shuffle available positions to front
+        shuffle_noise = jax.random.uniform(key2, (buffer_size,))
+        shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
+        sorted_idx = jnp.argsort(shuffle_key)
+        selected = sorted_idx[:max_conns]
+
+        # Mask beyond n_conns with -1
+        conn_active = jnp.arange(max_conns) < n_conns
+        new_indices = jnp.where(conn_active, selected, -1).astype(jnp.int32)
+
+        # LecunUniform weights (inlined to avoid static_argnames issues with traced n_conns)
+        bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(n_conns, 1).astype(jnp.float32))
+        new_weights = jax.random.uniform(key3, (max_conns,), minval=-bound, maxval=bound)
+        new_weights = jnp.where(conn_active, new_weights, 0.0)
+
+        cost = n_conns + output_dim
+        return new_indices, new_weights, cost, n_available
+
+    all_indices, all_weights, all_costs, all_n_avail = jax.vmap(
+        sample_one_unit
+    )(sample_keys, cand_layers)
+    # all_indices: (max_new_units, max_conns)
+    # all_weights: (max_new_units, max_conns)
+    # all_costs: (max_new_units,)
+
+    # Units with no available sources should not be generated
+    cand_valid = cand_valid & (all_n_avail > 0)
+
+    # --- 6d: Determine which units fit in budget ---
+    costs_if_valid = jnp.where(cand_valid, all_costs.astype(jnp.float32), 0.0)
+    cumulative_cost = jnp.cumsum(costs_if_valid)
+    gen_mask = cand_valid & (cumulative_cost <= budget)
+
+    # --- 6e: Apply all changes via scatter ---
+    # Input indices
+    old_indices = model.input_indices[cand_layers, cand_units]  # (max_new_units, max_conns)
+    new_input_indices_vals = jnp.where(gen_mask[:, None], all_indices, old_indices)
+    new_input_indices = model.input_indices.at[cand_layers, cand_units].set(
+        new_input_indices_vals
+    )
+
+    # Weights
+    old_weights = model.weights[cand_layers, cand_units]
+    new_weights_vals = jnp.where(gen_mask[:, None], all_weights, old_weights)
+    new_weights = model.weights.at[cand_layers, cand_units].set(new_weights_vals)
+
+    # Unit mask
+    old_umask = model.unit_mask[cand_layers, cand_units]
+    new_umask_vals = jnp.where(gen_mask, 1, old_umask).astype(jnp.int32)
+    new_unit_mask = model.unit_mask.at[cand_layers, cand_units].set(new_umask_vals)
+
+    # Activation indices (0 = ReLU)
+    old_act = model.activation_indices[cand_layers, cand_units]
+    new_act_vals = jnp.where(gen_mask, 0, old_act).astype(jnp.int32)
+    new_activation_indices = model.activation_indices.at[cand_layers, cand_units].set(
+        new_act_vals
+    )
+
+    # Output connections: set output_mask and output_weights for generated units
+    cand_buf_pos = (
+        input_dim + cand_layers * max_units + cand_units
+    )  # (max_new_units,)
+
+    # For output_mask: set columns at cand_buf_pos to 1 where gen_mask is True
+    # output_mask shape: (output_dim, buffer_size)
+    new_output_mask = model.output_mask
+    new_output_weights = model.output_weights
+    # Build a (buffer_size,) mask of generated buf positions
+    gen_buf_mask = jnp.zeros(buffer_size, dtype=jnp.bool_)
+    gen_buf_mask = gen_buf_mask.at[cand_buf_pos].set(gen_mask)
+    # Set output_mask columns to 1 where generated
+    new_output_mask = jnp.where(
+        gen_buf_mask[None, :],
+        jnp.ones_like(new_output_mask),
+        new_output_mask,
+    )
+    # Set output_weights columns to 0 where generated
+    new_output_weights = jnp.where(
+        gen_buf_mask[None, :].astype(jnp.float32),
+        0.0,
+        new_output_weights,
+    )
+
+    model = eqx.tree_at(
+        lambda m: (
+            m.input_indices, m.weights, m.unit_mask,
+            m.activation_indices, m.output_mask, m.output_weights,
+        ),
+        model,
+        (
+            new_input_indices, new_weights, new_unit_mask,
+            new_activation_indices, new_output_mask, new_output_weights,
+        ),
+    )
+
+    # Update unit stats for generated units
+    old_utility = unit_stats.utility[cand_layers, cand_units]
+    new_util_vals = jnp.where(gen_mask, init_utility, old_utility)
+    new_utility = unit_stats.utility.at[cand_layers, cand_units].set(new_util_vals)
+
+    old_age = unit_stats.age[cand_layers, cand_units]
+    new_age_vals = jnp.where(gen_mask, 0, old_age).astype(jnp.int32)
+    new_age = unit_stats.age.at[cand_layers, cand_units].set(new_age_vals)
+
+    unit_stats = UnitStats(
+        age=new_age,
+        utility=new_utility,
+        accumulator=unit_stats.accumulator,
+    )
+
+    # Deduct spent connections from budget
+    spent = jnp.sum(jnp.where(gen_mask, all_costs.astype(jnp.float32), 0.0))
+    new_budget = budget - spent
+
+    # Build 2D affected mask for optimizer reset
+    gen_mask_2d = jnp.zeros((max_layers, max_units), dtype=jnp.bool_)
+    gen_mask_2d = gen_mask_2d.at[cand_layers, cand_units].set(gen_mask)
+
+    return model, unit_stats, new_budget, gen_mask_2d
+
+
+# ---------------------------------------------------------------------------
+# UnitStats and ConnectivityManager
+# ---------------------------------------------------------------------------
 
 class UnitStats(eqx.Module):
     """Per-unit tracking statistics across all layers.
 
     Stored as padded 2D arrays matching DynamicNetwork's
-    (max_layers, max_units_per_layer) layout. Inactive unit slots
-    have age=0 and utility=0.
+    (max_layers, max_units_per_layer) layout.
 
     Attributes:
         age: Steps since each unit was created or last reset.
-            Incremented each step for active units only.
         utility: Exponential moving average of per-unit utility.
-            Computed as input_magnitude * outgoing_weight_sum.
-        replacement_accumulator: Fractional budget for replacements.
-            Accumulates replace_rate * n_active_units each step;
-            when >= 1, that many units can be pruned and replaced.
+        accumulator: Connection budget accumulator. Grows by
+            prune_rate * connection_budget each step. Pruning adds
+            freed connections, generation subtracts spent connections.
     """
     age: Int[Array, 'max_layers max_units_per_layer']
     utility: Float[Array, 'max_layers max_units_per_layer']
-    replacement_accumulator: Float[Array, '']
+    accumulator: Float[Array, '']
 
 
 class ConnectivityManager(eqx.Module):
     """Manages unit-level utility tracking and structural pruning/generation
     for DynamicNetwork.
 
-    This is the structure search analog of CBPTracker from feature_search.
-    It sits in TrainState, gets called each training step to update per-unit
-    utility estimates, and periodically (every prune_frequency steps) prunes
-    the lowest-utility units and generates new random replacements.
+    Uses a connection budget invariant: active_connections + budget = constant.
+    Pruning frees connections (incoming + output), generation spends them.
 
-    Lifecycle in the training loop:
-        1. Every step: call update_stats(model, buffer) to update the EMA
-           utility of each active unit using the CBP utility formula, adapted
-           for sparse padded connectivity.
-        2. Every nth step: call modify_structure(model, optimizer) to prune
-           the lowest-utility mature units and generate random replacements.
-
-    Key differences from CBPTracker:
-        - Operates on units in a sparse DynamicNetwork, not features in a
-          dense MLP. All arrays are 2D (max_layers, max_units_per_layer)
-          with masking for inactive/padded slots.
-        - Utility computation accounts for padded connectivity: inactive
-          connections (input_indices == -1) and inactive units (unit_mask == 0)
-          are excluded from both the activation magnitude and the outgoing
-          weight sum.
-        - The outgoing weight sum for a unit includes ALL downstream
-          connections: hidden-to-hidden contributions (from the outgoing_weights
-          cache, which covers all consuming hidden layers) plus hidden-to-output
-          contributions (from output_weights * output_mask).
-        - Pruning deactivates units (unit_mask=0, clears incoming connections
-          and output connections) without cascading to downstream units that
-          had connections from the pruned unit. Those stale references are
-          already masked out by unit_mask in the forward pass.
-        - Instead of regenerating features in-place (as CBP does), new units
-          are generated at a random layer with random input connections and a
-          single output connection (weight=0). The new unit has no outgoing
-          connections to other hidden units initially — it connects directly
-          to the output layer only.
-        - After structural changes, build_outgoing_indices() must be called
-          to rebuild the reverse mapping used by the custom VJP backward pass.
-
-    Utility formula (per unit, per step):
-        step_utility = mean(|activation|) * sum(|outgoing_weights|)
-
-        where activation is the unit's buffer value across the batch, and
-        outgoing_weights includes all downstream connections (hidden + output).
-
-        The EMA update is:
-        utility = (1 - decay_rate) * step_utility + decay_rate * old_utility
-
-    Replacement budget:
-        Each step, replacement_accumulator += replace_rate * n_active_units.
-        When modify_structure is called, floor(accumulator) units are pruned
-        (subject to maturity_threshold eligibility). The accumulator is
-        decremented by the number actually pruned.
-
-    Attributes:
-        decay_rate: EMA decay for utility tracking. Higher values give more
-            weight to historical utility. Typical value: 0.99.
-        maturity_threshold: Minimum age (in steps) before a unit is eligible
-            for pruning. Protects newly created units from immediate removal.
-            Set to -1 to disable (all units eligible).
-        replace_rate: Fraction of active units to budget for replacement per
-            step. Accumulated fractionally until >= 1 unit can be replaced.
-        unit_stats: Current per-unit statistics (age, utility, accumulator).
-        rng: PRNG key for random operations (unit generation, tie-breaking).
+    Strategy functions are stored as static fields and can be swapped at
+    construction time for different utility, generation, or initialization
+    behaviors.
     """
 
-    # Static config (not updated during training)
+    # Static config
     decay_rate: float = eqx.field(static=True)
     maturity_threshold: int = eqx.field(static=True)
+    max_new_units_per_step: int = eqx.field(static=True)
+    utility_fn: Callable = eqx.field(static=True)
+    generate_fn: Callable = eqx.field(static=True)
+    utility_init_fn: Callable = eqx.field(static=True)
 
-    # Dynamic state (carried in TrainState, updated each step)
-    replace_rate: float
+    # Dynamic state
+    prune_rate: float
+    connection_budget: float
     unit_stats: UnitStats
     rng: PRNGKeyArray
 
     def __init__(
         self,
         model: DynamicNetwork,
-        replace_rate: float = 1e-4,
+        prune_rate: float = 1e-4,
+        connection_budget: float = 1000.0,
         decay_rate: float = 0.99,
         maturity_threshold: int = -1,
+        max_new_units_per_step: int = 32,
+        utility_fn: Optional[Callable] = None,
+        generate_fn: Optional[Callable] = None,
+        utility_init_fn: Optional[Callable] = None,
         *,
         rng: PRNGKeyArray,
     ):
-        """Initialize ConnectivityManager from a DynamicNetwork.
-
-        Creates zero-initialized UnitStats matching the network's padded
-        layout. Active units (per model.unit_mask) start with age=0 and
-        utility=0; inactive slots remain zeroed throughout.
-
-        Args:
-            model: The DynamicNetwork whose structure will be managed.
-                Used to determine array shapes (max_layers, max_units_per_layer).
-            replace_rate: Fraction of total active units to replace per step.
-                Accumulated fractionally; pruning happens when >= 1.
-            decay_rate: EMA decay for utility tracking. Values closer to 1
-                give more weight to historical utility.
-            maturity_threshold: Minimum age (steps) before a unit is eligible
-                for pruning. Set to -1 to disable the threshold.
-            rng: PRNG key for random operations.
-        """
         self.decay_rate = decay_rate
         self.maturity_threshold = maturity_threshold
-        self.replace_rate = replace_rate
+        self.max_new_units_per_step = max_new_units_per_step
+        self.prune_rate = prune_rate
+        self.connection_budget = connection_budget
         self.rng = rng
+
+        self.utility_fn = utility_fn if utility_fn is not None else contribution_utility
+        self.generate_fn = generate_fn if generate_fn is not None else random_generate
+        self.utility_init_fn = utility_init_fn if utility_init_fn is not None else median_utility_init
 
         shape = (model.max_layers, model.max_units_per_layer)
         self.unit_stats = UnitStats(
             age=jnp.zeros(shape, dtype=jnp.int32),
             utility=jnp.zeros(shape, dtype=jnp.float32),
-            replacement_accumulator=jnp.array(0.0),
+            accumulator=jnp.array(0.0),
         )
 
     def update_stats(
@@ -156,46 +367,31 @@ class ConnectivityManager(eqx.Module):
         model: DynamicNetwork,
         buffer: Float[Array, 'batch_size buffer_size'],
     ) -> 'ConnectivityManager':
-        """Update per-unit utility estimates using CBP-style formula.
+        """Update per-unit utility estimates and accumulate connection budget."""
+        step_utility = self.utility_fn(model, buffer)
 
-        Called every training step. For each active unit at position (l, u):
+        # EMA update
+        new_utility = (
+            (1 - self.decay_rate) * step_utility
+            + self.decay_rate * self.unit_stats.utility
+        )
+        new_utility = new_utility * model.unit_mask.astype(jnp.float32)
 
-        1. Reads the unit's activation from the buffer at position
-           (input_dim + l * max_units_per_layer + u), computes the mean
-           absolute activation across the batch.
+        # Age increment for active units
+        new_age = (self.unit_stats.age + 1) * model.unit_mask
 
-        2. Computes the total absolute outgoing weight:
-           - Hidden-to-hidden: sum of |outgoing_weights[l', buf_pos, :]|
-             for all consuming layers l'. The outgoing_weights array is
-             already zero-masked by sync_outgoing_weights for inactive slots.
-           - Hidden-to-output: sum of |output_weights[:, buf_pos]| masked
-             by output_mask[:, buf_pos].
+        # Connection budget accumulation
+        new_acc = (
+            self.unit_stats.accumulator
+            + self.prune_rate * self.connection_budget
+        )
 
-        3. step_utility = mean_abs_activation * total_abs_outgoing_weight
-
-        4. Updates the EMA:
-           utility = (1 - decay_rate) * step_utility + decay_rate * old_utility
-
-        5. Increments age for all active units (unit_mask == 1).
-
-        6. Accumulates replacement budget:
-           accumulator += replace_rate * n_active_units
-
-        Inactive units (unit_mask == 0) are not updated; their stats
-        remain at whatever they were (typically zero from initialization
-        or from being pruned).
-
-        Args:
-            model: Current DynamicNetwork with up-to-date weights, masks,
-                and outgoing_weights cache.
-            buffer: Activation buffer from the forward pass, shape
-                (batch_size, buffer_size). This is the param_inputs
-                returned by DynamicNetwork.__call__ via vmap.
-
-        Returns:
-            Updated ConnectivityManager with new unit_stats.
-        """
-        return self  # Stub
+        new_stats = UnitStats(
+            age=new_age,
+            utility=new_utility,
+            accumulator=new_acc,
+        )
+        return tree_replace(self, unit_stats=new_stats)
 
     def modify_structure(
         self,
@@ -204,206 +400,201 @@ class ConnectivityManager(eqx.Module):
         *,
         rng: PRNGKeyArray,
     ) -> Tuple['ConnectivityManager', DynamicNetwork, EqxOptimizer]:
-        """Prune lowest-utility units and generate new random replacements.
+        """Prune lowest-utility units and generate new units using connection budget."""
+        rng, prune_rng, gen_rng = jax.random.split(rng, 3)
+        output_dim = model.output_dim
 
-        Called every prune_frequency steps. The number of units to prune
-        is floor(replacement_accumulator), subject to maturity eligibility.
+        # --- Compute initial utility for new units ---
+        init_utility = self.utility_init_fn(
+            self.unit_stats.utility, model.unit_mask,
+        )
 
-        Steps:
-        1. Compute prune mask via _make_prune_mask: select the N units with
-           lowest utility among those exceeding maturity_threshold.
+        # --- Prune mask ---
+        prune_mask, n_pruned = self._make_prune_mask(
+            model, rng=prune_rng,
+        )
 
-        2. Prune selected units:
-           - Set unit_mask[l, u] = 0
-           - Set input_indices[l, u, :] = -1 (clear incoming connections)
-           - Set weights[l, u, :] = 0
-           - Clear output connections: output_mask[:, buf_pos] = 0,
-             output_weights[:, buf_pos] = 0
-           - Reset unit_stats (age=0, utility=0) for pruned slots
+        # --- Count freed connections before clearing ---
+        # Incoming connections of pruned units: count indices >= 0 in pruned slots
+        pruned_conn_valid = (model.input_indices >= 0) & prune_mask[:, :, None]
+        n_freed_incoming = jnp.sum(pruned_conn_valid).astype(jnp.float32)
 
-        3. Generate replacement units (one per pruned unit):
-           - Choose a random layer (uniform over 0..max_layers-1)
-           - Find an inactive slot in that layer (unit_mask == 0)
-           - If no inactive slot available in chosen layer, try others
-           - Choose random input connections from available buffer positions
-             (all positions from prior layers: inputs + earlier hidden units)
-           - Initialize incoming weights with lecun_uniform
-           - Connect to output layer with weight 0:
-             output_mask[:, buf_pos] = 1, output_weights[:, buf_pos] = 0
-           - No outgoing connections to other hidden units
-           - Set unit_mask[l, u] = 1, age = 0
+        # Output connections of pruned units
+        buf_positions = _unit_buf_positions(model)  # (max_layers, max_units)
+        pruned_buf_mask = _prune_mask_to_buf_mask(prune_mask, buf_positions, model.buffer_size)
+        n_freed_output = jnp.sum(
+            model.output_mask * pruned_buf_mask[None, :].astype(jnp.int32)
+        ).astype(jnp.float32)
 
-        4. Call build_outgoing_indices(model) to rebuild the reverse mapping.
+        n_freed = n_freed_incoming + n_freed_output
 
-        5. Reset optimizer state for all affected weight positions via
-           _reset_optimizer_state.
+        # --- Batch prune ---
+        prune_3d = prune_mask[:, :, None]
+        new_unit_mask = jnp.where(prune_mask, 0, model.unit_mask).astype(jnp.int32)
+        new_weights = jnp.where(prune_3d, 0.0, model.weights)
+        new_input_indices = jnp.where(prune_3d, -1, model.input_indices).astype(jnp.int32)
 
-        6. Decrement replacement_accumulator by the number of units pruned.
+        pruned_buf_2d = pruned_buf_mask[None, :]  # (1, buffer_size)
+        new_output_mask = (
+            model.output_mask * (1 - pruned_buf_2d.astype(jnp.int32))
+        )
+        new_output_weights = (
+            model.output_weights * (1 - pruned_buf_2d.astype(jnp.float32))
+        )
 
-        Args:
-            model: Current DynamicNetwork.
-            optimizer: Current EqxOptimizer (state will be reset for
-                weights associated with pruned/generated units).
-            rng: PRNG key for random layer/connection selection and
-                weight initialization.
+        model = eqx.tree_at(
+            lambda m: (
+                m.unit_mask, m.weights, m.input_indices,
+                m.output_mask, m.output_weights,
+            ),
+            model,
+            (
+                new_unit_mask, new_weights, new_input_indices,
+                new_output_mask, new_output_weights,
+            ),
+        )
 
-        Returns:
-            (connectivity_manager, model, optimizer) — all potentially modified.
-        """
-        return self, model, optimizer  # Stub
+        # --- Reset stats for pruned units ---
+        new_age = jnp.where(prune_mask, 0, self.unit_stats.age).astype(jnp.int32)
+        new_utility = jnp.where(prune_mask, 0.0, self.unit_stats.utility)
 
-    def _compute_unit_utility(
-        self,
-        model: DynamicNetwork,
-        buffer: Float[Array, 'batch_size buffer_size'],
-    ) -> Float[Array, 'max_layers max_units_per_layer']:
-        """Compute per-unit step utility from buffer activations and weights.
+        # Update budget with freed connections
+        budget = self.unit_stats.accumulator + n_freed
 
-        For each unit at layer l, position u:
-            buf_pos = input_dim + l * max_units_per_layer + u
-            activation = buffer[:, buf_pos]  (batch_size,)
-            mean_abs_act = mean(|activation|)
+        unit_stats = UnitStats(
+            age=new_age,
+            utility=new_utility,
+            accumulator=budget,
+        )
 
-            # Hidden-to-hidden outgoing weights (all consuming layers)
-            h2h = sum over l' of sum(|outgoing_weights[l', buf_pos, :]|)
+        # --- Generate new units ---
+        model, unit_stats, budget, gen_mask_2d = self.generate_fn(
+            model, unit_stats, budget,
+            self.max_new_units_per_step,
+            init_utility, gen_rng,
+        )
 
-            # Hidden-to-output weights
-            h2o = sum(|output_weights[:, buf_pos]| * output_mask[:, buf_pos])
+        # --- Rebuild outgoing indices ---
+        model = build_outgoing_indices(model)
 
-            step_utility = mean_abs_act * (h2h + h2o)
+        # --- Reset optimizer state ---
+        # Affected mask: pruned OR generated units
+        affected_mask = prune_mask | gen_mask_2d
+        optimizer = _reset_optimizer_state(optimizer, model, affected_mask)
 
-        Inactive units (unit_mask == 0) get step_utility = 0.
+        # --- Update budget in stats ---
+        unit_stats = UnitStats(
+            age=unit_stats.age,
+            utility=unit_stats.utility,
+            accumulator=budget,
+        )
 
-        Args:
-            model: DynamicNetwork with current weights and structure.
-            buffer: (batch_size, buffer_size) activation buffer.
-
-        Returns:
-            (max_layers, max_units_per_layer) step utility per unit slot.
-        """
-        raise NotImplementedError
+        new_manager = tree_replace(self, unit_stats=unit_stats, rng=rng)
+        return new_manager, model, optimizer
 
     def _make_prune_mask(
         self,
-        unit_mask: Int[Array, 'max_layers max_units_per_layer'],
+        model: DynamicNetwork,
         *,
         rng: PRNGKeyArray,
     ) -> Tuple[Bool[Array, 'max_layers max_units_per_layer'], Int[Array, '']]:
-        """Determine which units to prune based on utility ranking.
+        """Determine which units to prune based on utility ranking and connection budget."""
+        unit_mask = model.unit_mask
+        output_dim = model.output_dim
+        budget = self.unit_stats.accumulator
 
-        Uses the same approach as CBPTracker._make_prune_mask:
+        # Eligibility: active and mature
+        if self.maturity_threshold > 0:
+            eligible = (unit_mask == 1) & (self.unit_stats.age > self.maturity_threshold)
+        else:
+            eligible = (unit_mask == 1)
 
-        1. Compute eligibility: unit must be active (unit_mask == 1) and
-           have age > maturity_threshold (or threshold disabled).
+        n_eligible = jnp.sum(eligible)
 
-        2. Determine n_replacements = min(floor(accumulator), n_eligible).
+        # Conservative estimate: each pruned unit frees at least (1 + output_dim) connections
+        min_unit_cost = 1 + output_dim
+        max_prunes_from_budget = (budget / min_unit_cost).astype(jnp.int32)
+        max_prunes_from_budget = jnp.maximum(max_prunes_from_budget, 0)
+        n_to_prune = jnp.minimum(max_prunes_from_budget, n_eligible)
 
-        3. Among eligible units, find the n_replacements with lowest utility.
-           Utilities are perturbed slightly with random noise to break ties.
+        # Perturb utility for tie-breaking
+        perturbed_utility = self.unit_stats.utility + jax.random.uniform(
+            rng, self.unit_stats.utility.shape, minval=-EPSILON, maxval=EPSILON,
+        )
 
-        4. Return boolean mask and count.
+        # Flatten for argsort
+        flat_eligible = eligible.reshape(-1)
+        flat_utility = perturbed_utility.reshape(-1)
+        filtered_utility = jnp.where(flat_eligible, flat_utility, jnp.inf)
 
-        Args:
-            unit_mask: Active unit mask from DynamicNetwork.
-            rng: PRNG key for tie-breaking perturbation.
+        # Find the n_to_prune lowest utilities
+        ranking = jnp.argsort(filtered_utility)
+        threshold = filtered_utility[ranking[n_to_prune]]
+        threshold = jnp.minimum(threshold, MAX_FLOAT)
 
-        Returns:
-            (prune_mask, n_pruned) where prune_mask is boolean over
-            (max_layers, max_units_per_layer) and n_pruned is a scalar.
-        """
-        raise NotImplementedError
+        prune_mask_flat = (filtered_utility < threshold) & flat_eligible
+        prune_mask = prune_mask_flat.reshape(unit_mask.shape)
 
-    def _prune_unit(
-        self,
-        model: DynamicNetwork,
-        layer: int,
-        unit_idx: int,
-    ) -> DynamicNetwork:
-        """Deactivate a single unit at the given layer and slot.
+        return prune_mask, n_to_prune
 
-        Sets unit_mask[layer, unit_idx] = 0, clears its incoming
-        connections (input_indices = -1, weights = 0), and removes
-        its output connections (output_mask = 0, output_weights = 0).
 
-        Does NOT cascade to downstream units — stale references in
-        other units' input_indices are harmlessly masked by unit_mask
-        during the forward pass.
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
-        Args:
-            model: DynamicNetwork to modify.
-            layer: Layer index of the unit to prune.
-            unit_idx: Unit slot index within the layer.
+def _unit_buf_positions(model: DynamicNetwork) -> Int[Array, 'max_layers max_units_per_layer']:
+    """Compute buffer positions for all hidden unit slots."""
+    layers = jnp.arange(model.max_layers)
+    units = jnp.arange(model.max_units_per_layer)
+    return model.input_dim + layers[:, None] * model.max_units_per_layer + units[None, :]
 
-        Returns:
-            Updated DynamicNetwork with the unit deactivated.
-        """
-        raise NotImplementedError
 
-    def _generate_unit(
-        self,
-        model: DynamicNetwork,
-        layer: int,
-        unit_idx: int,
-        *,
-        rng: PRNGKeyArray,
-    ) -> DynamicNetwork:
-        """Generate a single new unit at the given layer and slot.
+def _prune_mask_to_buf_mask(
+    prune_mask: Bool[Array, 'max_layers max_units_per_layer'],
+    buf_positions: Int[Array, 'max_layers max_units_per_layer'],
+    buffer_size: int,
+) -> Bool[Array, 'buffer_size']:
+    """Convert 2D prune mask to 1D buffer position mask."""
+    buf_mask = jnp.zeros(buffer_size, dtype=jnp.bool_)
+    return buf_mask.at[buf_positions].set(prune_mask)
 
-        The new unit:
-        - Gets random input connections sampled from available buffer
-          positions (input features + hidden units from all prior layers).
-          The number of connections is min(n_available, max_connections_per_unit).
-        - Incoming weights initialized with lecun_uniform.
-        - Connects to ALL output dimensions with weight 0:
-          output_mask[:, buf_pos] = 1, output_weights[:, buf_pos] = 0.
-        - Has NO outgoing connections to other hidden units initially.
-          Other units must independently form connections to this unit
-          through future structural modifications.
-        - unit_mask[layer, unit_idx] = 1.
-        - Activation function assigned randomly from available activations,
-          or defaults to the first activation (e.g., relu).
 
-        Args:
-            model: DynamicNetwork to modify.
-            layer: Layer index for the new unit.
-            unit_idx: Unit slot index within the layer.
-            rng: PRNG key for connection sampling and weight initialization.
 
-        Returns:
-            Updated DynamicNetwork with the new unit added.
-        """
-        raise NotImplementedError
+def _reset_optimizer_state(
+    optimizer: EqxOptimizer,
+    model: DynamicNetwork,
+    affected_mask: Bool[Array, 'max_layers max_units_per_layer'],
+) -> EqxOptimizer:
+    """Reset optimizer state for weights associated with affected units.
 
-    def _reset_optimizer_state(
-        self,
-        optimizer: EqxOptimizer,
-        model: DynamicNetwork,
-        prune_mask: Bool[Array, 'max_layers max_units_per_layer'],
-    ) -> EqxOptimizer:
-        """Reset optimizer state for weights associated with pruned/generated units.
+    Zeros momentum/variance for:
+    - weights[layer, unit_idx, :] (incoming connections)
+    - output_weights[:, buf_pos] (output connections)
+    """
+    buf_positions = _unit_buf_positions(model)
+    buf_mask = _prune_mask_to_buf_mask(affected_mask, buf_positions, model.buffer_size)
 
-        For each unit flagged in prune_mask at (layer, unit_idx):
-        - Zero the optimizer state for weights[layer, unit_idx, :] (incoming
-          connections to this unit).
-        - Compute buf_pos = input_dim + layer * max_units_per_layer + unit_idx
-          and zero the optimizer state for output_weights[:, buf_pos]
-          (outgoing connections to the output layer).
+    weights_mask = affected_mask[:, :, None]  # (max_layers, max_units, 1)
+    output_mask = buf_mask[None, :]  # (1, buffer_size)
 
-        This ensures the optimizer doesn't carry stale momentum/variance
-        from the old unit into the new replacement.
+    core_state = optimizer.state
+    is_chained = isinstance(core_state, tuple)
+    if is_chained:
+        core_state = core_state[0]
 
-        Note: DynamicNetwork's optimizer filter_spec only selects `weights`
-        and `output_weights` as trainable, so only those state entries
-        need resetting.
+    new_fields = []
+    for i, val in enumerate(core_state):
+        if val is None or jnp.isscalar(val):
+            new_fields.append(val)
+        else:
+            # val is a filtered DynamicNetwork PyTree — has .weights and .output_weights
+            new_w = jnp.where(weights_mask, 0.0, val.weights)
+            new_ow = jnp.where(output_mask, 0.0, val.output_weights)
+            new_val = eqx.tree_at(
+                lambda v: (v.weights, v.output_weights), val, (new_w, new_ow),
+            )
+            new_fields.append(new_val)
 
-        Args:
-            optimizer: Current EqxOptimizer.
-            model: DynamicNetwork (for computing buffer positions from
-                input_dim and max_units_per_layer).
-            prune_mask: Boolean mask of units being pruned/regenerated,
-                shape (max_layers, max_units_per_layer).
-
-        Returns:
-            Updated EqxOptimizer with reset state for affected weights.
-        """
-        raise NotImplementedError
+    new_core = core_state.__class__(*new_fields)
+    new_state = (new_core, *optimizer.state[1:]) if is_chained else new_core
+    return tree_replace(optimizer, state=new_state)
