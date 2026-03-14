@@ -429,6 +429,49 @@ def approach_h_utility(model, x, y_star, y_hat, loss_grads, updates):
     return U_input, U_hidden
 
 
+def approach_j_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach J: Overflow-Only Normalization.
+
+    Same raw scores as B/C (pseudo-error from |U_j|/f'(z_j), LOO formula), but
+    only normalizes when the signed sum of children exceeds the parent's utility.
+    Utility can shrink through layers (children don't fully account for parent) but
+    never grow (no explosion risk). No alignment threshold or fallback needed.
+
+    When |Σs_k| <= |U_j|: use raw scores directly (no normalization).
+    When |Σs_k| > |U_j|: scale down by |U_j| / |Σs_k| (C-style signed normalization).
+    """
+    W1 = model.layers[0].weight  # (H, N)
+    w_out = model.layers[1].weight.squeeze(0)  # (H,)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    # Output layer: rescale LOO utilities to sum to error_reduced (same as C)
+    e = y_star - y_hat
+    c_j = w_out * a_hidden
+    u_raw = jnp.abs(e + c_j) - jnp.abs(e)
+    error_reduced = jnp.abs(y_star) - jnp.abs(e)
+    u_raw_sum = jnp.sum(u_raw)
+    scale = jnp.where(jnp.abs(u_raw_sum) > 1e-10, error_reduced / u_raw_sum, 1.0)
+    U_hidden = u_raw * scale
+
+    f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
+    e_j = jnp.abs(U_hidden) / f_prime
+
+    contributions = W1 * x[None, :]  # (H, N)
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+
+    # Only normalize when |Σs_k| > |U_j| (signed sum exceeds parent utility)
+    s_signed_sum = jnp.sum(s_raw, axis=1, keepdims=True)
+    s_signed_abs = jnp.abs(s_signed_sum)
+    needs_norm = s_signed_abs > jnp.abs(U_hidden[:, None])
+    s_signed_safe = jnp.where(s_signed_abs > 1e-10, s_signed_sum, 1.0)
+    U_normed = s_raw * U_hidden[:, None] / s_signed_safe
+    U_from_j = jnp.where(needs_norm, U_normed, s_raw)
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+
 def approach_i_utility(model, x, y_star, y_hat, loss_grads, updates):
     """Approach I: Coherence-Weighted Decomposition.
 

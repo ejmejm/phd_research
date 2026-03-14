@@ -25,7 +25,8 @@ Utility Methods
 9. **Approach G** (Target Propagation): real pre-activation targets via f^{-1}, signed normalization + cap.
 10. **Approach H** (Activation-Absorbed): B's scores with min(1, |U_j|/S) cap — activation absorbs deficit.
 11. **Approach I** (Coherence-Weighted): blends signed/absolute decomposition via coherence β = |z_j|/Σ|c_k|.
-12. **True LOO**: 20 extra forward passes per step (optional).
+12. **Approach J** (Overflow-Only Normalization): B's scores, only scale down when Σ|s_k| > |U_j|.
+13. **True LOO**: 20 extra forward passes per step (optional).
 """
 
 import jax
@@ -46,7 +47,7 @@ from phd.sandbox.one_off_experiments.signed_utility_extension.utility_functions 
     contribution_utility, upgd_utility, si_utility,
     approach_a_utility, approach_b_utility, approach_c_utility,
     approach_e_utility, approach_f_utility, approach_g_utility, approach_h_utility,
-    approach_i_utility, true_loo_utility,
+    approach_i_utility, approach_j_utility, true_loo_utility,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -88,6 +89,7 @@ UTILITY_METHODS = [
     ('Approach G',   'approach_g_traces',   'sum_input_g',     'sum_hidden_g',     approach_g_utility,  False),
     ('Approach H',   'approach_h_traces',   'sum_input_h',     'sum_hidden_h',     approach_h_utility,  False),
     ('Approach I',   'approach_i_traces',   'sum_input_i',     'sum_hidden_i',     approach_i_utility,  False),
+    ('Approach J',   'approach_j_traces',   'sum_input_j',     'sum_hidden_j',     approach_j_utility,  False),
 ]
 
 

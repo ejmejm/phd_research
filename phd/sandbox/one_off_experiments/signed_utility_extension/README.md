@@ -220,6 +220,39 @@ No division by anything that can vanish (only $\Sigma = 0$, which means all cont
 
 ---
 
+## Approach J: Overflow-Only Normalization
+
+Same raw scores as B/C (pseudo-error $e_j = |U_j| / f'(z_j)$, LOO formula), but only applies C's signed normalization when the signed sum of children exceeds the parent's utility. Utility can decrease through layers but never increase.
+
+**Algorithm.** For unit $j$ with utility $U_j$:
+
+1. Compute raw scores as in B:
+
+$$e_j = \frac{\lvert U_j \rvert}{f'(z_j)}, \quad s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert$$
+
+2. Compute signed sum $S = \sum_k s_{k \to j}$.
+
+3. Conditional normalization:
+
+$$U_{k \leftarrow j} = \begin{cases} s_{k \to j} & \text{if } |S| \leq |U_j| \\ s_{k \to j} \cdot U_j / S & \text{if } |S| > |U_j| \end{cases}$$
+
+- When $|S| \leq |U_j|$: raw scores used directly. The deficit is utility absorbed by the activation.
+- When $|S| > |U_j|$: C-style signed normalization kicks in, scaling scores so they conserve $U_j$.
+
+**Compared to C:** Same normalization formula when it triggers, but J skips it when children's signed sum is already within budget. This means no blow-up risk in the common case — C's normalization only activates when the signed sum would overshoot, which is exactly when dividing by $S$ is well-conditioned (large $|S|$).
+
+**Compared to H:** H caps based on $\sum |s_k|$ (absolute magnitudes). J caps based on $|\sum s_k|$ (signed sum), which is more permissive — it allows large individual scores as long as they don't net-exceed the parent.
+
+**Properties:**
+
+- **Bounded cumulative utility:** $|\sum_k U_{k \leftarrow j}| \leq |U_j|$. Utility never grows through propagation.
+- **Correct signs:** same as B — children causing harm get negative utility, those mitigating get positive.
+- **Same formula every layer.**
+- **$O(1)$ per connection.**
+- **No fallback needed.** The normalization is well-conditioned when it triggers (large $|S|$).
+
+---
+
 ## The Signed Conservation Gap
 
 Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$). The signed sum can shrink at each layer through cancellation. Approaches C and E achieve signed conservation ($\sum U_{k \leftarrow j} = U_j$), making utility comparable across layers.
@@ -228,17 +261,17 @@ Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} 
 
 ## Comparison
 
-| | A | B | C | D | E | F | G | H | I |
-|---|---|---|---|---|---|---|---|---|---|
-| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | Approximate | No (by design) | Yes (exact) |
-| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | Yes | Yes | Yes |
-| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | Yes | Yes | Yes ($\leq 9/8\times$) |
-| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | Yes (with fallback) | Yes | Yes (no fallback) |
-| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | No (uses $f^{-1}$) | Yes | No |
-| **Activation absorption** | No | No | No | No | No | No | No | Yes | No |
-| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | Yes | Yes | Yes (cheapest) |
+| | A | B | C | D | E | F | G | H | I | J |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | Approximate | No (by design) | Yes (exact) | No (by design) |
+| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | Yes | Yes | Yes | Yes |
+| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | Yes | Yes | Yes ($\leq 9/8\times$) | Yes |
+| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | Yes (with fallback) | Yes | Yes (no fallback) | Yes (no fallback) |
+| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | No (uses $f^{-1}$) | Yes | No | Yes |
+| **Activation absorption** | No | No | No | No | No | No | No | Yes | No | No |
+| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | Yes | Yes | Yes (cheapest) | Yes |
 
-Approaches H and I represent two different philosophies. H acknowledges that activation functions can be utility sources (like biases) and lets utility decrease through layers — it uses B's signed utility formula but removes the forced scale-up. I achieves exact signed conservation with no blow-up by sidestepping the signed utility formula entirely. H is conceptually simpler (one-line change to B); I is algebraically simpler (no pseudo-error or derivative).
+Approaches H, I, and J represent different philosophies. H acknowledges that activation functions can be utility sources (like biases) and lets utility decrease through layers — it uses B's signed utility formula but removes the forced scale-up. I achieves exact signed conservation with no blow-up by sidestepping the signed utility formula entirely. J is like H but uses C's output-layer rescaling (utilities sum to error reduced) for better cross-layer budget comparisons. H is conceptually simpler (one-line change to B); I is algebraically simpler (no pseudo-error or derivative); J bridges C and H.
 
 ---
 
