@@ -1,4 +1,4 @@
-name: adam_sweep_v1
+name: adam_sweep_v2
 project: atari-prediction
 command: python train.py --config-name=all_games_config
 algorithm: grid
