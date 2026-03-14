@@ -455,7 +455,7 @@ def approach_j_utility(model, x, y_star, y_hat, loss_grads, updates):
     U_hidden = u_raw * scale
 
     f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
-    e_j = jnp.abs(U_hidden) / f_prime
+    e_j = U_hidden / f_prime # jnp.abs(U_hidden) / f_prime # TODO: Figure out which I actually want to be doing.
 
     contributions = W1 * x[None, :]  # (H, N)
     s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
@@ -504,6 +504,63 @@ def approach_i_utility(model, x, y_star, y_hat, loss_grads, updates):
     sign_z = jnp.sign(z_j)  # (H, 1)
     weights = (sign_z * contributions + (1.0 - beta) * jnp.abs(contributions)) / Sigma_safe
     U_from_j = U_hidden[:, None] * weights  # (H, N)
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+def approach_k_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach K: Custom approach"""
+    W1 = model.layers[0].weight  # (H, N)
+    w_out = model.layers[1].weight.squeeze(0)  # (H,)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    # Output layer: rescale LOO utilities to sum to error_reduced (same as C)
+    e = y_star - y_hat
+    c_j = w_out * a_hidden
+    u_raw = jnp.abs(e + c_j) - jnp.abs(e)
+    
+    # TODO: WHY IS THIS NEEDED?
+    # The utility function should by default produce utilities that sum to the error reduced, not the error.
+    error_reduced = jnp.abs(y_star) - jnp.abs(e)
+    u_raw_sum = jnp.sum(u_raw)
+    scale = jnp.where(jnp.abs(u_raw_sum) > 1e-10, error_reduced / u_raw_sum, 1.0)
+    U_hidden = u_raw * scale
+
+    # f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
+    # e_j = U_hidden / f_prime # jnp.abs(U_hidden) / f_prime # TODO: Figure out which I actually want to be doing.
+
+
+    # Target propagation: a_j* = a_j + U_j / w_{j,out}
+    # This is the activation that would shift j's output contribution by U_j
+    w_safe = jnp.where(jnp.abs(w_out) > 1e-6, w_out, jnp.ones_like(w_out))
+    delta_a = jnp.where(jnp.abs(w_out) > 1e-6, U_hidden / w_safe, 0.0)
+    a_target = a_hidden + delta_a
+
+    # Invert sigmoid: z_j* = logit(a_j*)
+    # When a_j* is outside (0, 1), use ±1e6 error in the needed direction
+    LARGE_ERROR = 1e6
+    eps = 1e-6
+    in_range = (a_target > eps) & (a_target < 1.0 - eps)
+    a_clipped = jnp.clip(a_target, eps, 1.0 - eps)
+    z_target_normal = jnp.log(a_clipped / (1.0 - a_clipped))
+    z_target_saturated = z_hidden + jnp.sign(delta_a) * LARGE_ERROR
+    z_target = jnp.where(in_range, z_target_normal, z_target_saturated)
+    e_j = z_target - z_hidden
+    
+
+
+    contributions = W1 * x[None, :]  # (H, N)
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+
+    # NOTE: Consider just treating activation 0 as a bias so it gets the same utility as the others, then always normalize.
+    # Only normalize when |Σs_k| > |U_j| (signed sum exceeds parent utility)
+    s_signed_sum = jnp.sum(s_raw, axis=1, keepdims=True)
+    s_signed_abs = jnp.abs(s_signed_sum)
+    needs_norm = s_signed_abs > jnp.abs(U_hidden[:, None])
+    s_signed_safe = jnp.where(s_signed_abs > 1e-10, s_signed_sum, 1.0)
+    U_normed = s_raw * U_hidden[:, None] / s_signed_safe
+    U_from_j = jnp.where(needs_norm, U_normed, s_raw)
 
     U_input = jnp.sum(U_from_j, axis=0)
     return U_input, U_hidden

@@ -47,7 +47,7 @@ from phd.sandbox.one_off_experiments.signed_utility_extension.utility_functions 
     contribution_utility, upgd_utility, si_utility,
     approach_a_utility, approach_b_utility, approach_c_utility,
     approach_e_utility, approach_f_utility, approach_g_utility, approach_h_utility,
-    approach_i_utility, approach_j_utility, true_loo_utility,
+    approach_i_utility, approach_j_utility, approach_k_utility, true_loo_utility,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -90,6 +90,7 @@ UTILITY_METHODS = [
     ('Approach H',   'approach_h_traces',   'sum_input_h',     'sum_hidden_h',     approach_h_utility,  False),
     ('Approach I',   'approach_i_traces',   'sum_input_i',     'sum_hidden_i',     approach_i_utility,  False),
     ('Approach J',   'approach_j_traces',   'sum_input_j',     'sum_hidden_j',     approach_j_utility,  False),
+    ('Approach K',   'approach_k_traces',   'sum_input_k',     'sum_hidden_k',     approach_k_utility,  False),
 ]
 
 
