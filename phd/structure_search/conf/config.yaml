@@ -54,4 +54,4 @@ train:
 
 # Seed: single int or list of ints for multi-seed
 seed: null
-log_individual_seeds: true
+log_individual_seeds: false

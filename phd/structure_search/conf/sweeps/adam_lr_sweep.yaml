@@ -1,4 +1,4 @@
-experiment: structure-search
+experiment: structure-search-sweeps
 sweep_name: adam_lr_sweep
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
@@ -16,6 +16,7 @@ plot_params:
 
 parameters:
   mlflow: true
+  log_individual_seeds: true
 
   model.n_layers: 3
   model.hidden_dim: [64, 256]

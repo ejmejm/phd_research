@@ -1,4 +1,4 @@
-experiment: structure-search
+experiment: structure-search-sweeps
 sweep_name: dynamic_idbd_sweep_v2
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
@@ -19,6 +19,7 @@ plot_params:
 
 parameters:
   mlflow: true
+  log_individual_seeds: true
 
   model.type: dynamic
   model.n_layers: 3

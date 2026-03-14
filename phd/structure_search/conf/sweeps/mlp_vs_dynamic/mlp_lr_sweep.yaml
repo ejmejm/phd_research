@@ -1,4 +1,4 @@
-experiment: structure-search
+experiment: structure-search-sweeps
 sweep_name: mlp_lr_sweep
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
@@ -15,6 +15,7 @@ plot_params:
 
 parameters:
   mlflow: true
+  log_individual_seeds: true
 
   model.type: mlp
   model.n_layers: 3
