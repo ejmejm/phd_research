@@ -1,4 +1,5 @@
-"""Configurable utility function for measuring per-feature importance in multi-layer networks.
+"""Configurable utility function for multi-layer networks with arbitrary depth
+and monotonically increasing activation functions (sigmoid, tanh, relu).
 
 Decomposes the existing utility approaches (A-M) into independent configuration choices:
 - child_score_method: how children's scores are computed (loo, proportional, coherence)
@@ -12,16 +13,69 @@ for all 115 valid combinations.
 """
 
 from dataclasses import dataclass
-from itertools import product
 
 import jax
 import jax.numpy as jnp
 
-from utility_functions import (
-    _output_layer_loo,
-    _approach_a_redistribution,
-    _target_prop_pseudo_error,
-)
+
+# ==============================================================================
+# Activation functions and inverses
+# ==============================================================================
+
+_LARGE = 1e6
+_EPS = 1e-6
+
+
+def _sigmoid_inverse(a):
+    """Inverse sigmoid (logit) with ±1e6 fallback for out-of-range values."""
+    in_range = (a > _EPS) & (a < 1.0 - _EPS)
+    a_safe = jnp.clip(a, _EPS, 1.0 - _EPS)
+    z_normal = jnp.log(a_safe / (1.0 - a_safe))
+    z_fallback = jnp.where(a <= _EPS, -_LARGE, _LARGE)
+    return jnp.where(in_range, z_normal, z_fallback)
+
+
+def _tanh_inverse(a):
+    """Inverse tanh (arctanh) with ±1e6 fallback for out-of-range values."""
+    in_range = (a > -1.0 + _EPS) & (a < 1.0 - _EPS)
+    a_safe = jnp.clip(a, -1.0 + _EPS, 1.0 - _EPS)
+    z_normal = jnp.arctanh(a_safe)
+    z_fallback = jnp.where(a <= -1.0 + _EPS, -_LARGE, _LARGE)
+    return jnp.where(in_range, z_normal, z_fallback)
+
+
+def _relu_inverse(a):
+    """Inverse ReLU: identity for a >= 0, -1e6 for negative (unreachable) targets."""
+    return jnp.where(a >= 0, a, -_LARGE)
+
+
+ACTIVATIONS = {
+    'sigmoid': jax.nn.sigmoid,
+    'tanh': jnp.tanh,
+    'relu': jax.nn.relu,
+}
+
+ACTIVATION_INVERSES = {
+    'sigmoid': _sigmoid_inverse,
+    'tanh': _tanh_inverse,
+    'relu': _relu_inverse,
+}
+
+
+def _resolve_activation(activation):
+    """Resolve activation to (fn, inverse_fn) tuple.
+
+    Args:
+        activation: 'sigmoid', 'tanh', 'relu', or a (fn, inverse_fn) tuple.
+    """
+    if isinstance(activation, str):
+        return ACTIVATIONS[activation], ACTIVATION_INVERSES[activation]
+    return activation
+
+
+# ==============================================================================
+# Configuration
+# ==============================================================================
 
 CHILD_SCORE_METHODS = ("loo", "proportional", "coherence")
 NORMALIZATION_METHODS = ("none", "absolute", "signed", "overflow_only", "absorption")
@@ -32,7 +86,7 @@ PSEUDO_ERROR_METHODS = ("abs_derivative", "signed_derivative", "target_prop")
 class UtilityConfig:
     """Configuration for the configurable utility function.
 
-    Existing approach mapping:
+    Existing approach mapping (all sigmoid, 2-layer):
         A: proportional, none, -, -, F
         B: loo, none, abs_derivative, absolute, F
         C: loo, signed, abs_derivative, signed, F  (approx — C uses alignment threshold fallback)
@@ -100,120 +154,224 @@ def enumerate_valid_configs():
     return configs
 
 
-def configurable_utility(model, x, y_star, y_hat, loss_grads, updates, config):
-    """Configurable utility function covering approaches A-M.
+# ==============================================================================
+# Helpers
+# ==============================================================================
 
-    Same interface as the individual utility functions, plus a config parameter.
+def _output_layer_loo(w_out, a_last, y_star, y_hat):
+    """Output-layer leave-one-out: U_j = |e + c_j| - |e|."""
+    e = y_star - y_hat
+    c_j = w_out * a_last
+    u_raw = jnp.abs(e + c_j) - jnp.abs(e)
+    return e, c_j, u_raw
+
+
+def _proportional_redistribution(W, a_below, U):
+    """Proportional redistribution: U_{k<-j} = U_j * |c_k| / Σ|c_m|."""
+    contrib = jnp.abs(W * a_below[None, :])
+    frac = contrib / jnp.maximum(jnp.sum(contrib, axis=1, keepdims=True), 1e-10)
+    return jnp.sum(U[:, None] * frac, axis=0)
+
+
+def _target_prop_pseudo_error(w_eff, U, a, z, activation_inverse):
+    """Target propagation pseudo-error using explicit activation inverse.
+
+    Computes a_target = a + U/w_eff, then e_j = f^{-1}(a_target) - z.
+    When w_eff ≈ 0, returns 0 (unit has no outgoing influence).
+
+    Args:
+        w_eff: effective weight connecting each unit to the layer above.
+            For the last hidden layer: the output weight per unit.
+            For intermediate layers: column sum of the weight matrix above.
+        U: utility of each unit (H,)
+        a: activation of each unit (H,)
+        z: pre-activation of each unit (H,)
+        activation_inverse: inverse of the activation function
     """
-    W1 = model.layers[0].weight  # (H, N)
-    w_out = model.layers[1].weight.squeeze(0)  # (H,)
-    z_hidden = W1 @ x
-    a_hidden = jax.nn.sigmoid(z_hidden)
+    w_safe = jnp.where(jnp.abs(w_eff) > 1e-6, w_eff, jnp.ones_like(w_eff))
+    delta_a = jnp.where(jnp.abs(w_eff) > 1e-6, U / w_safe, 0.0)
+    a_target = a + delta_a
+    z_target = activation_inverse(a_target)
+    return z_target - z
 
-    # --- Output layer: LOO scores ---
-    e, c_j, u_raw = _output_layer_loo(w_out, a_hidden, y_star, y_hat)
-    error_reduced = jnp.abs(y_star) - jnp.abs(e)
 
-    # --- Output normalization ---
-    if config.output_normalization == "none":
-        U_hidden = u_raw
-    elif config.output_normalization == "absolute":
+def _normalize_output(u_raw, parent, method):
+    """Apply normalization to 1D output-layer scores."""
+    if method == "none":
+        return u_raw
+    elif method == "absolute":
         abs_sum = jnp.maximum(jnp.sum(jnp.abs(u_raw)), 1e-10)
-        U_hidden = u_raw * jnp.abs(error_reduced) / abs_sum
-    elif config.output_normalization == "signed":
+        return u_raw * jnp.abs(parent) / abs_sum
+    elif method == "signed":
         signed_sum = jnp.sum(u_raw)
-        scale = jnp.where(jnp.abs(signed_sum) > 1e-10, error_reduced / signed_sum, 1.0)
-        U_hidden = u_raw * scale
-    elif config.output_normalization == "overflow_only":
+        scale = jnp.where(jnp.abs(signed_sum) > 1e-10, parent / signed_sum, 1.0)
+        return u_raw * scale
+    elif method == "overflow_only":
         signed_sum = jnp.sum(u_raw)
         signed_abs = jnp.abs(signed_sum)
-        needs_norm = signed_abs > jnp.abs(error_reduced)
+        needs_norm = signed_abs > jnp.abs(parent)
         safe_sum = jnp.where(signed_abs > 1e-10, signed_sum, 1.0)
-        normed = u_raw * error_reduced / safe_sum
-        U_hidden = jnp.where(needs_norm, normed, u_raw)
-    elif config.output_normalization == "absorption":
+        normed = u_raw * parent / safe_sum
+        return jnp.where(needs_norm, normed, u_raw)
+    elif method == "absorption":
         abs_sum = jnp.sum(jnp.abs(u_raw))
-        scale = jnp.minimum(1.0, jnp.abs(error_reduced) / jnp.maximum(abs_sum, 1e-10))
-        U_hidden = u_raw * scale
+        scale = jnp.minimum(1.0, jnp.abs(parent) / jnp.maximum(abs_sum, 1e-10))
+        return u_raw * scale
 
-    # --- Hidden layer redistribution ---
-    if config.child_score_method == "proportional":
-        U_input = _approach_a_redistribution(W1, x, U_hidden)
-        return U_input, U_hidden
 
-    if config.child_score_method == "coherence":
-        contributions = W1 * x[None, :]
-        z_j = jnp.sum(contributions, axis=1, keepdims=True)
-        Sigma = jnp.sum(jnp.abs(contributions), axis=1, keepdims=True)
-        Sigma_safe = jnp.maximum(Sigma, 1e-10)
-        beta = jnp.abs(z_j) / Sigma_safe
-        sign_z = jnp.sign(z_j)
-        weights = (sign_z * contributions + (1.0 - beta) * jnp.abs(contributions)) / Sigma_safe
-        U_from_j = U_hidden[:, None] * weights
-        U_input = jnp.sum(U_from_j, axis=0)
-        return U_input, U_hidden
+def _normalize_hidden(s_raw, U_parent, contributions, method):
+    """Apply normalization to 2D hidden-layer scores (H, N)."""
+    if method == "none":
+        return s_raw
 
-    # --- LOO child scores ---
-    # Pseudo-error
-    if config.pseudo_error == "abs_derivative":
-        f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
-        e_j = jnp.abs(U_hidden) / f_prime
-    elif config.pseudo_error == "signed_derivative":
-        f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
-        e_j = U_hidden / f_prime
-    elif config.pseudo_error == "target_prop":
-        e_j = _target_prop_pseudo_error(w_out, U_hidden, a_hidden, z_hidden)
-
-    # LOO scores
-    contributions = W1 * x[None, :]  # (H, N)
-    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
-
-    # --- Hidden normalization ---
-    if config.hidden_normalization == "none":
-        U_from_j = s_raw
-
-    elif config.hidden_normalization == "absolute":
+    elif method == "absolute":
         s_abs_sum = jnp.maximum(jnp.sum(jnp.abs(s_raw), axis=1, keepdims=True), 1e-10)
-        U_from_j = s_raw * jnp.abs(U_hidden[:, None]) / s_abs_sum
+        return s_raw * jnp.abs(U_parent[:, None]) / s_abs_sum
 
-    elif config.hidden_normalization == "signed":
+    elif method == "signed":
         s_signed_sum = jnp.sum(s_raw, axis=1, keepdims=True)
         can_normalize = jnp.abs(s_signed_sum) > 1e-10
         s_signed_safe = jnp.where(can_normalize, s_signed_sum, 1.0)
-        U_signed = s_raw * U_hidden[:, None] / s_signed_safe
+        U_signed = s_raw * U_parent[:, None] / s_signed_safe
         # Proportional fallback when Σs ≈ 0
         abs_contrib = jnp.abs(contributions)
-        U_fallback = U_hidden[:, None] * abs_contrib / jnp.maximum(
+        U_fallback = U_parent[:, None] * abs_contrib / jnp.maximum(
             jnp.sum(abs_contrib, axis=1, keepdims=True), 1e-10
         )
         use_signed = can_normalize.astype(jnp.float32)
-        U_from_j = use_signed * U_signed + (1.0 - use_signed) * U_fallback
+        return use_signed * U_signed + (1.0 - use_signed) * U_fallback
 
-    elif config.hidden_normalization == "overflow_only":
+    elif method == "overflow_only":
         s_signed_sum = jnp.sum(s_raw, axis=1, keepdims=True)
         s_signed_abs = jnp.abs(s_signed_sum)
-        needs_norm = s_signed_abs > jnp.abs(U_hidden[:, None])
+        needs_norm = s_signed_abs > jnp.abs(U_parent[:, None])
         s_signed_safe = jnp.where(s_signed_abs > 1e-10, s_signed_sum, 1.0)
-        U_normed = s_raw * U_hidden[:, None] / s_signed_safe
-        U_from_j = jnp.where(needs_norm, U_normed, s_raw)
+        U_normed = s_raw * U_parent[:, None] / s_signed_safe
+        return jnp.where(needs_norm, U_normed, s_raw)
 
-    elif config.hidden_normalization == "absorption":
+    elif method == "absorption":
         s_abs_sum = jnp.sum(jnp.abs(s_raw), axis=1, keepdims=True)
-        scale = jnp.minimum(1.0, jnp.abs(U_hidden[:, None]) / jnp.maximum(s_abs_sum, 1e-10))
-        U_from_j = s_raw * scale
-
-    # Post-normalization cap
-    if config.cap:
-        U_from_j = jnp.clip(U_from_j, -jnp.abs(U_hidden[:, None]), jnp.abs(U_hidden[:, None]))
-
-    U_input = jnp.sum(U_from_j, axis=0)
-    return U_input, U_hidden
+        scale = jnp.minimum(1.0, jnp.abs(U_parent[:, None]) / jnp.maximum(s_abs_sum, 1e-10))
+        return s_raw * scale
 
 
-def make_utility_fn(config):
-    """Factory: returns a standard-interface utility function from a config."""
+# ==============================================================================
+# Main function
+# ==============================================================================
+
+def configurable_utility(model, x, y_star, y_hat, loss_grads, updates, config,
+                         activation='sigmoid'):
+    """Configurable utility function for arbitrary-depth networks.
+
+    Args:
+        model: equinox MLP (no bias). Hidden layers use the specified activation;
+            output layer is linear.
+        x: input vector (N,)
+        y_star: scalar target
+        y_hat: scalar prediction
+        loss_grads: unused (kept for interface compatibility)
+        updates: unused (kept for interface compatibility)
+        config: UtilityConfig
+        activation: 'sigmoid', 'tanh', 'relu', or (fn, inverse_fn) tuple
+
+    Returns:
+        U_input: per-input utility (N,)
+        hidden_utilities: tuple of per-hidden-unit utilities, ordered first to last layer.
+            For a 2-layer network (1 hidden layer), this is (U_hidden,).
+    """
+    act_fn, act_inv = _resolve_activation(activation)
+    n_layers = len(model.layers)
+
+    # --- Forward pass: compute all layer activations ---
+    activations = [x]
+    pre_activations = []
+    for l in range(n_layers - 1):  # hidden layers
+        z = model.layers[l].weight @ activations[-1]
+        a = act_fn(z)
+        pre_activations.append(z)
+        activations.append(a)
+
+    # --- Output layer LOO ---
+    w_out = model.layers[-1].weight.squeeze(0)
+    e, c_j, u_raw = _output_layer_loo(w_out, activations[-1], y_star, y_hat)
+    error_reduced = jnp.abs(y_star) - jnp.abs(e)
+
+    U_current = _normalize_output(u_raw, error_reduced, config.output_normalization)
+    layer_utilities = [U_current]
+
+    # --- Backward through hidden layers ---
+    n_hidden = n_layers - 1
+    for l in range(n_hidden - 1, -1, -1):
+        W = model.layers[l].weight       # (H_l, H_{l-1}) or (H_l, N) for l=0
+        a_below = activations[l]          # inputs to this layer
+        z_l = pre_activations[l]          # pre-activations of this layer
+        a_l = activations[l + 1]          # activations of this layer
+
+        if config.child_score_method == "proportional":
+            U_next = _proportional_redistribution(W, a_below, U_current)
+
+        elif config.child_score_method == "coherence":
+            contributions = W * a_below[None, :]
+            z_j = jnp.sum(contributions, axis=1, keepdims=True)
+            Sigma = jnp.sum(jnp.abs(contributions), axis=1, keepdims=True)
+            Sigma_safe = jnp.maximum(Sigma, 1e-10)
+            beta = jnp.abs(z_j) / Sigma_safe
+            sign_z = jnp.sign(z_j)
+            weights = (sign_z * contributions + (1.0 - beta) * jnp.abs(contributions)) / Sigma_safe
+            U_from_j = U_current[:, None] * weights
+            U_next = jnp.sum(U_from_j, axis=0)
+
+        else:  # loo
+            # Pseudo-error
+            if config.pseudo_error in ("abs_derivative", "signed_derivative"):
+                f_prime = jax.vmap(jax.grad(act_fn))(z_l)
+                f_prime = jnp.maximum(f_prime, 1e-6)
+                if config.pseudo_error == "abs_derivative":
+                    e_j = jnp.abs(U_current) / f_prime
+                else:
+                    e_j = U_current / f_prime
+            else:  # target_prop
+                if l == n_hidden - 1:
+                    # Last hidden layer: output weight per unit
+                    w_eff = model.layers[-1].weight.squeeze(0)
+                else:
+                    # Intermediate layer: column sum of weight matrix above
+                    w_eff = jnp.sum(model.layers[l + 1].weight, axis=0)
+                e_j = _target_prop_pseudo_error(w_eff, U_current, a_l, z_l, act_inv)
+
+            # LOO scores
+            contributions = W * a_below[None, :]
+            s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+
+            # Normalization
+            U_from_j = _normalize_hidden(s_raw, U_current, contributions,
+                                         config.hidden_normalization)
+
+            # Post-normalization cap
+            if config.cap:
+                U_from_j = jnp.clip(U_from_j,
+                                    -jnp.abs(U_current[:, None]),
+                                    jnp.abs(U_current[:, None]))
+
+            U_next = jnp.sum(U_from_j, axis=0)
+
+        U_current = U_next
+        layer_utilities.append(U_current)
+
+    U_input = layer_utilities[-1]
+    hidden_utilities = tuple(reversed(layer_utilities[:-1]))
+    return U_input, hidden_utilities
+
+
+def make_utility_fn(config, activation='sigmoid'):
+    """Factory: returns a standard-interface utility function from a config.
+
+    The returned function has signature:
+        fn(model, x, y_star, y_hat, loss_grads, updates) -> (U_input, hidden_utilities)
+    """
     def fn(model, x, y_star, y_hat, loss_grads, updates):
-        return configurable_utility(model, x, y_star, y_hat, loss_grads, updates, config)
+        return configurable_utility(model, x, y_star, y_hat, loss_grads, updates,
+                                    config, activation)
     fn.__name__ = (
         f"configurable_"
         f"{config.child_score_method}_"
