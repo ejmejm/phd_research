@@ -48,3 +48,4 @@ All computation in the network should avoid jax.lax.cond and instead use jax.lax
 - [x] And a sweep config for baseline MLP on CIFAR-10. Include different sizes to know what performance is possible at different sizes.
 - [ ] Implement the dynamic network.
 - [ ] Implement a training script with a feature search algorithm.
+- [ ] Test different with single activation vs. multiple activation functions.

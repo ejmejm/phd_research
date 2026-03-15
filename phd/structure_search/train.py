@@ -47,6 +47,125 @@ SCAN_UNROLL = 4
 NUM_CLASSES = 10  # CIFAR-10
 
 
+def compute_structure_metrics(train_state: 'TrainState') -> dict:
+    """Compute per-layer structure metrics from a (possibly vmapped) TrainState.
+
+    Works with both single and multi-seed train_state (extra leading seed dim).
+    Returns a flat dict of scalar metrics suitable for logging.
+    """
+    model = train_state.model
+    if not hasattr(model, 'unit_mask'):
+        return {}
+
+    unit_mask = np.array(model.unit_mask)        # (n_layers, max_units)  or  (n_seeds, n_layers, max_units)
+    input_indices = np.array(model.input_indices) # (n_layers, max_units, max_conns)  or  (n_seeds, ...)
+    output_mask = np.array(model.output_mask)     # (output_dim, buffer_size)  or  (n_seeds, ...)
+
+    # Handle vmapped (multi-seed) by averaging across seeds
+    multi_seed = unit_mask.ndim == 3
+    if multi_seed:
+        n_seeds = unit_mask.shape[0]
+    else:
+        unit_mask = unit_mask[None]
+        input_indices = input_indices[None]
+        output_mask = output_mask[None]
+        n_seeds = 1
+
+    n_layers = model.max_layers if multi_seed else model.max_layers
+    max_units = model.max_units_per_layer if multi_seed else model.max_units_per_layer
+    input_dim = model.input_dim if multi_seed else model.input_dim
+    output_dim = model.output_dim if multi_seed else model.output_dim
+
+    metrics = {}
+
+    # Per-layer metrics (averaged across seeds)
+    for l in range(n_layers):
+        # Active units
+        active = unit_mask[:, l]  # (n_seeds, max_units)
+        n_active = active.sum(axis=1).mean()  # scalar
+        metrics[f'layer_{l}/active_units'] = float(n_active)
+
+        # Average incoming connections per active unit
+        layer_indices = input_indices[:, l]  # (n_seeds, max_units, max_conns)
+        incoming_per_unit = (layer_indices >= 0).sum(axis=2)  # (n_seeds, max_units)
+        # Mean over active units only (per seed, then average)
+        avg_incoming = []
+        for s in range(n_seeds):
+            active_mask = active[s].astype(bool)
+            if active_mask.any():
+                avg_incoming.append(incoming_per_unit[s][active_mask].mean())
+            else:
+                avg_incoming.append(0.0)
+        metrics[f'layer_{l}/avg_incoming_conns'] = float(np.mean(avg_incoming))
+
+        # Average outgoing connections per active unit (to output layer)
+        # Buffer positions for this layer's units
+        offsets = input_dim + l * max_units
+        buf_positions = np.arange(offsets, offsets + max_units)
+        outgoing_to_output = output_mask[:, :, buf_positions].sum(axis=1)  # (n_seeds, max_units)
+
+        # Hidden-to-hidden outgoing: count how many times each unit in this layer
+        # is referenced in input_indices of later layers
+        outgoing_to_hidden = np.zeros((n_seeds, max_units))
+        for l2 in range(l + 1, n_layers):
+            later_indices = input_indices[:, l2]  # (n_seeds, max_units_later, max_conns)
+            # For each connection, check if it points to a buffer position in this layer
+            # buf_positions for layer l: [offsets, offsets+1, ..., offsets+max_units-1]
+            shifted = later_indices - offsets  # (n_seeds, max_units_later, max_conns)
+            in_range = (shifted >= 0) & (shifted < max_units)
+            # Bin count: for each seed, count references to each unit in this layer
+            for s in range(n_seeds):
+                valid = in_range[s]
+                if valid.any():
+                    unit_refs = shifted[s][valid]
+                    outgoing_to_hidden[s] += np.bincount(unit_refs, minlength=max_units)[:max_units]
+
+        total_outgoing = outgoing_to_output + outgoing_to_hidden  # (n_seeds, max_units)
+        avg_outgoing = []
+        for s in range(n_seeds):
+            active_mask = active[s].astype(bool)
+            if active_mask.any():
+                avg_outgoing.append(total_outgoing[s][active_mask].mean())
+            else:
+                avg_outgoing.append(0.0)
+        metrics[f'layer_{l}/avg_outgoing_conns'] = float(np.mean(avg_outgoing))
+
+    # Total active connections (averaged across seeds)
+    total_incoming = (input_indices >= 0).sum(axis=(1, 2, 3))  # (n_seeds,)
+    total_output = output_mask.sum(axis=(1, 2))  # (n_seeds,)
+    metrics['total_active_connections'] = float((total_incoming + total_output).mean())
+
+    # Utility metrics (from structure tracker)
+    tracker = train_state.structure_tracker
+    if hasattr(tracker, 'unit_stats'):
+        utility = np.array(tracker.unit_stats.utility)  # (n_layers, max_units) or (n_seeds, ...)
+        if utility.ndim == 2:
+            utility = utility[None]
+
+        # Median utility across all active units
+        all_median_utils = []
+        for s in range(n_seeds):
+            active_mask = unit_mask[s].astype(bool)
+            if active_mask.any():
+                all_median_utils.append(float(np.median(utility[s][active_mask])))
+            else:
+                all_median_utils.append(0.0)
+        metrics['median_utility'] = float(np.mean(all_median_utils))
+
+        # Per-layer average utility
+        for l in range(n_layers):
+            avg_utils = []
+            for s in range(n_seeds):
+                active_mask = unit_mask[s, l].astype(bool)
+                if active_mask.any():
+                    avg_utils.append(float(utility[s, l][active_mask].mean()))
+                else:
+                    avg_utils.append(0.0)
+            metrics[f'layer_{l}/avg_utility'] = float(np.mean(avg_utils))
+
+    return metrics
+
+
 # ---------------------------------------------------------------------------
 # Dummy structure tracker (placeholder for future structure search)
 # ---------------------------------------------------------------------------
@@ -88,6 +207,8 @@ class TrainState(eqx.Module):
 class StepMetrics(eqx.Module):
     loss: jax.Array
     correct: jax.Array
+    pruned_per_layer: jax.Array   # (max_layers,) — 0 on non-restructure steps
+    generated_per_layer: jax.Array  # (max_layers,) — 0 on non-restructure steps
 
 
 # ---------------------------------------------------------------------------
@@ -244,10 +365,13 @@ def train_step(
         new_model, param_inputs)
 
     # Restructure (only when do_restructure=True and using ConnectivityManager)
+    n_layers = new_model.max_layers if hasattr(new_model, 'max_layers') else 0
+    pruned_per_layer = jnp.zeros(n_layers, dtype=jnp.int32)
+    generated_per_layer = jnp.zeros(n_layers, dtype=jnp.int32)
     if do_restructure and isinstance(new_tracker, ConnectivityManager):
         rng, restructure_rng = jax.random.split(train_state.rng)
-        new_tracker, new_model, new_optimizer = new_tracker.modify_structure(
-            new_model, new_optimizer, rng=restructure_rng)
+        new_tracker, new_model, new_optimizer, pruned_per_layer, generated_per_layer = (
+            new_tracker.modify_structure(new_model, new_optimizer, rng=restructure_rng))
 
     # Accuracy (pre-update predictions)
     predicted = jnp.argmax(outputs, axis=-1)  # (batch_size,)
@@ -261,7 +385,11 @@ def train_step(
         step=train_state.step + 1,
     )
 
-    return new_state, StepMetrics(loss=loss, correct=correct)
+    return new_state, StepMetrics(
+        loss=loss, correct=correct,
+        pruned_per_layer=pruned_per_layer,
+        generated_per_layer=generated_per_layer,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -349,16 +477,33 @@ def run_experiment(
 
         step = int(train_state.step[0].item())
 
+        # Structure metrics (computed outside JIT, snapshot of current state)
+        structure_metrics = compute_structure_metrics(train_state)
+
+        # Prune/gen counts: sum over log_freq steps, average across seeds
+        # metrics.pruned_per_layer: (n_seeds, log_freq, max_layers)
+        if metrics.pruned_per_layer.size > 0:
+            pruned = np.array(metrics.pruned_per_layer.sum(axis=1))  # (n_seeds, max_layers)
+            generated = np.array(metrics.generated_per_layer.sum(axis=1))
+            n_layers = pruned.shape[1]
+            structure_metrics['total_pruned'] = float(pruned.sum(axis=1).mean())
+            structure_metrics['total_generated'] = float(generated.sum(axis=1).mean())
+            for l in range(n_layers):
+                structure_metrics[f'layer_{l}/pruned'] = float(pruned[:, l].mean())
+                structure_metrics[f'layer_{l}/generated'] = float(generated[:, l].mean())
+
         # Background logging
         if logging_active:
             def _log_step(mean_loss, std_loss, mean_acc, std_acc,
-                          per_seed_loss, per_seed_acc, step):
-                log_metrics({
+                          per_seed_loss, per_seed_acc, structure_metrics, step):
+                base_metrics = {
                     'loss': mean_loss,
                     'loss_std': std_loss,
                     'accuracy': mean_acc,
                     'accuracy_std': std_acc,
-                }, cfg, step=step)
+                }
+                base_metrics.update(structure_metrics)
+                log_metrics(base_metrics, cfg, step=step)
                 log_child_metrics(
                     {'loss': per_seed_loss, 'accuracy': per_seed_acc},
                     cfg, step=step,
@@ -366,7 +511,7 @@ def run_experiment(
 
             log_futures.append(log_executor.submit(
                 _log_step, mean_loss, std_loss, mean_acc, std_acc,
-                per_seed_loss.tolist(), per_seed_acc.tolist(), step,
+                per_seed_loss.tolist(), per_seed_acc.tolist(), structure_metrics, step,
             ))
 
         all_losses.append(mean_loss)

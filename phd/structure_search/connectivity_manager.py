@@ -73,13 +73,14 @@ def median_utility_init(
     unit_mask: Int[Array, 'max_layers max_units_per_layer'],
 ) -> Float[Array, '']:
     """Compute median utility across active units for initializing new units."""
+    any_active = jnp.any(unit_mask.astype(jnp.bool_))
     # Replace inactive slots with NaN so they don't affect median
     active_utility = jnp.where(
         unit_mask.astype(jnp.bool_),
         unit_stats_utility,
         jnp.nan,
     )
-    return jnp.nanmedian(active_utility)
+    return jnp.where(any_active, jnp.nanmedian(active_utility), 0.0)
 
 
 def random_generate(
@@ -295,9 +296,10 @@ class UnitStats(eqx.Module):
     Attributes:
         age: Steps since each unit was created or last reset.
         utility: Exponential moving average of per-unit utility.
-        accumulator: Connection budget accumulator. Grows by
-            prune_rate * connection_budget each step. Pruning adds
-            freed connections, generation subtracts spent connections.
+        accumulator: Prune accumulator. Grows by
+            prune_rate * active_connections each step. Controls how
+            many connections worth of units to prune at restructure time.
+            Reset to 0 after each restructure.
     """
     age: Int[Array, 'max_layers max_units_per_layer']
     utility: Float[Array, 'max_layers max_units_per_layer']
@@ -308,8 +310,9 @@ class ConnectivityManager(eqx.Module):
     """Manages unit-level utility tracking and structural pruning/generation
     for DynamicNetwork.
 
-    Uses a connection budget invariant: active_connections + budget = constant.
-    Pruning frees connections (incoming + output), generation spends them.
+    Prune accumulator grows by prune_rate * active_connections each step.
+    At restructure: prune units worth the accumulated connections, then
+    generate new units to fill up to connection_budget total connections.
 
     Strategy functions are stored as static fields and can be swapped at
     construction time for different utility, generation, or initialization
@@ -337,7 +340,7 @@ class ConnectivityManager(eqx.Module):
         connection_budget: float = 1000.0,
         decay_rate: float = 0.99,
         maturity_threshold: int = -1,
-        max_new_units_per_step: int = 32,
+        max_new_units_per_step: int = 512,
         utility_fn: Optional[Callable] = None,
         generate_fn: Optional[Callable] = None,
         utility_init_fn: Optional[Callable] = None,
@@ -380,10 +383,14 @@ class ConnectivityManager(eqx.Module):
         # Age increment for active units
         new_age = (self.unit_stats.age + 1) * model.unit_mask
 
-        # Connection budget accumulation
+        # Prune accumulator: grows by prune_rate * active_connections per step
+        active_conns = (
+            jnp.sum(model.input_indices >= 0)
+            + jnp.sum(model.output_mask)
+        ).astype(jnp.float32)
         new_acc = (
             self.unit_stats.accumulator
-            + self.prune_rate * self.connection_budget
+            + self.prune_rate * active_conns
         )
 
         new_stats = UnitStats(
@@ -399,8 +406,13 @@ class ConnectivityManager(eqx.Module):
         optimizer: EqxOptimizer,
         *,
         rng: PRNGKeyArray,
-    ) -> Tuple['ConnectivityManager', DynamicNetwork, EqxOptimizer]:
-        """Prune lowest-utility units and generate new units using connection budget."""
+    ) -> Tuple['ConnectivityManager', DynamicNetwork, EqxOptimizer,
+               Int[Array, 'max_layers'], Int[Array, 'max_layers']]:
+        """Prune lowest-utility units and generate new units to fill connection_budget.
+
+        Returns:
+            (tracker, model, optimizer, pruned_per_layer, generated_per_layer)
+        """
         rng, prune_rng, gen_rng = jax.random.split(rng, 3)
         output_dim = model.output_dim
 
@@ -458,18 +470,22 @@ class ConnectivityManager(eqx.Module):
         new_age = jnp.where(prune_mask, 0, self.unit_stats.age).astype(jnp.int32)
         new_utility = jnp.where(prune_mask, 0.0, self.unit_stats.utility)
 
-        # Update budget with freed connections
-        budget = self.unit_stats.accumulator + n_freed
+        # --- Generation budget: fill up to connection_budget ---
+        active_conns_after_prune = (
+            jnp.sum(model.input_indices >= 0)
+            + jnp.sum(model.output_mask)
+        ).astype(jnp.float32)
+        gen_budget = jnp.maximum(0.0, self.connection_budget - active_conns_after_prune)
 
         unit_stats = UnitStats(
             age=new_age,
             utility=new_utility,
-            accumulator=budget,
+            accumulator=jnp.array(0.0),  # Reset accumulator after pruning
         )
 
         # --- Generate new units ---
-        model, unit_stats, budget, gen_mask_2d = self.generate_fn(
-            model, unit_stats, budget,
+        model, unit_stats, _, gen_mask_2d = self.generate_fn(
+            model, unit_stats, gen_budget,
             self.max_new_units_per_step,
             init_utility, gen_rng,
         )
@@ -482,15 +498,12 @@ class ConnectivityManager(eqx.Module):
         affected_mask = prune_mask | gen_mask_2d
         optimizer = _reset_optimizer_state(optimizer, model, affected_mask)
 
-        # --- Update budget in stats ---
-        unit_stats = UnitStats(
-            age=unit_stats.age,
-            utility=unit_stats.utility,
-            accumulator=budget,
-        )
+        # --- Per-layer prune/gen counts ---
+        pruned_per_layer = prune_mask.sum(axis=1).astype(jnp.int32)
+        generated_per_layer = gen_mask_2d.sum(axis=1).astype(jnp.int32)
 
         new_manager = tree_replace(self, unit_stats=unit_stats, rng=rng)
-        return new_manager, model, optimizer
+        return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
 
     def _make_prune_mask(
         self,
