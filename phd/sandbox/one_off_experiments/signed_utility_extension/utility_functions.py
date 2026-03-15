@@ -42,6 +42,23 @@ def _approach_a_redistribution(W1, x, U_hidden):
     return jnp.sum(U_hidden[:, None] * frac, axis=0)
 
 
+def _target_prop_pseudo_error(w_out, U_hidden, a_hidden, z_hidden):
+    """Compute pseudo-error via target propagation: invert sigmoid to find z_j* from target a_j*."""
+    w_safe = jnp.where(jnp.abs(w_out) > 1e-6, w_out, jnp.ones_like(w_out))
+    delta_a = jnp.where(jnp.abs(w_out) > 1e-6, U_hidden / w_safe, 0.0)
+    a_target = a_hidden + delta_a
+
+    LARGE_ERROR = 1e6
+    eps = 1e-6
+    in_range = (a_target > eps) & (a_target < 1.0 - eps)
+    a_clipped = jnp.clip(a_target, eps, 1.0 - eps)
+    z_target_normal = jnp.log(a_clipped / (1.0 - a_clipped))
+    z_target_saturated = z_hidden + jnp.sign(delta_a) * LARGE_ERROR
+    z_target = jnp.where(in_range, z_target_normal, z_target_saturated)
+
+    return z_target - z_hidden
+
+
 # ==============================================================================
 # Approach E calibration internals
 # ==============================================================================
@@ -311,26 +328,7 @@ def approach_g_utility(model, x, y_star, y_hat, loss_grads, updates):
     # Output layer: standard LOO
     _, _, U_hidden = _output_layer_loo(w_out, a_hidden, y_star, y_hat)
 
-    # Target propagation: a_j* = a_j + U_j / w_{j,out}
-    # This is the activation that would shift j's output contribution by U_j
-    w_safe = jnp.where(jnp.abs(w_out) > 1e-6, w_out, jnp.ones_like(w_out))
-    delta_a = jnp.where(jnp.abs(w_out) > 1e-6, U_hidden / w_safe, 0.0)
-    a_target = a_hidden + delta_a
-
-    # Invert sigmoid: z_j* = logit(a_j*)
-    # When a_j* is outside (0, 1), use ±1e6 error in the needed direction
-    LARGE_ERROR = 1e6
-    eps = 1e-6
-    in_range = (a_target > eps) & (a_target < 1.0 - eps)
-    a_clipped = jnp.clip(a_target, eps, 1.0 - eps)
-    z_target_normal = jnp.log(a_clipped / (1.0 - a_clipped))
-    z_target_saturated = z_hidden + jnp.sign(delta_a) * LARGE_ERROR
-    z_target = jnp.where(in_range, z_target_normal, z_target_saturated)
-
-    # When w_out ≈ 0: unit doesn't connect to output, e_j = 0
-    z_target = jnp.where(jnp.abs(w_out) < 1e-6, z_hidden, z_target)
-
-    e_j = z_target - z_hidden  # (H,)
+    e_j = _target_prop_pseudo_error(w_out, U_hidden, a_hidden, z_hidden)
 
     # Raw LOO scores for children
     contributions = W1 * x[None, :]  # (H, N)
@@ -527,27 +525,7 @@ def approach_k_utility(model, x, y_star, y_hat, loss_grads, updates):
     scale = jnp.where(jnp.abs(u_raw_sum) > 1e-10, error_reduced / u_raw_sum, 1.0)
     U_hidden = u_raw * scale
 
-    # f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
-    # e_j = U_hidden / f_prime # jnp.abs(U_hidden) / f_prime # TODO: Figure out which I actually want to be doing.
-
-
-    # Target propagation: a_j* = a_j + U_j / w_{j,out}
-    # This is the activation that would shift j's output contribution by U_j
-    w_safe = jnp.where(jnp.abs(w_out) > 1e-6, w_out, jnp.ones_like(w_out))
-    delta_a = jnp.where(jnp.abs(w_out) > 1e-6, U_hidden / w_safe, 0.0)
-    a_target = a_hidden + delta_a
-
-    # Invert sigmoid: z_j* = logit(a_j*)
-    # When a_j* is outside (0, 1), use ±1e6 error in the needed direction
-    LARGE_ERROR = 1e6
-    eps = 1e-6
-    in_range = (a_target > eps) & (a_target < 1.0 - eps)
-    a_clipped = jnp.clip(a_target, eps, 1.0 - eps)
-    z_target_normal = jnp.log(a_clipped / (1.0 - a_clipped))
-    z_target_saturated = z_hidden + jnp.sign(delta_a) * LARGE_ERROR
-    z_target = jnp.where(in_range, z_target_normal, z_target_saturated)
-    e_j = z_target - z_hidden
-    
+    e_j = _target_prop_pseudo_error(w_out, U_hidden, a_hidden, z_hidden)
 
 
     contributions = W1 * x[None, :]  # (H, N)
@@ -561,6 +539,87 @@ def approach_k_utility(model, x, y_star, y_hat, loss_grads, updates):
     s_signed_safe = jnp.where(s_signed_abs > 1e-10, s_signed_sum, 1.0)
     U_normed = s_raw * U_hidden[:, None] / s_signed_safe
     U_from_j = jnp.where(needs_norm, U_normed, s_raw)
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+def approach_l_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach L: Signed Pseudo-Error Redistribution.
+
+    Like B, but pseudo-error preserves sign: e_j = U_j / f'(z_j) (not |U_j|).
+    Normalized so Σ|U_{k<-j}| = |U_j|.
+    """
+    W1 = model.layers[0].weight
+    w_out = model.layers[1].weight.squeeze(0)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    _, _, U_hidden = _output_layer_loo(w_out, a_hidden, y_star, y_hat)
+
+    f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
+    e_j = U_hidden / f_prime
+    
+    contributions = W1 * x[None, :]
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+    s_abs_sum = jnp.maximum(jnp.sum(jnp.abs(s_raw), axis=1, keepdims=True), 1e-10)
+    U_from_j = s_raw * jnp.abs(U_hidden[:, None]) / s_abs_sum
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+
+def approach_m_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach M: Target Propagation Absolute Redistribution.
+
+    Like B (absolute normalization), but pseudo-error from target propagation
+    inverse (as in G) instead of |U_j| / f'(z_j).
+    Normalized so Σ|U_{k<-j}| = |U_j|.
+    """
+    W1 = model.layers[0].weight
+    w_out = model.layers[1].weight.squeeze(0)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    _, _, U_hidden = _output_layer_loo(w_out, a_hidden, y_star, y_hat)
+
+    e_j = _target_prop_pseudo_error(w_out, U_hidden, a_hidden, z_hidden)
+
+    contributions = W1 * x[None, :]
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+    s_abs_sum = jnp.maximum(jnp.sum(jnp.abs(s_raw), axis=1, keepdims=True), 1e-10)
+    U_from_j = s_raw * jnp.abs(U_hidden[:, None]) / s_abs_sum
+
+    U_input = jnp.sum(U_from_j, axis=0)
+    return U_input, U_hidden
+
+
+def approach_n_utility(model, x, y_star, y_hat, loss_grads, updates):
+    """Approach n: Signed Pseudo-Error Redistribution.
+
+    Like B, but pseudo-error preserves sign: e_j = U_j / f'(z_j) (not |U_j|).
+    Normalized so Σ|U_{k<-j}| = |U_j|.
+    """
+    W1 = model.layers[0].weight
+    w_out = model.layers[1].weight.squeeze(0)
+    z_hidden = W1 @ x
+    a_hidden = jax.nn.sigmoid(z_hidden)
+
+    # Output layer: rescale LOO utilities to sum to error_reduced
+    e = y_star - y_hat
+    c_j = w_out * a_hidden
+    u_raw = jnp.abs(e + c_j) - jnp.abs(e)
+    error_reduced = jnp.abs(y_star) - jnp.abs(e)
+    u_raw_sum = jnp.sum(u_raw)
+    scale = jnp.where(jnp.abs(u_raw_sum) > 1e-10, error_reduced / u_raw_sum, 1.0)
+    U_hidden = u_raw * scale
+
+    f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
+    e_j = U_hidden / f_prime
+    
+    contributions = W1 * x[None, :]
+    s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+    s_abs_sum = jnp.maximum(jnp.sum(jnp.abs(s_raw), axis=1, keepdims=True), 1e-10)
+    U_from_j = s_raw * jnp.abs(U_hidden[:, None]) / s_abs_sum
 
     U_input = jnp.sum(U_from_j, axis=0)
     return U_input, U_hidden

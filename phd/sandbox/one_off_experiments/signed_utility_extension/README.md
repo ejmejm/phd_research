@@ -253,6 +253,42 @@ $$U_{k \leftarrow j} = \begin{cases} s_{k \to j} & \text{if } |S| \leq |U_j| \\ 
 
 ---
 
+## Approach L: Recursive Signed Utility (Signed Pseudo-Error)
+
+Same as Approach B, but the pseudo-error preserves sign instead of taking absolute value:
+
+$$e_j = \frac{U_j}{f'(z_j)}, \quad s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert, \quad U_{k \leftarrow j} = s_{k \to j} \cdot \frac{\lvert U_j \rvert}{\sum_k \lvert s_{k \to j} \rvert}$$
+
+The key difference from B: $e_j = U_j / f'(z_j)$ rather than $|U_j| / f'(z_j)$. This means the pseudo-error can be negative, encoding that the pre-activation should *decrease*. For harmful units ($U_j < 0$), B always uses a positive pseudo-error (interpreting harm as "the pre-activation should increase"); L uses a negative one (the pre-activation should decrease). This changes which children get positive vs. negative scores when $|e_j|$ is comparable to the contributions.
+
+Still uses absolute normalization: $\sum_k |U_{k \leftarrow j}| = |U_j|$.
+
+---
+
+## Approach M: Recursive Signed Utility (Target Propagation Pseudo-Error)
+
+Same as Approach B (absolute normalization), but the pseudo-error is computed via target propagation (as in Approach G) instead of $|U_j| / f'(z_j)$:
+
+1. Compute target activation: $a_j^* = a_j + U_j / w_{j,\text{out}}$
+2. Invert: $z_j^* = f^{-1}(a_j^*)$ (with $\pm 10^6$ fallback when out of range)
+3. $e_j = z_j^* - z_j$
+
+$$s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert, \quad U_{k \leftarrow j} = s_{k \to j} \cdot \frac{\lvert U_j \rvert}{\sum_k \lvert s_{k \to j} \rvert}$$
+
+Combines G's exact nonlinear pseudo-error with B's absolute normalization (instead of G's signed normalization + cap). This isolates the effect of the pseudo-error choice from the normalization choice.
+
+---
+
+## Approach N: Signed Pseudo-Error with Error-Reduced Rescaling
+
+Same as Approach L (signed pseudo-error $e_j = U_j / f'(z_j)$, absolute normalization), but with C-style output-layer rescaling so that $\sum U_j = \text{error\_reduced}$ instead of using raw LOO utilities.
+
+$$e_j = \frac{U_j}{f'(z_j)}, \quad s_{k \to j} = \lvert e_j + c_{k \to j} \rvert - \lvert e_j \rvert, \quad U_{k \leftarrow j} = s_{k \to j} \cdot \frac{\lvert U_j \rvert}{\sum_k \lvert s_{k \to j} \rvert}$$
+
+Isolates the effect of output-layer rescaling: L uses raw LOO hidden utilities, N rescales them to sum to error reduced. Same hidden-layer redistribution otherwise.
+
+---
+
 ## The Signed Conservation Gap
 
 Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} \rvert = \lvert U_j \rvert$). The signed sum can shrink at each layer through cancellation. Approaches C and E achieve signed conservation ($\sum U_{k \leftarrow j} = U_j$), making utility comparable across layers.
@@ -261,15 +297,15 @@ Approach B only achieves absolute conservation ($\sum \lvert U_{k \leftarrow j} 
 
 ## Comparison
 
-| | A | B | C | D | E | F | G | H | I | J |
-|---|---|---|---|---|---|---|---|---|---|---|
-| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | Approximate | No (by design) | Yes (exact) | No (by design) |
-| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | Yes | Yes | Yes ($\leq 9/8\times$) | Yes |
-| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | Yes (with fallback) | Yes | Yes (no fallback) | Yes (no fallback) |
-| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | No (uses $f^{-1}$) | Yes | No | Yes |
-| **Activation absorption** | No | No | No | No | No | No | No | Yes | No | No |
-| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | Yes | Yes | Yes (cheapest) | Yes |
+| | A | B | C | D | E | F | G | H | I | J | L | M | N |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Signed conservation** | Yes | No (absolute only) | Yes | No | Yes | Approximate | Approximate | No (by design) | Yes (exact) | No (by design) | No (absolute only) | No (absolute only) | No (absolute only) |
+| **Correct signs (harmful case)** | No | Yes | Yes (when well-conditioned) | No | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| **Bounded magnitudes** | Yes | Yes | No (can amplify) | Yes | Yes | Yes | Yes | Yes | Yes ($\leq 9/8\times$) | Yes | Yes | Yes | Yes |
+| **Same formula every layer** | No | Yes | Yes (with fallback) | No | Yes (with fallback) | Yes (with fallback) | Yes (with fallback) | Yes | Yes (no fallback) | Yes (no fallback) | Yes | Yes | Yes |
+| **Activation derivative needed** | No | Yes | Yes | Yes | No | Yes | No (uses $f^{-1}$) | Yes | No | Yes | Yes | No (uses $f^{-1}$) | Yes |
+| **Activation absorption** | No | No | No | No | No | No | No | Yes | No | No | No | No | No |
+| **Cheap (small constant)** | Yes | Yes | Yes | Yes | No (sort + solve) | Yes | Yes | Yes | Yes (cheapest) | Yes | Yes | Yes | Yes |
 
 Approaches H, I, and J represent different philosophies. H acknowledges that activation functions can be utility sources (like biases) and lets utility decrease through layers — it uses B's signed utility formula but removes the forced scale-up. I achieves exact signed conservation with no blow-up by sidestepping the signed utility formula entirely. J is like H but uses C's output-layer rescaling (utilities sum to error reduced) for better cross-layer budget comparisons. H is conceptually simpler (one-line change to B); I is algebraically simpler (no pseudo-error or derivative); J bridges C and H.
 

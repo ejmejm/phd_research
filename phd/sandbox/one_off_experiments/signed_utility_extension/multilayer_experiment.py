@@ -26,7 +26,10 @@ Utility Methods
 10. **Approach H** (Activation-Absorbed): B's scores with min(1, |U_j|/S) cap — activation absorbs deficit.
 11. **Approach I** (Coherence-Weighted): blends signed/absolute decomposition via coherence β = |z_j|/Σ|c_k|.
 12. **Approach J** (Overflow-Only Normalization): B's scores, only scale down when Σ|s_k| > |U_j|.
-13. **True LOO**: 20 extra forward passes per step (optional).
+13. **Approach L** (Recursive Signed, signed e_j): like B but pseudo-error e_j = U_j/f'(z_j) (signed, not |U_j|).
+14. **Approach M** (Recursive Signed, target prop e_j): like B but pseudo-error from target propagation inverse.
+15. **Approach N** (Signed Pseudo-Error + error_reduced rescaling): like L but with C-style output-layer rescaling.
+16. **True LOO**: 20 extra forward passes per step (optional).
 """
 
 import jax
@@ -47,7 +50,8 @@ from phd.sandbox.one_off_experiments.signed_utility_extension.utility_functions 
     contribution_utility, upgd_utility, si_utility,
     approach_a_utility, approach_b_utility, approach_c_utility,
     approach_e_utility, approach_f_utility, approach_g_utility, approach_h_utility,
-    approach_i_utility, approach_j_utility, approach_k_utility, true_loo_utility,
+    approach_i_utility, approach_j_utility, approach_k_utility,
+    approach_l_utility, approach_m_utility, approach_n_utility, true_loo_utility,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -91,6 +95,9 @@ UTILITY_METHODS = [
     ('Approach I',   'approach_i_traces',   'sum_input_i',     'sum_hidden_i',     approach_i_utility,  False),
     ('Approach J',   'approach_j_traces',   'sum_input_j',     'sum_hidden_j',     approach_j_utility,  False),
     ('Approach K',   'approach_k_traces',   'sum_input_k',     'sum_hidden_k',     approach_k_utility,  False),
+    ('Approach L',   'approach_l_traces',   'sum_input_l',     'sum_hidden_l',     approach_l_utility,  False),
+    ('Approach M',   'approach_m_traces',   'sum_input_m',     'sum_hidden_m',     approach_m_utility,  False),
+    ('Approach N',   'approach_n_traces',   'sum_input_n',     'sum_hidden_n',     approach_n_utility,  False),
 ]
 
 
