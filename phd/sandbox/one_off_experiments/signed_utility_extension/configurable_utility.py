@@ -159,11 +159,23 @@ def enumerate_valid_configs():
 # ==============================================================================
 
 def _output_layer_loo(w_out, a_last, y_star, y_hat):
-    """Output-layer leave-one-out: U_j = |e + c_j| - |e|."""
+    """Output-layer leave-one-out: U_j = |e + c_j| - |e|.
+
+    Supports both scalar and vector outputs:
+    - Scalar: w_out (H,), y_star scalar, y_hat scalar → u_raw (H,)
+    - Vector: w_out (D, H), y_star (D,), y_hat (D,) → u_raw (H,) summed over D
+    """
     e = y_star - y_hat
-    c_j = w_out * a_last
-    u_raw = jnp.abs(e + c_j) - jnp.abs(e)
-    return e, c_j, u_raw
+    if w_out.ndim == 1:
+        # Scalar output: original behavior
+        c_j = w_out * a_last
+        u_raw = jnp.abs(e + c_j) - jnp.abs(e)
+    else:
+        # Multi-output: w_out is (D, H), e is (D,)
+        c_j = w_out * a_last[None, :]  # (D, H)
+        u_raw_per_d = jnp.abs(e[:, None] + c_j) - jnp.abs(e[:, None])  # (D, H)
+        u_raw = jnp.sum(u_raw_per_d, axis=0)  # (H,)
+    return e, u_raw
 
 
 def _proportional_redistribution(W, a_below, U):
@@ -260,19 +272,21 @@ def _normalize_hidden(s_raw, U_parent, contributions, method):
 # ==============================================================================
 
 def configurable_utility(model, x, y_star, y_hat, loss_grads, updates, config,
-                         activation='sigmoid'):
+                         activation='sigmoid', masks=None):
     """Configurable utility function for arbitrary-depth networks.
 
     Args:
         model: equinox MLP (no bias). Hidden layers use the specified activation;
             output layer is linear.
         x: input vector (N,)
-        y_star: scalar target
-        y_hat: scalar prediction
+        y_star: scalar or vector target (D,)
+        y_hat: scalar or vector prediction (D,)
         loss_grads: unused (kept for interface compatibility)
         updates: unused (kept for interface compatibility)
         config: UtilityConfig
         activation: 'sigmoid', 'tanh', 'relu', or (fn, inverse_fn) tuple
+        masks: optional tuple of (H_l,) arrays, one per hidden layer.
+            1 = active, 0 = pruned. Applied after activation. Default None = no masking.
 
     Returns:
         U_input: per-input utility (N,)
@@ -288,13 +302,17 @@ def configurable_utility(model, x, y_star, y_hat, loss_grads, updates, config,
     for l in range(n_layers - 1):  # hidden layers
         z = model.layers[l].weight @ activations[-1]
         a = act_fn(z)
+        if masks is not None:
+            a = a * masks[l]
         pre_activations.append(z)
         activations.append(a)
 
     # --- Output layer LOO ---
-    w_out = model.layers[-1].weight.squeeze(0)
-    e, c_j, u_raw = _output_layer_loo(w_out, activations[-1], y_star, y_hat)
-    error_reduced = jnp.abs(y_star) - jnp.abs(e)
+    w_out = model.layers[-1].weight
+    if w_out.shape[0] == 1:
+        w_out = w_out.squeeze(0)  # (H,) for single output
+    e, u_raw = _output_layer_loo(w_out, activations[-1], y_star, y_hat)
+    error_reduced = jnp.sum(jnp.abs(y_star)) - jnp.sum(jnp.abs(e))
 
     U_current = _normalize_output(u_raw, error_reduced, config.output_normalization)
     layer_utilities = [U_current]
@@ -332,8 +350,8 @@ def configurable_utility(model, x, y_star, y_hat, loss_grads, updates, config,
                     e_j = U_current / f_prime
             else:  # target_prop
                 if l == n_hidden - 1:
-                    # Last hidden layer: output weight per unit
-                    w_eff = model.layers[-1].weight.squeeze(0)
+                    # Last hidden layer: column sum of output weight matrix
+                    w_eff = jnp.sum(model.layers[-1].weight, axis=0)
                 else:
                     # Intermediate layer: column sum of weight matrix above
                     w_eff = jnp.sum(model.layers[l + 1].weight, axis=0)
@@ -367,11 +385,11 @@ def make_utility_fn(config, activation='sigmoid'):
     """Factory: returns a standard-interface utility function from a config.
 
     The returned function has signature:
-        fn(model, x, y_star, y_hat, loss_grads, updates) -> (U_input, hidden_utilities)
+        fn(model, x, y_star, y_hat, loss_grads, updates, masks=None) -> (U_input, hidden_utilities)
     """
-    def fn(model, x, y_star, y_hat, loss_grads, updates):
+    def fn(model, x, y_star, y_hat, loss_grads, updates, masks=None):
         return configurable_utility(model, x, y_star, y_hat, loss_grads, updates,
-                                    config, activation)
+                                    config, activation, masks=masks)
     fn.__name__ = (
         f"configurable_"
         f"{config.child_score_method}_"
@@ -388,12 +406,13 @@ def make_utility_fn(config, activation='sigmoid'):
 # ==============================================================================
 
 def contribution_utility(model, x, y_star, y_hat, loss_grads, updates,
-                         activation='sigmoid'):
+                         activation='sigmoid', masks=None):
     """CBP-style contribution utility for arbitrary-depth networks.
 
     Per-unit utility = |activation| * Σ|outgoing weights|.
     For inputs: U_i = |x_i| * Σ_j |W_0[j,i]|.
     For hidden unit j in layer l: U_j = |a_l[j]| * Σ_p |W_{l+1}[p,j]|.
+    Masked units naturally get 0 utility (their activation is zeroed).
     """
     act_fn, _ = _resolve_activation(activation)
     n_layers = len(model.layers)
@@ -402,7 +421,10 @@ def contribution_utility(model, x, y_star, y_hat, loss_grads, updates,
     activations = [x]
     for l in range(n_layers - 1):
         z = model.layers[l].weight @ activations[-1]
-        activations.append(act_fn(z))
+        a = act_fn(z)
+        if masks is not None:
+            a = a * masks[l]
+        activations.append(a)
 
     # Input utility: |x| * Σ|outgoing weights from each input|
     U_input = jnp.abs(x) * jnp.sum(jnp.abs(model.layers[0].weight), axis=0)
@@ -419,13 +441,14 @@ def contribution_utility(model, x, y_star, y_hat, loss_grads, updates,
 
 
 def upgd_utility(model, x, y_star, y_hat, loss_grads, updates,
-                 activation='sigmoid'):
+                 activation='sigmoid', masks=None):
     """UPGD first-order Taylor utility for arbitrary-depth networks.
 
     u_j = -(dL/da_j) * a_j (Elsayed & Mahmood 2023).
     Extracts dL/dz at each layer from weight gradients:
         grad_W_l = outer(dL/dz_l, a_{l-1}), so dL/dz_l = grad_W_l @ a_{l-1} / ||a_{l-1}||².
     Then dL/da_l = dL/dz_l / f'(z_l).
+    Masked units naturally get 0 utility (their activation is zeroed).
     """
     act_fn, _ = _resolve_activation(activation)
     n_layers = len(model.layers)
@@ -435,8 +458,11 @@ def upgd_utility(model, x, y_star, y_hat, loss_grads, updates,
     pre_activations = []
     for l in range(n_layers - 1):
         z = model.layers[l].weight @ activations[-1]
+        a = act_fn(z)
+        if masks is not None:
+            a = a * masks[l]
         pre_activations.append(z)
-        activations.append(act_fn(z))
+        activations.append(a)
 
     # Hidden layer utilities
     hidden_utilities = []
@@ -462,12 +488,13 @@ def upgd_utility(model, x, y_star, y_hat, loss_grads, updates,
 
 
 def si_utility(model, x, y_star, y_hat, loss_grads, updates,
-               activation='sigmoid'):
+               activation='sigmoid', masks=None):
     """Synaptic Intelligence utility for arbitrary-depth networks.
 
     omega_k = (-dL/dtheta_k) * delta_theta_k (Zenke et al. 2017).
     Per-unit utility = sum of omega over outgoing weights from that unit.
     Activation parameter is unused (SI depends only on weight gradients/updates).
+    Masks are applied to zero out utilities of pruned units.
     """
     n_layers = len(model.layers)
 
@@ -480,6 +507,8 @@ def si_utility(model, x, y_star, y_hat, loss_grads, updates,
         grad_W = loss_grads.layers[l + 1].weight
         upd_W = updates.layers[l + 1].weight
         U_l = jnp.sum(-grad_W * upd_W, axis=0)
+        if masks is not None:
+            U_l = U_l * masks[l]
         hidden_utilities.append(U_l)
 
     return U_input, tuple(hidden_utilities)
