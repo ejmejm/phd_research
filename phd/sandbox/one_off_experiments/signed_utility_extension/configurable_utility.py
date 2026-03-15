@@ -383,6 +383,108 @@ def make_utility_fn(config, activation='sigmoid'):
     return fn
 
 
+# ==============================================================================
+# Baseline utility functions (generalized for arbitrary depth/activation)
+# ==============================================================================
+
+def contribution_utility(model, x, y_star, y_hat, loss_grads, updates,
+                         activation='sigmoid'):
+    """CBP-style contribution utility for arbitrary-depth networks.
+
+    Per-unit utility = |activation| * Σ|outgoing weights|.
+    For inputs: U_i = |x_i| * Σ_j |W_0[j,i]|.
+    For hidden unit j in layer l: U_j = |a_l[j]| * Σ_p |W_{l+1}[p,j]|.
+    """
+    act_fn, _ = _resolve_activation(activation)
+    n_layers = len(model.layers)
+
+    # Forward pass
+    activations = [x]
+    for l in range(n_layers - 1):
+        z = model.layers[l].weight @ activations[-1]
+        activations.append(act_fn(z))
+
+    # Input utility: |x| * Σ|outgoing weights from each input|
+    U_input = jnp.abs(x) * jnp.sum(jnp.abs(model.layers[0].weight), axis=0)
+
+    # Hidden layer utilities: |a| * Σ|outgoing weights from each unit|
+    hidden_utilities = []
+    for l in range(n_layers - 1):
+        a_l = activations[l + 1]
+        W_above = model.layers[l + 1].weight
+        U_l = jnp.abs(a_l) * jnp.sum(jnp.abs(W_above), axis=0)
+        hidden_utilities.append(U_l)
+
+    return U_input, tuple(hidden_utilities)
+
+
+def upgd_utility(model, x, y_star, y_hat, loss_grads, updates,
+                 activation='sigmoid'):
+    """UPGD first-order Taylor utility for arbitrary-depth networks.
+
+    u_j = -(dL/da_j) * a_j (Elsayed & Mahmood 2023).
+    Extracts dL/dz at each layer from weight gradients:
+        grad_W_l = outer(dL/dz_l, a_{l-1}), so dL/dz_l = grad_W_l @ a_{l-1} / ||a_{l-1}||².
+    Then dL/da_l = dL/dz_l / f'(z_l).
+    """
+    act_fn, _ = _resolve_activation(activation)
+    n_layers = len(model.layers)
+
+    # Forward pass
+    activations = [x]
+    pre_activations = []
+    for l in range(n_layers - 1):
+        z = model.layers[l].weight @ activations[-1]
+        pre_activations.append(z)
+        activations.append(act_fn(z))
+
+    # Hidden layer utilities
+    hidden_utilities = []
+    for l in range(n_layers - 1):
+        grad_W = loss_grads.layers[l].weight
+        a_below = activations[l]
+        a_below_norm_sq = jnp.sum(a_below * a_below)
+        dL_dz = (grad_W @ a_below) / jnp.maximum(a_below_norm_sq, 1e-10)
+
+        f_prime = jax.vmap(jax.grad(act_fn))(pre_activations[l])
+        f_prime = jnp.maximum(f_prime, 1e-6)
+        U_l = -(dL_dz / f_prime) * activations[l + 1]
+        hidden_utilities.append(U_l)
+
+    # Input utility: dL/dx = W_0.T @ dL/dz_0, U = -(dL/dx) * x
+    grad_W0 = loss_grads.layers[0].weight
+    x_norm_sq = jnp.sum(x * x)
+    dL_dz0 = (grad_W0 @ x) / jnp.maximum(x_norm_sq, 1e-10)
+    dL_dx = model.layers[0].weight.T @ dL_dz0
+    U_input = -dL_dx * x
+
+    return U_input, tuple(hidden_utilities)
+
+
+def si_utility(model, x, y_star, y_hat, loss_grads, updates,
+               activation='sigmoid'):
+    """Synaptic Intelligence utility for arbitrary-depth networks.
+
+    omega_k = (-dL/dtheta_k) * delta_theta_k (Zenke et al. 2017).
+    Per-unit utility = sum of omega over outgoing weights from that unit.
+    Activation parameter is unused (SI depends only on weight gradients/updates).
+    """
+    n_layers = len(model.layers)
+
+    # Input utility: sum omega over outgoing weights from each input
+    U_input = jnp.sum(-loss_grads.layers[0].weight * updates.layers[0].weight, axis=0)
+
+    # Hidden layer utilities: sum omega over outgoing weights from each unit
+    hidden_utilities = []
+    for l in range(n_layers - 1):
+        grad_W = loss_grads.layers[l + 1].weight
+        upd_W = updates.layers[l + 1].weight
+        U_l = jnp.sum(-grad_W * upd_W, axis=0)
+        hidden_utilities.append(U_l)
+
+    return U_input, tuple(hidden_utilities)
+
+
 APPROACH_CONFIGS = {
     "A": UtilityConfig(
         child_score_method="proportional",
