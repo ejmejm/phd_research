@@ -22,7 +22,29 @@ All cases use the same setup: parent unit $j$ with utility $U_j$, children $k$ w
 
 ---
 
-## 2. Aligned Contributions, Linear Activation
+## 2. Canceling Contributions, Non-smooth Activation
+
+**Setup:** LTU with $c_A = +1$, $c_B = -0.99$. So $z_j = 0.01$, $a_j = 1$. Parent receives $U_j = 2.0$ from its own parents.
+
+**Desired outcome:** $U_A = +1.0$, $U_B = -0.99$, sum $= 0.01$.
+
+**Why:** The children's contributions nearly cancel. The step function did almost all the work — it took a tiny net input of $0.01$ and amplified it to $1.0$. The activation function "created" $1.99$ out of $2.0$ units of utility. Children collectively receive only $0.01$ — proportional to the actual signal they produced after cancellation.
+
+Node A gets slightly more positive credit than B gets negative, because A is the one tipping $z_j$ above the threshold. But neither deserves much — the step function's discontinuity is doing the heavy lifting.
+
+---
+
+## 3. Zero Utility Parent
+
+**Setup:** Linear activation $f(x) = x$ with $c_A = +1$, $c_B = -1$. So $z_j = 0$, $a_j = 0$. Parent receives $U_j = 0$.
+
+**Desired outcome:** Depends on the output weight of the parent. If the output weight is non-zero, then the reason for the 0 utility is the 0 parent value. If the output weight is zero, then there is nothing to do. In the former case the normal utility function should be used, and in the latter case all children get $U_{k \leftarrow j} = 0$. An important thing to realize here is that that utility should not be the target, the target should be what the output value should be to minimize the loss. You can have 0 utility, and the input weights can still have the ability to affect the main error if the output weight is non-zero. But at the same time, if there is 0 utility to spread, then do we want to split that into negative and positive utility? That could result in a whole isolated part of the network getting units with very high utility and very low utility that actually cannot have an effect on the main error.
+
+
+
+# Normal Cases
+
+## 1. Aligned Contributions, Linear Activation
 
 **Setup:** Linear activation $f(x) = x$ with $c_A = +3$, $c_B = +2$. So $z_j = 5$, $a_j = 5$. Parent receives $U_j = 4.0$.
 
@@ -38,7 +60,7 @@ All cases use the same setup: parent unit $j$ with utility $U_j$, children $k$ w
 
 ---
 
-## 3. Large Cancellation, Nonlinear Activation
+## 2. Large Cancellation, Nonlinear Activation
 
 **Setup:** Sigmoid unit with $c_A = +10$, $c_B = -9$. So $z_j = 1$, $a_j = \sigma(1) \approx 0.731$. Parent receives $U_j = 0.5$.
 
@@ -52,7 +74,7 @@ All cases use the same setup: parent unit $j$ with utility $U_j$, children $k$ w
 
 ---
 
-## 4. Harmful Parent, Opposing Children
+## 3. Harmful Parent, Opposing Children
 
 **Setup (from main derivation):** Sigmoid unit with $c_A = +1.0$ (from node 1), $c_B = -2.0$ (from node 2). $z_j = -1.0$, $a_j = \sigma(-1) \approx 0.269$. Unit is harmful: $U_j = -1.0$.
 
@@ -72,7 +94,7 @@ $\sum |s_k| = 3.0$. $|U_j| = 1.0$. Scale $= \min(1, 1/3) = 1/3$.
 
 ---
 
-## 5. Saturated Activation
+## 4. Saturated Activation
 
 **Setup:** Sigmoid unit with $z_j = 6$, $a_j = \sigma(6) \approx 0.998$. $c_A = 4$, $c_B = 2$. $U_j = 0.3$.
 
@@ -85,20 +107,6 @@ $\sum |s_k| = 6.0 \gg 0.3$. Scale $= 0.3 / 6.0 = 0.05$.
 **Desired outcome:** $U_A = 0.2$, $U_B = 0.1$. Sum $= 0.3 = U_j$.
 
 **Why:** When the activation is saturated, $f'(z_j) \approx 0$, making $e_j$ very large. In this regime, scores converge to $s_k \approx c_k$ (the linear/proportional regime). The cap kicks in and distributes $|U_j|$ proportionally to contribution magnitudes. This is graceful degradation — it reduces to a signed version of Approach A, which is the best we can do when the activation function is nearly flat and provides no useful curvature information.
-
----
-
-## 6. Zero Utility Parent
-
-**Setup:** Any activation, any contributions. $U_j = 0$.
-
-**Pseudo-error:** $e_j = 0 / f'(z_j) = 0$.
-
-**Raw scores:** $s_k = |0 + c_k| - |0| = |c_k| - 0 = |c_k|$ (all positive).
-
-**Desired outcome:** All children get $U_{k \leftarrow j} = 0$.
-
-**Why:** The parent has no utility to distribute. Even though children have nonzero contributions, those contributions net out to zero impact on the network's performance (as measured by the parent's utility). The scale factor is $\min(1, 0/\sum|c_k|) = 0$, correctly zeroing everything out.
 
 ---
 

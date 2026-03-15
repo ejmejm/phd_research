@@ -604,18 +604,18 @@ def approach_n_utility(model, x, y_star, y_hat, loss_grads, updates):
     z_hidden = W1 @ x
     a_hidden = jax.nn.sigmoid(z_hidden)
 
-    # Output layer: rescale LOO utilities to sum to error_reduced
+    # Output layer: rescale LOO utilities via abs-sum normalization of contributions (like input layer)
     e = y_star - y_hat
     c_j = w_out * a_hidden
     u_raw = jnp.abs(e + c_j) - jnp.abs(e)
     error_reduced = jnp.abs(y_star) - jnp.abs(e)
-    u_raw_sum = jnp.sum(u_raw)
-    scale = jnp.where(jnp.abs(u_raw_sum) > 1e-10, error_reduced / u_raw_sum, 1.0)
+    c_abs_sum = jnp.maximum(jnp.sum(jnp.abs(c_j)), 1e-10)
+    scale = jnp.where(c_abs_sum > 1e-10, error_reduced / c_abs_sum, 1.0)
     U_hidden = u_raw * scale
 
     f_prime = jnp.maximum(a_hidden * (1.0 - a_hidden), 1e-6)
     e_j = U_hidden / f_prime
-    
+
     contributions = W1 * x[None, :]
     s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
     s_abs_sum = jnp.maximum(jnp.sum(jnp.abs(s_raw), axis=1, keepdims=True), 1e-10)
