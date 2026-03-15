@@ -1,0 +1,31 @@
+defaults:
+  - config
+
+# Dynamic network with ConnectivityManager (structure search)
+# Starts as linear network (hidden_dim=0), grows via unit generation
+# max_units_per_layer=4800 (3x the 1598 in the sparse baseline)
+
+model:
+  type: dynamic
+  n_layers: 3
+  hidden_dim: 0                          # Start as linear network
+  max_units_per_layer: 4800              # 3x sparse baseline capacity
+  max_connections_per_unit: 32
+  connect_all_to_output: true
+  max_fan_out: 64
+
+optimizer:
+  name: sgd
+  learning_rate: 0.03125                 # 2^-5
+
+structure_tracker:
+  enabled: true
+  prune_rate: 0.0005                     # 0.05% of connection_budget per step
+  connection_budget: 201000              # Match sparse baseline ~201K connections
+  decay_rate: 0.99
+  maturity_threshold: 1                  # Minimum 1 step before eligible for pruning
+  prune_frequency: 50
+
+seed: [1, 2, 3]
+mlflow: true
+log_individual_seeds: false

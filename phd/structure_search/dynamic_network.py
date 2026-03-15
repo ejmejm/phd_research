@@ -449,6 +449,9 @@ def init_random_dynamic_network(
         key=key,
     )
 
+    if units_per_layer == 0:
+        return build_outgoing_indices(net)
+
     buffer_size = net.buffer_size
     weights = net.weights
     input_indices = net.input_indices
