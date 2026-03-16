@@ -62,6 +62,7 @@ def ltu(x: Array, threshold: float = 0.0) -> Array:
 # Activation function mapping
 ACTIVATION_MAP = {
     'relu': jax.nn.relu,
+    'leaky_relu': jax.nn.leaky_relu,
     'tanh': jax.nn.tanh,
     'sigmoid': jax.nn.sigmoid,
     'ltu': ltu,
