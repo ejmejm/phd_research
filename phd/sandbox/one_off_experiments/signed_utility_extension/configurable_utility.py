@@ -49,16 +49,23 @@ def _relu_inverse(a):
     return jnp.where(a >= 0, a, -_LARGE)
 
 
+def _leaky_relu_inverse(a, negative_slope=0.01):
+    """Inverse leaky ReLU: identity for a >= 0, a/negative_slope for a < 0."""
+    return jnp.where(a >= 0, a, a / negative_slope)
+
+
 ACTIVATIONS = {
     'sigmoid': jax.nn.sigmoid,
     'tanh': jnp.tanh,
     'relu': jax.nn.relu,
+    'leaky_relu': jax.nn.leaky_relu,
 }
 
 ACTIVATION_INVERSES = {
     'sigmoid': _sigmoid_inverse,
     'tanh': _tanh_inverse,
     'relu': _relu_inverse,
+    'leaky_relu': _leaky_relu_inverse,
 }
 
 
