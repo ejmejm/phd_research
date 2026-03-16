@@ -36,3 +36,4 @@ phd/sandbox/atari_prediction_generalization/data/
 
 # Ignore symlinks
 *.lnk
+*.html
