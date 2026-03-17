@@ -51,6 +51,7 @@ train:
   batch_size: 1
   total_steps: 100_000
   log_freq: 1000
+  loss: mse  # 'mse' or 'cross_entropy'
 
 # Seed: single int or list of ints for multi-seed
 seed: null

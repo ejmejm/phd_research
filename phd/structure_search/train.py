@@ -192,10 +192,26 @@ def prepare_experiment(
 # Training step
 # ---------------------------------------------------------------------------
 
+def _mse_loss(logits, one_hot):
+    return jnp.mean(jnp.square(logits - one_hot))
+
+
+def _cross_entropy_loss(logits, one_hot):
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    return -jnp.mean(jnp.sum(one_hot * log_probs, axis=-1))
+
+
+LOSS_FNS = {
+    'mse': _mse_loss,
+    'cross_entropy': _cross_entropy_loss,
+}
+
+
 def train_step(
     train_state: TrainState,
     data,
     do_restructure: bool = False,
+    loss_name: str = 'mse',
 ) -> Tuple[TrainState, StepMetrics]:
     """Single training step.
 
@@ -205,14 +221,16 @@ def train_step(
         do_restructure: If True and structure_tracker is a ConnectivityManager,
             call modify_structure after the utility update. This parameter is
             static (Python bool) so JAX traces separate paths for True/False.
+        loss_name: Loss function to use ('mse' or 'cross_entropy'). Static.
     """
     images, labels = data  # (batch_size, input_dim), (batch_size,)
 
     one_hot = jax.nn.one_hot(labels, NUM_CLASSES)  # (batch_size, 10)
+    loss_fn_impl = LOSS_FNS[loss_name]
 
     def loss_fn(model):
         outputs, param_inputs = jax.vmap(model)(images)  # (batch_size, 10)
-        loss = jnp.mean(jnp.square(outputs - one_hot))
+        loss = loss_fn_impl(outputs, one_hot)
         return loss, (outputs, param_inputs)
 
     (loss, (outputs, param_inputs)), grads = eqx.filter_value_and_grad(
@@ -286,6 +304,7 @@ def run_experiment(
     num_scans = cfg.train.total_steps // log_freq
     prune_frequency = cfg.structure_tracker.get('prune_frequency', log_freq)
     use_restructure = cfg.structure_tracker.get('enabled', False)
+    loss_name = cfg.train.get('loss', 'mse')
 
     if use_restructure:
         assert log_freq % prune_frequency == 0, \
@@ -299,9 +318,9 @@ def run_experiment(
             """
             all_metrics = []
             for i in range(prune_frequency - 1):
-                state, step_metrics = train_step(state, (data_block[0][i], data_block[1][i]), do_restructure=False)
+                state, step_metrics = train_step(state, (data_block[0][i], data_block[1][i]), do_restructure=False, loss_name=loss_name)
                 all_metrics.append(step_metrics)
-            state, step_metrics = train_step(state, (data_block[0][-1], data_block[1][-1]), do_restructure=True)
+            state, step_metrics = train_step(state, (data_block[0][-1], data_block[1][-1]), do_restructure=True, loss_name=loss_name)
             all_metrics.append(step_metrics)
             stacked = jax.tree.map(lambda *args: jnp.stack(args), *all_metrics)
             return state, stacked
@@ -316,8 +335,11 @@ def run_experiment(
             metrics = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), metrics)
             return state, metrics
     else:
+        def _step(state, data):
+            return train_step(state, data, loss_name=loss_name)
+
         def scan_steps(state, data):
-            return jax.lax.scan(train_step, state, data, unroll=SCAN_UNROLL)
+            return jax.lax.scan(_step, state, data, unroll=SCAN_UNROLL)
 
     vmapped_scan = jax.jit(jax.vmap(scan_steps))
 
