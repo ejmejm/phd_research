@@ -9,6 +9,7 @@ NOTE: Currently uses CIFAR-10 with MSE loss (one-hot regression).
       This will be changed to a proper regression dataset later.
 """
 
+import itertools
 import logging
 import os
 import pickle
@@ -39,7 +40,7 @@ from phd.structure_search.data import load_dataset, DataStream
 
 from configurable_utility import (
     UtilityConfig,
-    enumerate_valid_configs,
+    is_valid_config,
     make_utility_fn,
     contribution_utility,
     upgd_utility,
@@ -68,8 +69,32 @@ class MethodSpec:
     config: Optional[UtilityConfig] = None  # None for baselines
 
 
-def build_method_specs(activation: str = 'relu') -> List[MethodSpec]:
-    """Build the full list of methods: 115 configurable + 3 baselines."""
+def _filtered_configs(utility_filter) -> List[UtilityConfig]:
+    """Generate valid UtilityConfigs from the cartesian product of filter values."""
+    configs = []
+    for csm, on, pe, hn, cap in itertools.product(
+        list(utility_filter.child_score_method),
+        list(utility_filter.output_normalization),
+        list(utility_filter.pseudo_error),
+        list(utility_filter.hidden_normalization),
+        list(utility_filter.cap),
+    ):
+        cfg = UtilityConfig(
+            child_score_method=csm,
+            output_normalization=on,
+            pseudo_error=pe,
+            hidden_normalization=hn,
+            cap=bool(cap),
+        )
+        if is_valid_config(cfg):
+            configs.append(cfg)
+    # Deduplicate (proportional/coherence ignore pseudo_error/hidden_normalization/cap)
+    return list(dict.fromkeys(configs))
+
+
+def build_method_specs(activation: str = 'relu',
+                       utility_filter=None) -> List[MethodSpec]:
+    """Build the full list of methods: filtered configurable + 3 baselines."""
     methods = []
 
     # Baselines
@@ -90,7 +115,13 @@ def build_method_specs(activation: str = 'relu') -> List[MethodSpec]:
     ))
 
     # Configurable utility functions
-    for config in enumerate_valid_configs():
+    if utility_filter is not None:
+        configs = _filtered_configs(utility_filter)
+    else:
+        from configurable_utility import enumerate_valid_configs
+        configs = enumerate_valid_configs()
+
+    for config in configs:
         fn = make_utility_fn(config, activation=activation)
         name = (f"loo_{config.output_normalization}_{config.pseudo_error}_"
                 f"{config.hidden_normalization}_cap{config.cap}"
@@ -273,7 +304,10 @@ def run_experiment(cfg: DictConfig):
 
     dataset_cache = load_dataset(cfg.dataset.name)
     images_np, labels_np, num_classes, input_dim = dataset_cache
-    methods = build_method_specs(activation=cfg.model.activation)
+    methods = build_method_specs(
+        activation=cfg.model.activation,
+        utility_filter=cfg.get('utility_filter', None),
+    )
     act_fn = ACTIVATION_MAP[cfg.model.activation]
 
     seeds = list(cfg.seed)

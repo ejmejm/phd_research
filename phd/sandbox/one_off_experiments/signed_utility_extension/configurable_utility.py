@@ -599,3 +599,241 @@ APPROACH_CONFIGS = {
 def config_for_approach(name):
     """Return the UtilityConfig matching a named existing approach (A-M)."""
     return APPROACH_CONFIGS[name.upper()]
+
+
+# ==============================================================================
+# Per-weight utility functions (for weight pruning)
+# ==============================================================================
+
+def configurable_weight_utility(model, x, y_star, y_hat, loss_grads, updates, config,
+                                activation='sigmoid', masks=None):
+    """Per-weight configurable utility for arbitrary-depth networks.
+
+    Same backward-pass logic as configurable_utility, but returns per-weight
+    utilities instead of per-node utilities. At each layer, the intermediate
+    U_from_j matrix (H_out, H_in) is stored as the weight utility.
+
+    Args:
+        model: equinox MLP (no bias)
+        x: input vector (N,)
+        y_star: target vector (D,)
+        y_hat: prediction vector (D,)
+        loss_grads: unused (interface compatibility)
+        updates: unused (interface compatibility)
+        config: UtilityConfig
+        activation: activation name or (fn, inv_fn) tuple
+        masks: optional tuple of (H_out, H_in) arrays per layer (ALL layers).
+            1 = active, 0 = pruned. Applied to weights before matmul.
+
+    Returns:
+        weight_utilities: tuple of (H_out, H_in) arrays, one per layer (all layers).
+            weight_utilities[l].shape == model.layers[l].weight.shape.
+    """
+    act_fn, act_inv = _resolve_activation(activation)
+    n_layers = len(model.layers)
+
+    # --- Forward pass with weight masking ---
+    activations = [x]
+    pre_activations = []
+    for l in range(n_layers - 1):
+        W = model.layers[l].weight
+        if masks is not None:
+            W = W * masks[l]
+        z = W @ activations[-1]
+        a = act_fn(z)
+        pre_activations.append(z)
+        activations.append(a)
+
+    # --- Output layer per-weight LOO ---
+    w_out = model.layers[-1].weight  # (D, H)
+    w_out_eff = w_out * masks[-1] if masks is not None else w_out
+    e = y_star - y_hat
+
+    c_weight = w_out_eff * activations[-1][None, :]  # (D, H)
+    u_raw_2d = jnp.abs(e[:, None] + c_weight) - jnp.abs(e[:, None])  # (D, H)
+    u_raw_node = jnp.sum(u_raw_2d, axis=0)  # (H,) for backward pass
+
+    error_reduced = jnp.sum(jnp.abs(y_star)) - jnp.sum(jnp.abs(e))
+    U_current = _normalize_output(u_raw_node, error_reduced, config.output_normalization)
+
+    # Distribute normalized per-node utility to per-weight proportionally
+    safe_denom = jnp.where(jnp.abs(u_raw_node) > 1e-10, u_raw_node,
+                           jnp.ones_like(u_raw_node))
+    scale = U_current / safe_denom  # (H,)
+    U_weight_out = u_raw_2d * scale[None, :]  # (D, H)
+
+    layer_weight_utils = [U_weight_out]  # output layer first, reversed at the end
+
+    # --- Backward through hidden layers ---
+    n_hidden = n_layers - 1
+    for l in range(n_hidden - 1, -1, -1):
+        W = model.layers[l].weight
+        W_eff = W * masks[l] if masks is not None else W
+        a_below = activations[l]
+        z_l = pre_activations[l]
+        a_l = activations[l + 1]
+
+        if config.child_score_method == "proportional":
+            contrib = jnp.abs(W_eff * a_below[None, :])
+            frac = contrib / jnp.maximum(jnp.sum(contrib, axis=1, keepdims=True), 1e-10)
+            U_from_j = U_current[:, None] * frac
+            U_next = jnp.sum(U_from_j, axis=0)
+
+        elif config.child_score_method == "coherence":
+            contributions = W_eff * a_below[None, :]
+            z_j = jnp.sum(contributions, axis=1, keepdims=True)
+            Sigma = jnp.sum(jnp.abs(contributions), axis=1, keepdims=True)
+            Sigma_safe = jnp.maximum(Sigma, 1e-10)
+            beta = jnp.abs(z_j) / Sigma_safe
+            sign_z = jnp.sign(z_j)
+            weights = (sign_z * contributions + (1.0 - beta) * jnp.abs(contributions)) / Sigma_safe
+            U_from_j = U_current[:, None] * weights
+            U_next = jnp.sum(U_from_j, axis=0)
+
+        else:  # loo
+            if config.pseudo_error in ("abs_derivative", "signed_derivative"):
+                f_prime = jax.vmap(jax.grad(act_fn))(z_l)
+                f_prime = jnp.maximum(f_prime, 1e-6)
+                if config.pseudo_error == "abs_derivative":
+                    e_j = jnp.abs(U_current) / f_prime
+                else:
+                    e_j = U_current / f_prime
+            else:  # target_prop
+                if l == n_hidden - 1:
+                    W_above = model.layers[-1].weight
+                    if masks is not None:
+                        W_above = W_above * masks[-1]
+                    w_eff_tp = jnp.sum(W_above, axis=0)
+                else:
+                    W_above = model.layers[l + 1].weight
+                    if masks is not None:
+                        W_above = W_above * masks[l + 1]
+                    w_eff_tp = jnp.sum(W_above, axis=0)
+                e_j = _target_prop_pseudo_error(w_eff_tp, U_current, a_l, z_l, act_inv)
+
+            contributions = W_eff * a_below[None, :]
+            s_raw = jnp.abs(e_j[:, None] + contributions) - jnp.abs(e_j[:, None])
+
+            U_from_j = _normalize_hidden(s_raw, U_current, contributions,
+                                         config.hidden_normalization)
+
+            if config.cap:
+                U_from_j = jnp.clip(U_from_j,
+                                    -jnp.abs(U_current[:, None]),
+                                    jnp.abs(U_current[:, None]))
+
+            U_next = jnp.sum(U_from_j, axis=0)
+
+        layer_weight_utils.append(U_from_j)
+        U_current = U_next
+
+    # layer_weight_utils = [output, last_hidden, ..., first_hidden] → reverse
+    return tuple(reversed(layer_weight_utils))
+
+
+def make_weight_utility_fn(config, activation='sigmoid'):
+    """Factory: returns a weight-level utility function from a config."""
+    def fn(model, x, y_star, y_hat, loss_grads, updates, masks=None):
+        return configurable_weight_utility(model, x, y_star, y_hat, loss_grads, updates,
+                                           config, activation, masks=masks)
+    fn.__name__ = (
+        f"weight_configurable_"
+        f"{config.child_score_method}_"
+        f"{config.output_normalization}_"
+        f"{config.pseudo_error}_"
+        f"{config.hidden_normalization}_"
+        f"cap{config.cap}"
+    )
+    return fn
+
+
+# --- Per-weight baseline utilities ---
+
+def contribution_weight_utility(model, x, y_star, y_hat, loss_grads, updates,
+                                activation='sigmoid', masks=None):
+    """Per-weight contribution utility: |W_eff[j,i]| * |a_below[i]|.
+
+    Returns per-weight utilities for all layers (including output).
+    """
+    act_fn, _ = _resolve_activation(activation)
+    n_layers = len(model.layers)
+
+    activations = [x]
+    for l in range(n_layers - 1):
+        W = model.layers[l].weight
+        if masks is not None:
+            W = W * masks[l]
+        z = W @ activations[-1]
+        a = act_fn(z)
+        activations.append(a)
+
+    weight_utilities = []
+    for l in range(n_layers):
+        W = model.layers[l].weight
+        if masks is not None:
+            W = W * masks[l]
+        a_below = activations[l]
+        U_l = jnp.abs(W) * jnp.abs(a_below)[None, :]
+        weight_utilities.append(U_l)
+
+    return tuple(weight_utilities)
+
+
+def upgd_weight_utility(model, x, y_star, y_hat, loss_grads, updates,
+                        activation='sigmoid', masks=None):
+    """Per-weight UPGD (Taylor first-order): -(dL/dW) * W.
+
+    Returns per-weight utilities for all layers (including output).
+    """
+    n_layers = len(model.layers)
+
+    weight_utilities = []
+    for l in range(n_layers):
+        grad_W = loss_grads.layers[l].weight
+        W = model.layers[l].weight
+        if masks is not None:
+            W_eff = W * masks[l]
+        else:
+            W_eff = W
+        U_l = -grad_W * W_eff
+        weight_utilities.append(U_l)
+
+    return tuple(weight_utilities)
+
+
+def si_weight_utility(model, x, y_star, y_hat, loss_grads, updates,
+                      activation='sigmoid', masks=None):
+    """Per-weight Synaptic Intelligence: -(dL/dW) * delta_W.
+
+    Returns per-weight utilities for all layers (including output).
+    """
+    n_layers = len(model.layers)
+
+    weight_utilities = []
+    for l in range(n_layers):
+        grad_W = loss_grads.layers[l].weight
+        upd_W = updates.layers[l].weight
+        U_l = -grad_W * upd_W
+        if masks is not None:
+            U_l = U_l * masks[l]
+        weight_utilities.append(U_l)
+
+    return tuple(weight_utilities)
+
+
+def magnitude_weight_utility(model, x, y_star, y_hat, loss_grads, updates,
+                             activation='sigmoid', masks=None):
+    """Per-weight magnitude utility: |W_eff|.
+
+    Returns per-weight utilities for all layers (including output).
+    """
+    n_layers = len(model.layers)
+
+    weight_utilities = []
+    for l in range(n_layers):
+        W = model.layers[l].weight
+        if masks is not None:
+            W = W * masks[l]
+        weight_utilities.append(jnp.abs(W))
+
+    return tuple(weight_utilities)

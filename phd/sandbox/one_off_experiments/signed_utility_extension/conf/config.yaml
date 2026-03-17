@@ -1,0 +1,47 @@
+project: pruning-experiment
+
+hydra:
+  run:
+    dir: .
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+# Dataset
+dataset:
+  name: cifar10
+
+# Model
+model:
+  n_layers: 3
+  hidden_dim: 128
+  activation: leaky_relu
+  weight_init_method: lecun_uniform
+
+# Optimizer
+optimizer:
+  name: adam
+  learning_rate: 1e-3
+
+# Training
+train:
+  batch_size: 32
+  total_steps: 50_000
+  log_freq: 500
+  prune_freq: 1000
+  scan_chunk: 100
+  prune_count: 1
+
+# Seed: single int or list of ints for multi-seed
+seed: [1, 2, 3]
+
+# Utility filter: cartesian product of these values, kept only if valid.
+# Default includes all values for each parameter.
+utility_filter:
+  child_score_method: [loo, proportional, coherence]
+  output_normalization: [none, absolute, signed, overflow_only, absorption]
+  pseudo_error: [abs_derivative, signed_derivative, target_prop]
+  hidden_normalization: [none, absolute, signed, overflow_only, absorption]
+  cap: [true, false]
+
+# Output
+output: results.pkl
