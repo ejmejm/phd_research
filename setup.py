@@ -20,6 +20,7 @@ setup(
         'console_scripts': [
             'comet_sweep=phd.research_utils.scripts.comet_sweep:main',
             'comet_upload=phd.research_utils.scripts.comet_upload:main',
+            'comet_download=phd.research_utils.scripts.comet_download:main',
             'mlflow_sweep=phd.research_utils.scripts.mlflow_sweep:main',
         ],
     },
