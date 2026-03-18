@@ -14,11 +14,11 @@ parameters:
   optimizer.name: upgd
 
   optimizer.learning_rate:
-    - "${eval:2**-15}"
-    - "${eval:2**-12}"
-    - "${eval:2**-9}"
-    - "${eval:2**-6}"
-    - "${eval:2**-3}"
+    - "${eval:2**-14}"
+    - "${eval:2**-16}"
+    - "${eval:2**-18}"
+    - "${eval:2**-20}"
+    - "${eval:2**-22}"
 
   optimizer.beta_utility:
     - 0.0
