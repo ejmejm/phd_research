@@ -123,13 +123,24 @@ def reinit_train_state(train_state: TrainState, cfg: DictConfig,
 
     Uses each seed's current RNG to generate new weights, so each reinit
     produces different (but deterministic) parameters.
+
+    Replaces only array leaves so that the pytree structure (and static
+    fields like the optax GradientTransformation) stays identical, avoiding
+    JIT recompilation.
     """
     n_seeds = train_state.step.shape[0]
-    new_states = []
+    fresh_states = []
     for i in range(n_seeds):
-        new_states.append(_create_train_state(
+        fresh_states.append(_create_train_state(
             cfg, input_dim, train_state.rng[i], step=train_state.step[i]))
-    return stack_pytrees(new_states)
+    fresh_batched = stack_pytrees(fresh_states)
+
+    # Swap only the array leaves into the original pytree structure.
+    # old_treedef retains the static fields (optimizer, filter_spec, etc.)
+    # so JAX won't recompile the vmapped scan.
+    _, old_treedef = jax.tree.flatten(train_state)
+    new_leaves, _ = jax.tree.flatten(fresh_batched)
+    return old_treedef.unflatten(new_leaves)
 
 
 def prepare_experiment(cfg: DictConfig) -> Tuple[TrainState, ContinualAtariStream, int]:
