@@ -1,0 +1,45 @@
+experiment: streaming-ipc-sweeps
+sweep_name: forward_init_delta_sweep
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_accuracy]
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  algorithm: ipc
+  ipc.variant: forward_init
+  ipc.T: 1
+  ipc.gamma: 0.5
+
+  model.num_layers: 3
+  model.hidden_dim: 256
+  model.activation: relu
+
+  train.total_steps: 100000
+  train.log_freq: 1000
+
+  data.delta_degrees:
+    - 1
+    - 5
+    - 15
+
+  ipc.alpha:
+    - 1e-4
+    - 5e-4
+    - 1e-3
+    - 5e-3
+
+  seed:
+    type: atomic
+    value: [1, 2, 3]

@@ -1,0 +1,40 @@
+experiment: streaming-ipc-sweeps
+sweep_name: bp_streaming_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_accuracy]
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  algorithm: bp
+  data.ordering: streaming
+  optimizer.name: sgd
+
+  model.num_layers: 3
+  model.hidden_dim: 256
+  model.activation: relu
+  data.delta_degrees: 5
+
+  train.total_steps: 100000
+  train.log_freq: 1000
+
+  optimizer.learning_rate:
+    - 1e-4
+    - 5e-4
+    - 1e-3
+    - 5e-3
+
+  seed:
+    type: atomic
+    value: [1, 2, 3]
