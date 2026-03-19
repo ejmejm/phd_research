@@ -12,6 +12,8 @@ spec:
 
 plot_params:
   metrics: [asymptotic_accuracy, asymptotic_energy]
+  sensitivity:
+    hue: ipc.alpha
 
 parameters:
   mlflow: true
