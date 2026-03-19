@@ -1,5 +1,5 @@
 project: streaming-ipc
-device: cpu
+device: cuda
 jax_jit_cache_dir: /tmp/jax_cache
 
 wandb: false

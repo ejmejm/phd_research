@@ -54,10 +54,10 @@ def parse_args() -> argparse.Namespace:
         help="Include currently running runs",
     )
     parser.add_argument(
-        '--include-children',
+        '--include-seed-runs',
         action='store_true',
         default=False,
-        help="Include child (per-seed) runs in addition to parent runs",
+        help="Include per-seed child runs (mlflow.runName='seed_*') in addition to trial runs",
     )
     parser.add_argument(
         '--n-threads',
@@ -177,35 +177,28 @@ def main():
 
     # MLflow search_runs doesn't support OR on status, so we query multiple times
     all_runs = []
+    run_ids_found = set()
     for status_filter in status_filters:
-        filter_string = status_filter
-        if not args.include_children:
-            # Exclude child (per-seed) runs — they have mlflow.parentRunId tag
-            filter_string += " and tags.`mlflow.parentRunId` = ''"
         runs = client.search_runs(
             experiment_ids=[experiment_id],
-            filter_string=filter_string,
+            filter_string=status_filter,
             max_results=50000,
         )
-        all_runs.extend(runs)
+        for r in runs:
+            if r.info.run_id not in run_ids_found:
+                all_runs.append(r)
+                run_ids_found.add(r.info.run_id)
 
-    # Also try without the parentRunId filter in case some runs don't have it
-    if not args.include_children:
-        # The tag filter above may miss runs that don't have the tag at all.
-        # Re-query without tag filter and deduplicate.
-        run_ids_found = {r.info.run_id for r in all_runs}
-        for status_filter in status_filters:
-            runs = client.search_runs(
-                experiment_ids=[experiment_id],
-                filter_string=status_filter,
-                max_results=50000,
+    # Filter out per-seed child runs (created by init_child_runs, named 'seed_*')
+    # unless explicitly requested
+    if not args.include_seed_runs:
+        all_runs = [
+            r for r in all_runs
+            if not (
+                r.data.tags.get('mlflow.runName', '').startswith('seed_')
+                and 'mlflow.parentRunId' in r.data.tags
             )
-            for r in runs:
-                if r.info.run_id not in run_ids_found:
-                    # Include only if it's NOT a child run
-                    if 'mlflow.parentRunId' not in r.data.tags:
-                        all_runs.append(r)
-                        run_ids_found.add(r.info.run_id)
+        ]
 
     logger.info(f"Found {len(all_runs)} runs")
 
