@@ -11,7 +11,7 @@ spec:
   direction: maximize
 
 plot_params:
-  metrics: [asymptotic_accuracy]
+  metrics: [asymptotic_accuracy, asymptotic_energy]
 
 parameters:
   mlflow: true
@@ -34,10 +34,9 @@ parameters:
     - 512
 
   ipc.alpha:
-    - 1e-4
-    - 5e-4
-    - 1e-3
-    - 5e-3
+    - "${eval:2**-14}"
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
 
   seed:
     type: atomic
