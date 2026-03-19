@@ -1,0 +1,38 @@
+project: streaming-ipc
+device: cpu
+jax_jit_cache_dir: /tmp/jax_cache
+
+wandb: false
+mlflow: false
+comet_ml: false
+
+algorithm: ipc    # 'ipc' or 'bp'
+
+data:
+  delta_degrees: 5
+  ordering: streaming   # 'streaming' or 'shuffled' (shuffled only for bp baseline)
+
+model:
+  num_layers: 3       # L (total layers: input + hidden + output)
+  hidden_dim: 256
+  activation: relu
+
+# iPC algorithm settings (only used when algorithm=ipc)
+ipc:
+  T: 1                  # inference steps per observation
+  alpha: 1e-3           # weight learning rate
+  gamma: 0.5            # inference (value node) learning rate
+  variant: streaming    # 'streaming', 'forward_init', 'ema'
+  ema_beta: 0.9         # only used when variant='ema'
+
+# Backprop optimizer (only used when algorithm=bp)
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+
+train:
+  total_steps: 100000
+  log_freq: 1000
+
+seed: null
+log_individual_seeds: false
