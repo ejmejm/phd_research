@@ -11,7 +11,7 @@ spec:
   direction: maximize
 
 plot_params:
-  metrics: [asymptotic_accuracy]
+  metrics: [asymptotic_accuracy, asymptotic_energy]
 
 parameters:
   mlflow: true
@@ -31,10 +31,11 @@ parameters:
   train.log_freq: 1000
 
   ipc.alpha:
-    - 1e-4
-    - 5e-4
-    - 1e-3
-    - 5e-3
+    - "${eval:2**-10}"
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
 
   seed:
     type: atomic

@@ -11,7 +11,7 @@ spec:
   direction: maximize
 
 plot_params:
-  metrics: [asymptotic_accuracy]
+  metrics: [asymptotic_accuracy, asymptotic_loss]
 
 parameters:
   mlflow: true
@@ -30,10 +30,11 @@ parameters:
   train.log_freq: 1000
 
   optimizer.learning_rate:
-    - 1e-4
-    - 5e-4
-    - 1e-3
-    - 5e-3
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
+    - "${eval:2**0}"
 
   seed:
     type: atomic
