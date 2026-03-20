@@ -147,32 +147,55 @@ def process_run(
     return param_dict, metric_rows
 
 
-def main():
-    args = parse_args()
+def download_experiment(
+    experiment: str,
+    output_dir: str = None,
+    tracking_uri: str = None,
+    include_failed: bool = False,
+    include_running: bool = False,
+    include_seed_runs: bool = False,
+    n_threads: int = 8,
+    max_runs: int = None,
+    metrics: List[str] = None,
+):
+    """Download experiment data from MLflow and save as CSV.
+
+    Args:
+        experiment: MLflow experiment name.
+        output_dir: Output directory for CSV files (default: current directory).
+        tracking_uri: MLflow tracking URI (default: $MLFLOW_TRACKING_URI or sqlite:///mlruns.db).
+        include_failed: Include failed/crashed runs.
+        include_running: Include currently running runs.
+        include_seed_runs: Include per-seed child runs.
+        n_threads: Number of threads for parallel metric history download.
+        max_runs: Maximum number of runs to process.
+        metrics: Specific metrics to download (default: all available).
+    """
+    import os
 
     import mlflow
     from mlflow.tracking import MlflowClient
 
-    tracking_uri = get_tracking_uri(args)
+    if tracking_uri is None:
+        tracking_uri = os.environ.get('MLFLOW_TRACKING_URI', 'sqlite:///mlruns.db')
     mlflow.set_tracking_uri(tracking_uri)
     client = MlflowClient()
 
     logger.info(f"Tracking URI: {tracking_uri}")
 
     # Find experiment
-    experiment = client.get_experiment_by_name(args.experiment)
-    if experiment is None:
-        logger.error(f"Experiment '{args.experiment}' not found")
+    exp = client.get_experiment_by_name(experiment)
+    if exp is None:
+        logger.error(f"Experiment '{experiment}' not found")
         return
-    experiment_id = experiment.experiment_id
-    logger.info(f"Found experiment '{args.experiment}' (id={experiment_id})")
+    experiment_id = exp.experiment_id
+    logger.info(f"Found experiment '{experiment}' (id={experiment_id})")
 
     # Query runs
-    filter_parts = []
     status_filters = ["attributes.status = 'FINISHED'"]
-    if args.include_failed:
+    if include_failed:
         status_filters.append("attributes.status = 'FAILED'")
-    if args.include_running:
+    if include_running:
         status_filters.append("attributes.status = 'RUNNING'")
 
     # MLflow search_runs doesn't support OR on status, so we query multiple times
@@ -191,7 +214,7 @@ def main():
 
     # Filter out per-seed child runs (created by init_child_runs, named 'seed_*')
     # unless explicitly requested
-    if not args.include_seed_runs:
+    if not include_seed_runs:
         all_runs = [
             r for r in all_runs
             if not (
@@ -202,8 +225,8 @@ def main():
 
     logger.info(f"Found {len(all_runs)} runs")
 
-    if args.max_runs is not None:
-        all_runs = all_runs[:args.max_runs]
+    if max_runs is not None:
+        all_runs = all_runs[:max_runs]
         logger.info(f"Limited to {len(all_runs)} runs")
 
     if len(all_runs) == 0:
@@ -212,8 +235,8 @@ def main():
 
     # Discover metrics
     run_ids = [r.info.run_id for r in all_runs]
-    if args.metrics:
-        metric_names = args.metrics
+    if metrics:
+        metric_names = metrics
     else:
         metric_names = sorted(discover_metrics(client, run_ids))
     logger.info(f"Metrics to download: {metric_names}")
@@ -222,7 +245,7 @@ def main():
     all_param_rows = []
     all_metric_rows = []
 
-    with ThreadPoolExecutor(max_workers=args.n_threads) as executor:
+    with ThreadPoolExecutor(max_workers=n_threads) as executor:
         future_to_run = {
             executor.submit(process_run, client, run, metric_names): run
             for run in all_runs
@@ -240,12 +263,12 @@ def main():
                 logger.warning(f"Failed to process run {run.info.run_id}: {e}")
 
     # Save CSVs
-    output_dir = Path(args.output_dir) if args.output_dir else Path.cwd()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    out = Path(output_dir) if output_dir else Path.cwd()
+    out.mkdir(parents=True, exist_ok=True)
 
-    experiment_name = args.experiment.replace(' ', '_').replace('-', '_')
-    params_file = output_dir / f"{experiment_name}_params.csv"
-    metrics_file = output_dir / f"{experiment_name}_metrics.csv"
+    experiment_name = experiment.replace(' ', '_').replace('-', '_')
+    params_file = out / f"{experiment_name}_params.csv"
+    metrics_file = out / f"{experiment_name}_metrics.csv"
 
     if all_param_rows:
         params_df = pd.DataFrame(all_param_rows)
@@ -272,6 +295,21 @@ def main():
         logger.warning("No metric data to save")
 
     logger.info(f"{len(all_param_rows)}/{len(all_runs)} runs saved successfully")
+
+
+def main():
+    args = parse_args()
+    download_experiment(
+        experiment=args.experiment,
+        output_dir=args.output_dir,
+        tracking_uri=get_tracking_uri(args),
+        include_failed=args.include_failed,
+        include_running=args.include_running,
+        include_seed_runs=args.include_seed_runs,
+        n_threads=args.n_threads,
+        max_runs=args.max_runs,
+        metrics=args.metrics,
+    )
 
 
 if __name__ == '__main__':
