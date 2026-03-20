@@ -145,18 +145,21 @@ def get_experiment_data(
         experiment: comet_ml.api.APIExperiment,
         metric_names: List[str],
         param_names: List[str],
-        args: argparse.Namespace,
         index_metric: Optional[str] = None,
+        include_crashed: bool = False,
+        include_running: bool = False,
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Convert a CometML experiment into a dictionary of paramters and a list of metric rows.
-    
+
     Args:
         experiment: CometML experiment object.
         metric_names: List of metric names to include.
         param_names: List of parameter names to include.
         index_metric: Optional metric to use as the index of the CSV file.
+        include_crashed: Include experiments that crashed.
+        include_running: Include experiments that are still running.
     """
-    if filter_experiment(experiment, args):
+    if filter_experiment(experiment, include_crashed=include_crashed, include_running=include_running):
         return {}, []
     
     all_metrics = experiment.get_metrics()
@@ -200,24 +203,26 @@ def get_experiment_data(
 
 def filter_experiment(
         experiment: comet_ml.api.APIExperiment,
-        args: argparse.Namespace,
+        include_crashed: bool = False,
+        include_running: bool = False,
     ) -> bool:
     """Determine if an experiment should be filtered based on its state.
-    
+
     Args:
         experiment: CometML experiment object.
-        args: Command line arguments.
-        
+        include_crashed: Include experiments that crashed.
+        include_running: Include experiments that are still running.
+
     Returns:
         True if experiment should be filtered, False if it should be included.
     """
     state = experiment.get_state()
-    
+
     if state == 'finished':
         return False
-    elif state == 'crashed' and args.include_crashed:
+    elif state == 'crashed' and include_crashed:
         return False
-    elif state == 'running' and args.include_running:
+    elif state == 'running' and include_running:
         return False
     else:
         logger.warning(f"Experiment {experiment.id} has unknown state {state}, skipping...")
@@ -228,21 +233,30 @@ def process_single_experiment(
         experiment: comet_ml.api.APIExperiment,
         metrics: List[str],
         params: List[str],
-        args: argparse.Namespace,
+        index_metric: Optional[str] = None,
+        include_crashed: bool = False,
+        include_running: bool = False,
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Process a single experiment and return its data.
-    
+
     Args:
         experiment: CometML experiment object.
         metrics: List of metric names to include.
         params: List of parameter names to include.
-        args: Command line arguments.
-        
+        index_metric: Optional metric to use as the index.
+        include_crashed: Include experiments that crashed.
+        include_running: Include experiments that are still running.
+
     Returns:
         Tuple of (param_dict, metric_rows) or ({}, []) if experiment should be filtered.
     """
     try:
-        return get_experiment_data(experiment, metrics, params, args, index_metric=args.index_metric)
+        return get_experiment_data(
+            experiment, metrics, params,
+            index_metric=index_metric,
+            include_crashed=include_crashed,
+            include_running=include_running,
+        )
     except Exception as e:
         logger.warning(f"Failed to process experiment {experiment.id}: {e}")
         return {}, []
@@ -315,112 +329,141 @@ def save_batch_data(
     return next_param_index, next_metric_index
 
 
-def main():
-    args = parse_args()
+def run(
+    project: str,
+    workspace: Optional[str] = None,
+    history_vars: Optional[List[str]] = None,
+    params: Optional[List[str]] = None,
+    max_experiments: Optional[int] = None,
+    output_dir: Optional[str] = None,
+    index_metric: Optional[str] = None,
+    include_crashed: bool = False,
+    include_running: bool = False,
+    n_threads: int = 8,
+    save_batch_size: int = 300,
+):
+    """Download experiment data from CometML and save as CSV.
 
+    Args:
+        project: CometML project name.
+        workspace: CometML workspace name (default: your default workspace).
+        history_vars: Specific metrics to download (default: all available).
+        params: Specific parameters to download (default: all available).
+        max_experiments: Maximum number of experiments to process.
+        output_dir: Output directory for CSV files (default: current directory).
+        index_metric: Metric to use as the CSV index (default: Comet's step index).
+        include_crashed: Include experiments that crashed.
+        include_running: Include experiments that are still running.
+        n_threads: Number of threads for parallel processing.
+        save_batch_size: Number of experiments per batch before saving to disk.
+    """
     api = API()
     api.use_cache(False)
-    
-    if args.workspace is None:
-        args.workspace = api.get_default_workspace()
+
+    if workspace is None:
+        workspace = api.get_default_workspace()
 
     logger.info("Looking for experiments...")
-    experiments = api.get_experiments(args.workspace, args.project)
+    experiments = api.get_experiments(workspace, project)
     logger.info(f"Found {len(experiments)} experiments")
-    
-    if args.max_experiments is not None:
-        logger.info(f"Limiting to {args.max_experiments} experiments")
-        experiments = experiments[:args.max_experiments]
 
-    if not args.history_vars or not args.params:
+    if max_experiments is not None:
+        logger.info(f"Limiting to {max_experiments} experiments")
+        experiments = experiments[:max_experiments]
+
+    if not history_vars or not params:
         logger.info("Discovering available metrics and parameters...")
         all_metrics, all_params = discover_all_metrics_and_params(experiments)
-        
-    metrics = args.history_vars if args.history_vars is not None else all_metrics
-    params = args.params if args.params is not None else all_params
-    
+
+    metrics = history_vars if history_vars is not None else all_metrics
+    params_to_use = params if params is not None else all_params
+
     # Create consistent column ordering with run_id as first column
-    param_columns = ['run_id'] + sorted(list(params))  # run_id first, then sorted params
-    metric_columns = ['run_id'] + sorted(list(metrics))  # run_id first, then sorted metrics
-    
-    logger.info(f"\nParameters to collect: {params}")
+    param_columns = ['run_id'] + sorted(list(params_to_use))
+    metric_columns = ['run_id'] + sorted(list(metrics))
+
+    logger.info(f"\nParameters to collect: {params_to_use}")
     logger.info(f"\nMetrics to collect: {metrics}\n")
 
-    logger.info(f"Querying experiment data using {args.n_threads} threads...")
+    logger.info(f"Querying experiment data using {n_threads} threads...")
 
     all_param_rows = []
     all_metric_rows = []
     n_valid_runs = 0
-    batch_size = args.save_batch_size
     processed_count = 0
-    
+
     # Initialize continuous index tracking
     param_index = 0
     metric_index = 0
-    
+
     # Setup output directory and file paths
-    output_dir = Path(args.output_dir) if args.output_dir is not None else Path.cwd()
-    params_file = output_dir / f"{args.project}_params.csv"
-    metrics_file = output_dir / f"{args.project}_metrics.csv"
-    
+    out_dir = Path(output_dir) if output_dir is not None else Path.cwd()
+    params_file = out_dir / f"{project}_params.csv"
+    metrics_file = out_dir / f"{project}_metrics.csv"
+
     # Remove existing files to start fresh
     if params_file.exists():
         params_file.unlink()
     if metrics_file.exists():
         metrics_file.unlink()
-    
+
     # Process experiments in batches to control memory usage
-    for batch_start in range(0, len(experiments), batch_size):
-        batch_end = min(batch_start + batch_size, len(experiments))
+    for batch_start in range(0, len(experiments), save_batch_size):
+        batch_end = min(batch_start + save_batch_size, len(experiments))
         batch = experiments[batch_start:batch_end]
-        current_batch_num = batch_start // batch_size + 1
-        total_batches = (len(experiments) + batch_size - 1) // batch_size
-        
+        current_batch_num = batch_start // save_batch_size + 1
+        total_batches = (len(experiments) + save_batch_size - 1) // save_batch_size
+
         logger.info(f"Processing batch {current_batch_num}/{total_batches} ({len(batch)} experiments)")
-        
+
         # Process this batch in parallel
-        with ThreadPoolExecutor(max_workers=args.n_threads) as executor:
+        with ThreadPoolExecutor(max_workers=n_threads) as executor:
             # Submit all experiments in this batch
             future_to_experiment = {
-                executor.submit(process_single_experiment, experiment, metrics, params, args): experiment
+                executor.submit(
+                    process_single_experiment, experiment, metrics, params_to_use,
+                    index_metric=index_metric,
+                    include_crashed=include_crashed,
+                    include_running=include_running,
+                ): experiment
                 for experiment in batch
             }
-            
+
             # Process completed tasks in this batch
             for future in tqdm(as_completed(future_to_experiment), total=len(batch), desc=f"Batch {current_batch_num}"):
                 experiment = future_to_experiment[future]
                 try:
                     param_dict, metric_rows = future.result()
-                    
+
                     if len(metric_rows) > 0 and len(param_dict) > 0:
                         n_valid_runs += 1
                         all_metric_rows.extend(metric_rows)
                         all_param_rows.append(param_dict)
-                    
+
                     processed_count += 1
-                    
+
                 except Exception as e:
                     logger.warning(f"Failed to get result for experiment {experiment.id}: {e}")
                     processed_count += 1
-        
+
         # Save batch data and clear memory after each batch
         if len(all_param_rows) > 0 or len(all_metric_rows) > 0:
             param_index, metric_index = save_batch_data(
-                all_param_rows, 
-                all_metric_rows, 
-                params_file, 
+                all_param_rows,
+                all_metric_rows,
+                params_file,
                 metrics_file,
-                param_columns = param_columns,
-                metric_columns = metric_columns,
-                param_start_index = param_index,
-                metric_start_index = metric_index
+                param_columns=param_columns,
+                metric_columns=metric_columns,
+                param_start_index=param_index,
+                metric_start_index=metric_index
             )
             all_param_rows.clear()
             all_metric_rows.clear()
             logger.info(f"Saved and cleared batch {current_batch_num} data after processing {processed_count} experiments")
 
     logger.info(f"{n_valid_runs}/{len(experiments)} runs saved.")
-    
+
     # Count total metric rows in the final file
     if metrics_file.exists():
         final_metrics_df = pd.read_csv(metrics_file)
@@ -429,5 +472,22 @@ def main():
         logger.info("0 metric rows saved.")
 
 
+def main():
+    args = parse_args()
+    run(
+        project=args.project,
+        workspace=args.workspace,
+        history_vars=args.history_vars,
+        params=args.params,
+        max_experiments=args.max_experiments,
+        output_dir=args.output_dir,
+        index_metric=args.index_metric,
+        include_crashed=args.include_crashed,
+        include_running=args.include_running,
+        n_threads=args.n_threads,
+        save_batch_size=args.save_batch_size,
+    )
+
+
 if __name__ == '__main__':
-        main()
+    main()
