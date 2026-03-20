@@ -22,10 +22,11 @@ model:
 # iPC algorithm settings (only used when algorithm=ipc)
 ipc:
   T: 1                       # inference steps per observation
-  alpha: 1e-3                # weight learning rate
+  alpha: 1e-3                # weight learning rate (also used as LR for ipc optimizer)
   gamma: 0.5                 # inference (value node) learning rate
   variant: streaming         # 'streaming', 'forward_init', 'ema'
   ema_beta: 0.9
+  optimizer: none            # 'none' for raw Hebbian SGD, 'adam' for Adam on local gradients
 
 # Backprop optimizer (only used when algorithm=bp or linear_bp)
 optimizer:

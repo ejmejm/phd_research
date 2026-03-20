@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from jaxtyping import PRNGKeyArray
 import numpy as np
 from omegaconf import DictConfig
+import optax
 from tqdm import tqdm
 
 from phd.jax_core.models import MLP, ACTIVATION_MAP
@@ -48,7 +49,7 @@ from phd.sandbox.predictive_coding.value_function import (
     evaluate_msve_numpy,
 )
 from phd.sandbox.predictive_coding.models import (
-    PCNetwork, init_pc_network, pc_forward_pass, ipc_step,
+    PCNetwork, init_pc_network, pc_forward_pass, ipc_step, ipc_step_grads,
 )
 
 
@@ -85,6 +86,7 @@ class PCTrainState(eqx.Module):
     value_nodes: list     # persistent across observations
     step: jax.Array
     rng: PRNGKeyArray
+    opt_state: list       # per-layer optax optimizer states (empty list if not using optimizer)
 
 
 def _read_value_prediction(network, value_nodes):
@@ -168,6 +170,79 @@ def td_ipc_step(state, observation, *, T, gamma_inf, alpha, gamma_td, variant, e
     return new_state, metrics
 
 
+def td_ipc_optim_step(state, observation, *, T, gamma_inf, gamma_td, variant, ema_beta, optimizer):
+    """One TD(0) step for iPC with an optax optimizer for weight updates.
+
+    Same as td_ipc_step but uses an optimizer (e.g. Adam) instead of raw
+    alpha * gradient. The learning rate is controlled by the optimizer, not alpha.
+    """
+    s_t, s_next, reward, is_barrier_crossing = observation
+
+    network = state.network
+    value_nodes = state.value_nodes
+    opt_state = state.opt_state
+
+    # 1. Online prediction V_hat(s_t) BEFORE update
+    v_pred = _read_value_prediction(network, value_nodes)
+
+    # 2. Compute V_hat(s') via forward pass (method a)
+    v_next = _forward_pass_value(network, s_next)
+
+    # 3. TD target
+    td_target = reward + gamma_td * jax.lax.stop_gradient(v_next)
+    y_target = jnp.array([td_target])
+
+    # 4. Variant-specific value node handling
+    if variant == 'forward_init':
+        value_nodes = pc_forward_pass(network, s_t)
+    elif variant == 'ema':
+        fwd_nodes = pc_forward_pass(network, s_t)
+        value_nodes = [
+            ema_beta * vn + (1.0 - ema_beta) * fn
+            for vn, fn in zip(value_nodes, fwd_nodes)
+        ]
+
+    # 5. Run T iPC steps: update value nodes and collect weight gradients
+    info = None
+    for _t in range(T):
+        value_nodes, weight_grads, info = ipc_step_grads(
+            network, value_nodes, s_t, y_target, gamma_inf,
+        )
+
+    # 6. Apply weight updates via optimizer
+    new_weights = []
+    new_opt_state = []
+    for l in range(network.num_layers):
+        updates, new_state_l = optimizer.update(weight_grads[l], opt_state[l], network.weights[l])
+        new_weights.append(network.weights[l] + updates)
+        new_opt_state.append(new_state_l)
+
+    new_network = PCNetwork(
+        layer_dims=network.layer_dims,
+        num_layers=network.num_layers,
+        activation_name=network.activation_name,
+        weights=new_weights,
+    )
+
+    td_error_sq = jnp.square(reward + gamma_td * jax.lax.stop_gradient(v_next) - v_pred)
+
+    metrics = TDiPCStepMetrics(
+        td_error_sq=td_error_sq,
+        total_energy=info['total_energy'],
+        v_prediction=v_pred,
+        barrier_crossing=is_barrier_crossing,
+    )
+
+    new_state = tree_replace(
+        state,
+        network=new_network,
+        value_nodes=value_nodes,
+        opt_state=new_opt_state,
+        step=state.step + 1,
+    )
+    return new_state, metrics
+
+
 # ---------------------------------------------------------------------------
 # BP baseline Train State and TD step
 # ---------------------------------------------------------------------------
@@ -222,6 +297,20 @@ def _build_grid_world(cfg) -> GridWorld:
     )
 
 
+def _build_ipc_optimizer(cfg):
+    """Build optax optimizer for iPC weight updates, or None for raw SGD."""
+    opt_name = cfg.ipc.get('optimizer', 'none')
+    if opt_name == 'none':
+        return None
+    lr = cfg.ipc.alpha
+    if opt_name == 'adam':
+        return optax.adam(lr)
+    elif opt_name == 'sgd':
+        return optax.sgd(lr)
+    else:
+        raise ValueError(f"Unknown iPC optimizer: {opt_name}")
+
+
 def prepare_ipc_experiment(cfg):
     """Create per-seed PCTrainState objects."""
     seeds = cfg.seed
@@ -233,6 +322,8 @@ def prepare_ipc_experiment(cfg):
         + [cfg.model.hidden_dim] * n_hidden
         + [INPUT_DIM]
     )
+
+    optimizer = _build_ipc_optimizer(cfg)
 
     train_states = []
     for seed in seeds:
@@ -248,15 +339,23 @@ def prepare_ipc_experiment(cfg):
         L = network.num_layers
         value_nodes = [jnp.zeros(layer_dims[l]) for l in range(1, L)]
 
+        # Initialize per-layer optimizer states
+        if optimizer is not None:
+            opt_state = [optimizer.init(w) for w in network.weights]
+        else:
+            opt_state = []
+
         train_states.append(PCTrainState(
             network=network,
             value_nodes=value_nodes,
             step=jnp.array(0),
             rng=rng_from_string(rng, 'train'),
+            opt_state=opt_state,
         ))
 
     n_params = sum(w.size for w in train_states[0].network.weights)
-    print(f'PCNetwork: layers={layer_dims}, params={n_params}, seeds={seeds}')
+    opt_label = cfg.ipc.get('optimizer', 'none')
+    print(f'PCNetwork: layers={layer_dims}, params={n_params}, optimizer={opt_label}, seeds={seeds}')
 
     batched_state = stack_pytrees(train_states)
     return batched_state, n_params
@@ -351,13 +450,24 @@ def run_ipc_experiment(cfg, train_state, grid_world, eval_grid_np, v_star_interp
     variant = cfg.ipc.variant
     ema_beta = cfg.ipc.ema_beta
     n_seeds = len(cfg.seed)
+    use_optimizer = cfg.ipc.get('optimizer', 'none') != 'none'
 
-    def _step(state, observation):
-        return td_ipc_step(
-            state, observation,
-            T=T, gamma_inf=gamma_inf, alpha=alpha,
-            gamma_td=gamma_td, variant=variant, ema_beta=ema_beta,
-        )
+    if use_optimizer:
+        optimizer = _build_ipc_optimizer(cfg)
+        def _step(state, observation):
+            return td_ipc_optim_step(
+                state, observation,
+                T=T, gamma_inf=gamma_inf,
+                gamma_td=gamma_td, variant=variant, ema_beta=ema_beta,
+                optimizer=optimizer,
+            )
+    else:
+        def _step(state, observation):
+            return td_ipc_step(
+                state, observation,
+                T=T, gamma_inf=gamma_inf, alpha=alpha,
+                gamma_td=gamma_td, variant=variant, ema_beta=ema_beta,
+            )
 
     def scan_steps(state, data):
         return jax.lax.scan(_step, state, data, unroll=SCAN_UNROLL)

@@ -176,3 +176,58 @@ def ipc_step(
     }
 
     return new_network, new_value_nodes, info
+
+
+def ipc_step_grads(
+    network: PCNetwork,
+    value_nodes: list,
+    x_input: jnp.ndarray,
+    y_target: jnp.ndarray,
+    gamma: float,
+) -> Tuple[list, list, dict]:
+    """Compute iPC value node updates and weight gradients without applying them.
+
+    Same as ipc_step but returns the weight gradients (local Hebbian outer
+    products) instead of applying them directly. This allows the caller to
+    pass gradients through an optimizer (e.g. Adam) before applying.
+
+    Returns:
+        (updated_value_nodes, weight_grads, info_dict)
+        where weight_grads[l] has shape (dim[l], dim[l+1]).
+    """
+    f = ACTIVATION_MAP[network.activation_name]
+    f_prime = ACTIVATION_DERIV_MAP[network.activation_name]
+    L = network.num_layers
+
+    all_x = [y_target] + list(value_nodes) + [x_input]
+
+    predictions = []
+    errors = []
+    for l in range(L):
+        mu_l = network.weights[l] @ f(all_x[l + 1])
+        predictions.append(mu_l)
+        errors.append(all_x[l] - mu_l)
+
+    # Update hidden value nodes (layers 1 to L-1)
+    new_value_nodes = []
+    for l in range(1, L):
+        top_down = -errors[l]
+        bottom_up = f_prime(all_x[l]) * (network.weights[l - 1].T @ errors[l - 1])
+        x_new = all_x[l] + gamma * (top_down + bottom_up)
+        new_value_nodes.append(x_new)
+
+    # Compute weight gradients (negative because optax minimizes)
+    weight_grads = []
+    for l in range(L):
+        grad_l = -jnp.outer(errors[l], f(all_x[l + 1]))
+        weight_grads.append(grad_l)
+
+    layer_errors = jnp.array([jnp.sum(e ** 2) for e in errors])
+    total_energy = jnp.sum(layer_errors)
+
+    info = {
+        'total_energy': total_energy,
+        'layer_errors': layer_errors,
+    }
+
+    return new_value_nodes, weight_grads, info
