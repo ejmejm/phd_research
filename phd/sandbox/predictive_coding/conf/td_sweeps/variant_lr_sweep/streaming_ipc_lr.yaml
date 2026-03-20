@@ -23,7 +23,7 @@ parameters:
   ipc.gamma: 0.5
 
   model.num_layers: 3
-  model.hidden_dim: 64
+  model.hidden_dim: 128
   model.activation: tanh
   env.sigma: 0.03
 
@@ -32,12 +32,11 @@ parameters:
   train.eval_freq: 5000
 
   ipc.alpha:
+    - "${eval:2**-18}"
+    - "${eval:2**-16}"
     - "${eval:2**-14}"
     - "${eval:2**-12}"
     - "${eval:2**-10}"
-    - "${eval:2**-8}"
-    - "${eval:2**-6}"
-    - "${eval:2**-4}"
 
   seed:
     type: atomic

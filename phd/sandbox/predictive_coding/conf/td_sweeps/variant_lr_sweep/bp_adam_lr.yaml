@@ -21,7 +21,7 @@ parameters:
   optimizer.name: adam
 
   model.num_layers: 3
-  model.hidden_dim: 64
+  model.hidden_dim: 128
   model.activation: tanh
   env.sigma: 0.03
 

@@ -27,11 +27,11 @@ parameters:
   train.eval_freq: 5000
 
   optimizer.learning_rate:
+    - "${eval:2**-18}"
+    - "${eval:2**-16}"
     - "${eval:2**-14}"
     - "${eval:2**-12}"
     - "${eval:2**-10}"
-    - "${eval:2**-8}"
-    - "${eval:2**-6}"
 
   seed:
     type: atomic
