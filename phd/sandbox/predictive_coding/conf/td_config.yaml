@@ -1,0 +1,42 @@
+project: td-value-prediction
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+wandb: false
+mlflow: false
+comet_ml: false
+
+algorithm: ipc    # 'ipc', 'bp', 'linear_bp'
+
+env:
+  sigma: 0.03                # Gaussian step size
+  gamma_td: 0.95             # TD discount factor
+  v_star_resolution: 100     # Grid resolution for V* computation
+  v_star_samples: 500        # Samples per cell for transition matrix
+
+model:
+  num_layers: 3              # Total layers including input + output (2->64->64->1)
+  hidden_dim: 64
+  activation: tanh
+
+# iPC algorithm settings (only used when algorithm=ipc)
+ipc:
+  T: 1                       # inference steps per observation
+  alpha: 1e-3                # weight learning rate
+  gamma: 0.5                 # inference (value node) learning rate
+  variant: streaming         # 'streaming', 'forward_init', 'ema'
+  ema_beta: 0.9
+
+# Backprop optimizer (only used when algorithm=bp or linear_bp)
+optimizer:
+  name: adam
+  learning_rate: 1e-3
+
+train:
+  total_steps: 500000
+  log_freq: 1000
+  eval_freq: 5000            # MSVE evaluation frequency
+  eval_resolution: 50        # Grid resolution for MSVE evaluation
+
+seed: null
+log_individual_seeds: false
