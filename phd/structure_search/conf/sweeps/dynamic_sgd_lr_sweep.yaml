@@ -1,0 +1,26 @@
+experiment: structure-search-sweeps
+sweep_name: dynamic_cm_sgd_lr_sweep
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py --config-name=dynamic_cm_sgd
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+
+parameters:
+  optimizer.learning_rate:
+    - "${eval:2**-17}"
+    - "${eval:2**-15}"
+    - "${eval:2**-13}"
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3]
