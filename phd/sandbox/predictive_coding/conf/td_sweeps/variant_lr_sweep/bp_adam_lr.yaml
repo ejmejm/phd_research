@@ -1,0 +1,41 @@
+experiment: td-value-prediction
+sweep_name: td_bp_adam_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python -m phd.sandbox.predictive_coding.td_train
+algorithm: grid
+
+spec:
+  metric: asymptotic_msve
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_msve, asymptotic_td_error]
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  algorithm: bp
+  optimizer.name: adam
+
+  model.num_layers: 3
+  model.hidden_dim: 64
+  model.activation: tanh
+  env.sigma: 0.03
+
+  train.total_steps: 500000
+  train.log_freq: 1000
+  train.eval_freq: 5000
+
+  optimizer.learning_rate:
+    - "${eval:2**-14}"
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3, 4, 5]
