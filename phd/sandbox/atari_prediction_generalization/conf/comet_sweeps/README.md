@@ -11,21 +11,23 @@ Both sweeps run 5 seeds per configuration.
 
 ## Sweep Runs
 
-| Config | Sweep ID | Trials | Steps/sec | Hrs/trial | Total hrs | Job time | Num jobs |
-|--------|----------|--------|-----------|-----------|-----------|----------|----------|
-| adam_sweep | `8423804ddfea419ba4493368f956a131` | 20 | 450 | 1.6 | 32 | 12h | 4 |
-| upgd_sweep | `c7e7880df0ed45c58c8788a67163d260` | 600 | 450 | 1.6 | 960 | 12h | 112 |
+| Config | Sweep ID | Trials | Hrs/trial | Total hrs | Job time | Num jobs |
+|--------|----------|--------|-----------|-----------|----------|----------|
+| adam_sweep | `050debd5683b45509e97e08ebf81ee42` | 20 | ~2.5 | 50 | 12h | 5 |
+| upgd_sweep | `f9ee8fdda7fd4cedbe32a3dcf2b81656` | 600 | ~2.5 | 1500 | 12h | 150 |
+
+Each 12h agent completes ~4 trials on average (reinit=True is slower due to JIT warm-up).
 
 ```bash
 # adam_sweep
-sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
-  --cpus-per-task=1 --mem=8G --time=12:00:00 \
-  launch_comet_agent.sbatch -s 8423804ddfea419ba4493368f956a131 \
+sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+  --cpus-per-task=2 --mem=16G --time=12:00:00 \
+  launch_comet_agent.sbatch -s 050debd5683b45509e97e08ebf81ee42 \
   -p $HOME/scratch/phd_research/phd/sandbox/atari_prediction_generalization
 
 # upgd_sweep
-sbatch --array=1-112%56 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
-  --cpus-per-task=1 --mem=8G --time=12:00:00 \
-  launch_comet_agent.sbatch -s c7e7880df0ed45c58c8788a67163d260 \
+sbatch --array=1-150%56 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+  --cpus-per-task=2 --mem=16G --time=12:00:00 \
+  launch_comet_agent.sbatch -s f9ee8fdda7fd4cedbe32a3dcf2b81656 \
   -p $HOME/scratch/phd_research/phd/sandbox/atari_prediction_generalization
 ```
