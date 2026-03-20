@@ -1,0 +1,48 @@
+experiment: td-value-prediction
+sweep_name: td_streaming_depth
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python -m phd.sandbox.predictive_coding.td_train
+algorithm: grid
+
+spec:
+  metric: asymptotic_msve
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_msve, asymptotic_td_error]
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  algorithm: ipc
+  ipc.variant: streaming
+  ipc.T: 1
+  ipc.gamma: 0.5
+
+  model.hidden_dim: 128
+  model.activation: tanh
+  env.sigma: 0.03
+
+  train.total_steps: 500000
+  train.log_freq: 1000
+  train.eval_freq: 5000
+
+  model.num_layers:
+    - 3
+    - 4
+    - 5
+    - 6
+
+  ipc.alpha:
+    - "${eval:2**-18}"
+    - "${eval:2**-16}"
+    - "${eval:2**-14}"
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3, 4, 5]
