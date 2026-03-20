@@ -26,6 +26,7 @@ model:
   max_connections_per_unit: null   # defaults to input_dim
   max_fan_out: null                # defaults to max_units_per_layer
   connect_all_to_output: false    # if true, all hidden units connect to output
+  freeze_hidden_weights: false    # if true, only output_weights are trainable
 
 # Optimizer
 optimizer:
@@ -45,6 +46,7 @@ structure_tracker:
   decay_rate: 0.99           # EMA decay for utility tracking
   maturity_threshold: 100    # min steps before a unit can be pruned (-1 to disable)
   prune_frequency: 100       # restructure every N steps
+  generate_strategy: random  # 'random' or 'full_input'
 
 # Training
 train:

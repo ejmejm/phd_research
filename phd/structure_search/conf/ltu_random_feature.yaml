@@ -1,0 +1,33 @@
+defaults:
+  - config
+
+# LTU random feature network with ConnectivityManager
+# Single hidden layer, frozen ±1 input weights, trainable output weights only
+# Starts empty (hidden_dim=0), grows via full_input generation
+
+model:
+  type: dynamic
+  n_layers: 1
+  hidden_dim: 0                          # Start empty
+  max_units_per_layer: 1000
+  activation: ltu
+  connect_all_to_output: true
+  max_fan_out: 1000                      # Each input fans out to up to 1000 units
+  freeze_hidden_weights: true
+
+optimizer:
+  name: sgd
+  learning_rate: 0.001
+
+structure_tracker:
+  enabled: true
+  prune_rate: 0.005
+  connection_budget: 3082000             # (3072 + 10) * 1000
+  decay_rate: 0.999
+  maturity_threshold: 0
+  prune_frequency: 20
+  generate_strategy: full_input
+
+seed: [1, 2, 3]
+mlflow: true
+log_individual_seeds: false

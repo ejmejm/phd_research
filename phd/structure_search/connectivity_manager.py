@@ -283,6 +283,145 @@ def random_generate(
     return model, unit_stats, new_budget, gen_mask_2d
 
 
+def full_input_generate(
+    model: DynamicNetwork,
+    unit_stats: 'UnitStats',
+    budget: Float[Array, ''],
+    max_new_units: int,
+    init_utility: Float[Array, ''],
+    rng: PRNGKeyArray,
+) -> Tuple[DynamicNetwork, 'UnitStats', Float[Array, ''], Bool[Array, 'max_layers max_units_per_layer']]:
+    """Generate new units fully connected to all inputs with ±1 weights.
+
+    Every generated unit connects to ALL input_dim inputs with random ±1
+    weights and to ALL outputs with weight 0. Fixed cost per unit =
+    input_dim + output_dim.
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    input_dim = model.input_dim
+    buffer_size = model.buffer_size
+    output_dim = model.output_dim
+
+    cost_per_unit = input_dim + output_dim
+    n_total_slots = max_layers * max_units
+    max_new_units = min(max_new_units, n_total_slots)
+
+    rng, slot_rng, weight_rng = jax.random.split(rng, 3)
+
+    # --- Find and shuffle inactive slots (same pattern as random_generate) ---
+    inactive = (model.unit_mask == 0)  # (max_layers, max_units)
+    inactive_flat = inactive.reshape(-1)
+
+    noise = jax.random.uniform(slot_rng, (n_total_slots,))
+    sort_key = jnp.where(inactive_flat, noise, 2.0)
+    perm = jnp.argsort(sort_key)
+    cand_flat_idx = perm[:max_new_units]
+    cand_layers = cand_flat_idx // max_units
+    cand_units = cand_flat_idx % max_units
+    cand_valid = inactive_flat[cand_flat_idx]
+
+    # --- Determine how many units fit in budget ---
+    n_affordable = jnp.floor(budget / cost_per_unit).astype(jnp.int32)
+    # Use cumulative count of valid candidates vs budget
+    cumulative_valid = jnp.cumsum(cand_valid.astype(jnp.int32))
+    gen_mask = cand_valid & (cumulative_valid <= n_affordable)
+
+    # --- Build input_indices: all inputs [0, 1, ..., input_dim-1] padded to max_conns ---
+    full_indices = jnp.full(max_conns, -1, dtype=jnp.int32)
+    full_indices = full_indices.at[:input_dim].set(jnp.arange(input_dim, dtype=jnp.int32))
+
+    # --- ±1 weights ---
+    weight_keys = jax.random.split(weight_rng, max_new_units)
+    def _sample_binary_weights(key):
+        return 2.0 * jax.random.bernoulli(key, 0.5, (max_conns,)).astype(jnp.float32) - 1.0
+    all_weights = jax.vmap(_sample_binary_weights)(weight_keys)  # (max_new_units, max_conns)
+    # Zero out padding positions beyond input_dim
+    conn_mask = (jnp.arange(max_conns) < input_dim).astype(jnp.float32)
+    all_weights = all_weights * conn_mask[None, :]
+
+    # --- Apply changes via scatter (same pattern as random_generate) ---
+    # Input indices
+    old_indices = model.input_indices[cand_layers, cand_units]
+    new_input_indices_vals = jnp.where(gen_mask[:, None], full_indices[None, :], old_indices)
+    new_input_indices = model.input_indices.at[cand_layers, cand_units].set(
+        new_input_indices_vals
+    )
+
+    # Weights
+    old_weights = model.weights[cand_layers, cand_units]
+    new_weights_vals = jnp.where(gen_mask[:, None], all_weights, old_weights)
+    new_weights = model.weights.at[cand_layers, cand_units].set(new_weights_vals)
+
+    # Unit mask
+    old_umask = model.unit_mask[cand_layers, cand_units]
+    new_umask_vals = jnp.where(gen_mask, 1, old_umask).astype(jnp.int32)
+    new_unit_mask = model.unit_mask.at[cand_layers, cand_units].set(new_umask_vals)
+
+    # Activation indices (0 = first activation in tuple, e.g. ltu)
+    old_act = model.activation_indices[cand_layers, cand_units]
+    new_act_vals = jnp.where(gen_mask, 0, old_act).astype(jnp.int32)
+    new_activation_indices = model.activation_indices.at[cand_layers, cand_units].set(
+        new_act_vals
+    )
+
+    # Output connections
+    cand_buf_pos = (
+        input_dim + cand_layers * max_units + cand_units
+    )
+    gen_buf_mask = jnp.zeros(buffer_size, dtype=jnp.bool_)
+    gen_buf_mask = gen_buf_mask.at[cand_buf_pos].set(gen_mask)
+    new_output_mask = jnp.where(
+        gen_buf_mask[None, :],
+        jnp.ones_like(model.output_mask),
+        model.output_mask,
+    )
+    new_output_weights = jnp.where(
+        gen_buf_mask[None, :].astype(jnp.float32),
+        0.0,
+        model.output_weights,
+    )
+
+    model = eqx.tree_at(
+        lambda m: (
+            m.input_indices, m.weights, m.unit_mask,
+            m.activation_indices, m.output_mask, m.output_weights,
+        ),
+        model,
+        (
+            new_input_indices, new_weights, new_unit_mask,
+            new_activation_indices, new_output_mask, new_output_weights,
+        ),
+    )
+
+    # Update unit stats for generated units
+    old_utility = unit_stats.utility[cand_layers, cand_units]
+    new_util_vals = jnp.where(gen_mask, init_utility, old_utility)
+    new_utility = unit_stats.utility.at[cand_layers, cand_units].set(new_util_vals)
+
+    old_age = unit_stats.age[cand_layers, cand_units]
+    new_age_vals = jnp.where(gen_mask, 0, old_age).astype(jnp.int32)
+    new_age = unit_stats.age.at[cand_layers, cand_units].set(new_age_vals)
+
+    unit_stats = UnitStats(
+        age=new_age,
+        utility=new_utility,
+        accumulator=unit_stats.accumulator,
+    )
+
+    # Deduct spent connections
+    n_generated = jnp.sum(gen_mask.astype(jnp.int32))
+    spent = (n_generated * cost_per_unit).astype(jnp.float32)
+    new_budget = budget - spent
+
+    # Build 2D affected mask for optimizer reset
+    gen_mask_2d = jnp.zeros((max_layers, max_units), dtype=jnp.bool_)
+    gen_mask_2d = gen_mask_2d.at[cand_layers, cand_units].set(gen_mask)
+
+    return model, unit_stats, new_budget, gen_mask_2d
+
+
 # ---------------------------------------------------------------------------
 # UnitStats and ConnectivityManager
 # ---------------------------------------------------------------------------

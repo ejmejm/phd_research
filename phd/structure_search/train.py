@@ -34,7 +34,7 @@ from phd.research_utils.logging import (
     finish_experiment,
 )
 from phd.structure_search.data import load_dataset, DataStream
-from phd.structure_search.connectivity_manager import ConnectivityManager
+from phd.structure_search.connectivity_manager import ConnectivityManager, full_input_generate
 from phd.structure_search.dynamic_network import (
     DynamicNetwork, sync_outgoing_weights, build_outgoing_indices,
     init_random_dynamic_network,
@@ -97,6 +97,12 @@ def _make_dynamic_filter_spec(model: DynamicNetwork):
     )
 
 
+def _make_output_only_filter_spec(model: DynamicNetwork):
+    """Build optimizer filter_spec for DynamicNetwork: only output_weights are trainable."""
+    spec = jax.tree.map(lambda _: False, model)
+    return eqx.tree_at(lambda n: n.output_weights, spec, True)
+
+
 def prepare_experiment(
     cfg: DictConfig,
 ) -> Tuple[TrainState, List[DataStream], int]:
@@ -136,7 +142,10 @@ def prepare_experiment(
                 connect_all_to_output=cfg.model.get('connect_all_to_output', False),
                 key=model_key,
             )
-            filter_spec = _make_dynamic_filter_spec(model)
+            if cfg.model.get('freeze_hidden_weights', False):
+                filter_spec = _make_output_only_filter_spec(model)
+            else:
+                filter_spec = _make_dynamic_filter_spec(model)
             optimizer = prepare_optimizer(
                 model, cfg.optimizer.name, cfg.optimizer,
                 filter_spec=filter_spec,
@@ -155,12 +164,15 @@ def prepare_experiment(
             optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
 
         if model_type == 'dynamic' and cfg.structure_tracker.get('enabled', False):
+            generate_strategy = cfg.structure_tracker.get('generate_strategy', 'random')
+            generate_fn = full_input_generate if generate_strategy == 'full_input' else None
             tracker = ConnectivityManager(
                 model=model,
                 prune_rate=cfg.structure_tracker.prune_rate,
                 connection_budget=cfg.structure_tracker.connection_budget,
                 decay_rate=cfg.structure_tracker.decay_rate,
                 maturity_threshold=cfg.structure_tracker.maturity_threshold,
+                generate_fn=generate_fn,
                 rng=rng_from_string(rng, 'tracker'),
             )
         else:
