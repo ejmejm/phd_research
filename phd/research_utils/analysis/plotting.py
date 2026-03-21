@@ -25,10 +25,15 @@ def plot_param_sensitivity(
         baseline_col: Optional[str] = None,
         pow_2_x_axis: bool = False,
         pow_2_legend: bool = False,
+        nan_policy: str = 'propagate', # {'propagate', 'omit'}
     ):
     if metric_type.lower() == 'cumulative':
+        if nan_policy == 'propagate':
+            sum_func = lambda x: x.sum(skipna=False)
+        else:
+            sum_func = 'sum'
         final_step_df = run_df.groupby(id_col).agg({
-            metric_col: 'sum',
+            metric_col: sum_func,
             **({baseline_col: 'sum'} if baseline_col is not None else {}),
             **{col: 'last' for col in run_df.columns if col not in [metric_col, baseline_col, id_col]}
         }).reset_index()
@@ -55,10 +60,14 @@ def plot_param_sensitivity(
         final_step_df = final_step_df[final_step_df[step_col] >= final_step_df['threshold_step']]
         
         # Calculate mean of metric columns while preserving other columns
-        agg_dict = {col: 'mean' if col in [metric_col, baseline_col] else 'last' 
-                   for col in final_step_df.columns 
+        if nan_policy == 'propagate':
+            mean_func = lambda x: x.mean(skipna=False)
+        else:
+            mean_func = 'mean'
+        agg_dict = {col: mean_func if col in [metric_col, baseline_col] else 'last'
+                   for col in final_step_df.columns
                    if col not in [id_col, 'threshold_step']}
-            
+
         final_step_df = final_step_df.groupby(id_col).agg(agg_dict).reset_index()
         
         # Merge with config data

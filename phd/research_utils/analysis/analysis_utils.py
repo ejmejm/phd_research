@@ -388,6 +388,7 @@ def get_best_ablation_values(
     metric_type: str = 'final_avg', # {'cumulative', 'final_avg'}
     step_col: str = 'step',
     split_dfs_by_split_vars: bool = False,
+    nan_policy: str = 'propagate', # {'propagate', 'omit'}
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, Dict[str, any]]]:
     """Get the best ablation values for each sweep.
     
@@ -407,6 +408,11 @@ def get_best_ablation_values(
                             combination with keys like 'sweep_name|var1=val1|var2=val2'.
                             If False, return one DataFrame per sweep containing all split
                             combinations (default behavior).
+        nan_policy: How to handle NaN metric values when computing the mean.
+                    'propagate' (default): any NaN in a group makes the group mean NaN,
+                    preventing diverged runs from being selected as best.
+                    'omit': ignore NaN values (previous behavior), computing the mean
+                    over only the non-NaN values.
     
     Returns:
         Tuple of (best_config_dfs, best_run_dfs, best_var_vals) dictionaries.
@@ -457,13 +463,19 @@ def get_best_ablation_values(
             raise ValueError(f"Invalid metric_type: {metric_type}. Must be 'cumulative' or 'final_avg'")
 
         # Calculate mean loss grouped by ablation vars and split vars
+        skipna = nan_policy == 'omit'
         groupby_cols = ablation_vars + split_vars
         if len(groupby_cols) == 0:
             # No groupby columns; every row is its own group
             mean_loss = run_df_filtered[[metric_col]].copy()
             mean_loss.index = pd.RangeIndex(len(mean_loss))
         else:
-            mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].mean()
+            if skipna:
+                mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].mean()
+            else:
+                mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].agg(
+                    lambda x: x.mean(skipna=False)
+                )
 
         report_str += f"\n=== {sweep_name} ===\n"
 
@@ -496,9 +508,10 @@ def get_best_ablation_values(
             # Get losses for this split combination
             split_losses = mean_loss[split_query]
 
-            # Skip this split if no runs are present for it
-            if split_losses.empty:
-                vals_str += f"  [WARNING] No runs for split combination in '{sweep_name}': {config_str.strip()} Skipping.\n"
+            # Skip this split if no runs are present or all losses are NaN
+            if split_losses.empty or split_losses.isna().all():
+                reason = "No runs" if split_losses.empty else "All runs have NaN metric"
+                vals_str += f"  [WARNING] {reason} for split combination in '{sweep_name}': {config_str.strip()} Skipping.\n"
                 report_str += vals_str
                 continue
 
