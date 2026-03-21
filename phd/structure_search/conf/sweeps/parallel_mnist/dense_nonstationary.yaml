@@ -1,0 +1,57 @@
+experiment: parallel-mnist
+sweep_name: parallel_mnist_dense_nonstationary_v2
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: average_loss
+  direction: minimize
+
+plot_params:
+  metrics: [average_loss, asymptotic_loss, asymptotic_accuracy]
+  split_by: [dataset.permute_period]
+  sensitivity:
+    params: [optimizer.learning_rate]
+
+# Use a parameter budget where both models converge to similar performance
+# in the stationary setting. Adjust after seeing stationary results.
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  dataset.name: parallel_mnist
+  dataset.n_tasks: 5
+
+  model.type: mlp
+  model.n_layers: 3
+  model.target_params: "${eval:2**19}"
+
+  train.loss: cross_entropy
+  train.total_steps: 500_000
+  train.log_freq: 2000
+  train.eval_freq: 0
+
+  dataset.permute_period:
+    - 2000
+    - 5000
+    - 10000
+    - 25000
+    - 50000
+
+  optimizer.name: adam
+
+  # Center around 2^-15 for dense
+  optimizer.learning_rate:
+    - "${eval:2**-17}"
+    - "${eval:2**-16}"
+    - "${eval:2**-15}"
+    - "${eval:2**-14}"
+    - "${eval:2**-13}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3]

@@ -1,0 +1,55 @@
+experiment: parallel-mnist
+sweep_name: parallel_mnist_block_sparse_stationary_v2
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_test_loss, asymptotic_test_accuracy, asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    hue: [optimizer.learning_rate]
+    params: [model.target_params]
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  dataset.name: parallel_mnist
+  dataset.n_tasks: 5
+  dataset.permute_period: 0
+
+  model.type: block_sparse
+  model.n_layers: 3
+
+  train.loss: cross_entropy
+  train.total_steps: 200_000
+  train.log_freq: 2000
+  train.eval_freq: 10000
+
+  model.target_params:
+    - "${eval:2**15}"
+    - "${eval:2**16}"
+    - "${eval:2**17}"
+    - "${eval:2**18}"
+    - "${eval:2**19}"
+    - "${eval:2**20}"
+
+  optimizer.name: adam
+
+  # Center around 2^-12 for block-sparse
+  optimizer.learning_rate:
+    - "${eval:2**-14}"
+    - "${eval:2**-13}"
+    - "${eval:2**-12}"
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3]
