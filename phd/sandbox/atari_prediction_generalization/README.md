@@ -2,6 +2,17 @@
 
 The goal of this project is to see if current continual learning algorithms (mainly UPGD) will generalize across Atari games. The way I will test this is by comparing the average reward of my proposed method to two baselines. The first baseline is a method with a network that resets for every game. A comparison with this will tell me if the knowledge from prior games is helping or not. The second baseline is a network with no resets trained with Adam. Comparing to this baseline will tell me if the continual learning additions are doing anything to help over the standard way of doing things.
 
+### Results
+
+**March 20, 2026**
+
+I am observing good generalization across Atari games! Avoiding network resets leads to improved performance when using UPGD, but this effect is not present when using Adam. Currently, these results are for predicting Monte-Carlo returns, which is still a significant finding.
+
+Next steps:
+- Focus on thoroughly reviewing and refining the experimental design and methodology.
+- Identify and narrow down key hyperparameters to sweep, so that future hyperparameter searches are more efficient.
+- Once the above is addressed, proceed to experiments involving learning a value function.
+
 ### TODO
 
 First I need to make some change to the [benchmark](https://github.com/ejmejm/ContinualAtariBenchmark):
@@ -24,11 +35,11 @@ Then I need to prepare sweeps. I want to compare the different methods with a go
 - [x] Write a sweep config for Adam, sweeping the step-size, and whether network resets are used
 - [x] Write a sweep config UPGD, sweeping all of the things that were swept in the original paper
 - [x] Test these experiments to see if they are efficient enough to run on my own computer
-- [ ] Setup a CC configuration for running these experiments?
-- [ ] Run the CC experiments?
+- [x] Setup a CC configuration for running these experiments
+- [x] Run the CC experiments
 
 This starts with just using supervised learning to predict precomputed returns, but if that works I will want to move onto trying to learn a value function:
-- [ ] Make sure rewards are clipped like they are for computing the returns
+- [x] Make sure rewards are clipped like they are for computing the returns
 - [ ] Start with one step TD for the error function
 - [ ] Consider using TD lambda for the error function
 
