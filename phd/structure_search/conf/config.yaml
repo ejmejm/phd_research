@@ -10,10 +10,13 @@ comet_ml: false
 # Dataset
 dataset:
   name: cifar10
+  n_tasks: 1           # number of parallel sub-tasks (only for parallel_mnist)
+  permute_period: 0    # steps between label permutations (0 = stationary)
 
 # Model
 model:
-  type: mlp  # 'mlp' or 'dynamic'
+  type: mlp  # 'mlp', 'dynamic', or 'block_sparse'
+  target_params: null  # if set, compute hidden_dim to match this parameter budget
   n_layers: 2
   hidden_dim: 128
   activation: relu
@@ -54,6 +57,7 @@ train:
   total_steps: 100_000
   log_freq: 1000
   loss: mse  # 'mse' or 'cross_entropy'
+  eval_freq: 0  # test evaluation every N steps (0 = disabled)
 
 # Seed: single int or list of ints for multi-seed
 seed: null

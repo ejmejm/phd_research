@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import os
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 # Resolve relative MLflow tracking URI to absolute before Hydra changes CWD
 _mlflow_uri = os.environ.get('MLFLOW_TRACKING_URI', '')
@@ -33,7 +33,10 @@ from phd.research_utils.logging import (
     finish_child_runs,
     finish_experiment,
 )
-from phd.structure_search.data import load_dataset, DataStream
+from phd.structure_search.block_sparse_mlp import (
+    BlockSparseMLP, compute_hidden_dim_for_params,
+)
+from phd.structure_search.data import load_dataset, DataStream, ParallelMNISTStream
 from phd.structure_search.connectivity_manager import ConnectivityManager, full_input_generate
 from phd.structure_search.dynamic_network import (
     DynamicNetwork, sync_outgoing_weights, build_outgoing_indices,
@@ -44,7 +47,6 @@ from phd.structure_search.metrics import StepMetrics, compute_structure_metrics
 
 
 SCAN_UNROLL = 4
-NUM_CLASSES = 10  # CIFAR-10
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +80,7 @@ class DummyStructureTracker(eqx.Module):
 # ---------------------------------------------------------------------------
 
 class TrainState(eqx.Module):
-    model: Union[MLP, DynamicNetwork]
+    model: Union[MLP, DynamicNetwork, BlockSparseMLP]
     optimizer: EqxOptimizer
     structure_tracker: Union[DummyStructureTracker, ConnectivityManager]
     step: jax.Array
@@ -105,36 +107,83 @@ def _make_output_only_filter_spec(model: DynamicNetwork):
 
 def prepare_experiment(
     cfg: DictConfig,
-) -> Tuple[TrainState, List[DataStream], int]:
-    """Initialize per-seed models, optimizers, data streams."""
+) -> Tuple[TrainState, list, int, int, int, Optional[Tuple[np.ndarray, np.ndarray]]]:
+    """Initialize per-seed models, optimizers, data streams.
+
+    Returns:
+        batched_state: Vmapped TrainState across seeds.
+        streams: List of DataStream or ParallelMNISTStream per seed.
+        n_params: Parameter count of the model.
+        num_classes: Number of classes per task (e.g. 10 for MNIST).
+        n_tasks: Number of parallel tasks (1 for single-task).
+        test_data: (test_images, test_labels) or None if eval_freq == 0.
+    """
     seeds = cfg.seed
     model_type = cfg.model.get('type', 'mlp')
-
-    images, labels, num_classes, input_dim = load_dataset(cfg.dataset.name)
-
+    dataset_name = cfg.dataset.name
+    n_tasks = cfg.dataset.get('n_tasks', 1)
+    permute_period = cfg.dataset.get('permute_period', 0)
+    eval_freq = cfg.train.get('eval_freq', 0)
     use_bias = cfg.model.get('use_bias', False)
 
+    # --- Load data ---
+    if dataset_name == 'parallel_mnist':
+        base_images, base_labels, num_classes, input_dim_per_task = load_dataset('mnist', split='train')
+        input_dim = n_tasks * input_dim_per_task
+        output_dim = n_tasks * num_classes
+
+        test_data = None
+        test_images_raw = test_labels_raw = None
+        if eval_freq > 0:
+            test_images_raw, test_labels_raw, _, _ = load_dataset('mnist', split='test')
+    else:
+        images, labels, num_classes, input_dim = load_dataset(dataset_name)
+        output_dim = num_classes
+        n_tasks = 1
+
+        test_data = None
+        if eval_freq > 0:
+            test_img, test_lbl, _, _ = load_dataset(dataset_name, split='test')
+            test_data = (test_img, test_lbl)
+
+    # --- Resolve hidden_dim ---
+    hidden_dim = cfg.model.hidden_dim
+    target_params = cfg.model.get('target_params', None)
+    if target_params is not None:
+        hidden_dim = compute_hidden_dim_for_params(
+            target_params, model_type, cfg.model.n_layers, n_tasks,
+        )
+        print(f'target_params={target_params} → hidden_dim={hidden_dim}')
+
+    # --- Build per-seed state ---
     streams = []
     train_states = []
     for seed in seeds:
         rng = jax.random.key(seed)
-
-        streams.append(DataStream(
-            images=images,
-            labels=labels,
-            num_classes=num_classes,
-            batch_size=cfg.train.batch_size,
-            seed=seed,
-        ))
-
         model_key = rng_from_string(rng, 'model')
 
+        # Data stream
+        if dataset_name == 'parallel_mnist':
+            streams.append(ParallelMNISTStream(
+                images=base_images, labels=base_labels,
+                n_tasks=n_tasks, batch_size=cfg.train.batch_size,
+                seed=seed, permute_period=permute_period,
+                test_images=test_images_raw, test_labels=test_labels_raw,
+            ))
+        else:
+            streams.append(DataStream(
+                images=images, labels=labels,
+                num_classes=num_classes,
+                batch_size=cfg.train.batch_size, seed=seed,
+            ))
+
+        # Model
         if model_type == 'dynamic':
             model = init_random_dynamic_network(
                 input_dim=input_dim,
-                output_dim=num_classes,
+                output_dim=output_dim,
                 n_layers=cfg.model.n_layers,
-                units_per_layer=cfg.model.hidden_dim,
+                units_per_layer=hidden_dim,
                 max_units_per_layer=cfg.model.get('max_units_per_layer', None),
                 max_connections_per_unit=cfg.model.get('max_connections_per_unit', None),
                 activations=(cfg.model.activation,),
@@ -150,12 +199,25 @@ def prepare_experiment(
                 model, cfg.optimizer.name, cfg.optimizer,
                 filter_spec=filter_spec,
             )
+        elif model_type == 'block_sparse':
+            model = BlockSparseMLP(
+                n_tasks=n_tasks,
+                input_dim_per_task=input_dim // n_tasks,
+                output_dim_per_task=num_classes,
+                n_layers=cfg.model.n_layers,
+                hidden_dim=hidden_dim,
+                weight_init_method=cfg.model.weight_init_method,
+                activation=cfg.model.activation,
+                n_frozen_layers=cfg.model.get('n_frozen_layers', 0),
+                key=model_key,
+            )
+            optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
         else:
             model = MLP(
                 input_dim=input_dim,
-                output_dim=num_classes,
+                output_dim=output_dim,
                 n_layers=cfg.model.n_layers,
-                hidden_dim=cfg.model.hidden_dim + int(use_bias),
+                hidden_dim=hidden_dim + int(use_bias),
                 weight_init_method=cfg.model.weight_init_method,
                 activation=cfg.model.activation,
                 n_frozen_layers=cfg.model.get('n_frozen_layers', 0),
@@ -163,6 +225,7 @@ def prepare_experiment(
             )
             optimizer = prepare_optimizer(model, cfg.optimizer.name, cfg.optimizer)
 
+        # Structure tracker
         if model_type == 'dynamic' and cfg.structure_tracker.get('enabled', False):
             generate_strategy = cfg.structure_tracker.get('generate_strategy', 'random')
             generate_fn = full_input_generate if generate_strategy == 'full_input' else None
@@ -179,8 +242,7 @@ def prepare_experiment(
             tracker = DummyStructureTracker(rng=rng_from_string(rng, 'tracker'))
 
         train_states.append(TrainState(
-            model=model,
-            optimizer=optimizer,
+            model=model, optimizer=optimizer,
             structure_tracker=tracker,
             step=jnp.array(0),
             rng=rng_from_string(rng, 'train'),
@@ -193,11 +255,14 @@ def prepare_experiment(
         n_conns = count_active_connections(net)
         print(f'Model: DynamicNetwork, Params: {n_params}, '
               f'Units: {n_units}, Connections: {n_conns}, Seeds: {seeds}')
+    elif model_type == 'block_sparse':
+        print(f'Model: BlockSparseMLP, Params: {n_params}, '
+              f'hidden_dim={hidden_dim}, n_tasks={n_tasks}, Seeds: {seeds}')
     else:
-        print(f'Model: MLP, Params: {n_params}, Seeds: {seeds}')
+        print(f'Model: MLP, Params: {n_params}, hidden_dim={hidden_dim}, Seeds: {seeds}')
 
     batched_state = stack_pytrees(train_states)
-    return batched_state, streams, n_params
+    return batched_state, streams, n_params, num_classes, n_tasks, test_data
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +289,8 @@ def train_step(
     data,
     do_restructure: bool = False,
     loss_name: str = 'mse',
+    num_classes: int = 10,
+    n_tasks: int = 1,
 ) -> Tuple[TrainState, StepMetrics]:
     """Single training step.
 
@@ -234,19 +301,43 @@ def train_step(
             call modify_structure after the utility update. This parameter is
             static (Python bool) so JAX traces separate paths for True/False.
         loss_name: Loss function to use ('mse' or 'cross_entropy'). Static.
+        num_classes: Classes per task. Static.
+        n_tasks: Number of parallel tasks. Static.
     """
-    images, labels = data  # (batch_size, input_dim), (batch_size,)
-
-    one_hot = jax.nn.one_hot(labels, NUM_CLASSES)  # (batch_size, 10)
+    images, labels = data
     loss_fn_impl = LOSS_FNS[loss_name]
 
-    def loss_fn(model):
-        outputs, param_inputs = jax.vmap(model)(images)  # (batch_size, 10)
-        loss = loss_fn_impl(outputs, one_hot)
-        return loss, (outputs, param_inputs)
+    if n_tasks > 1:
+        # labels: (batch_size, K)
+        one_hot = jax.nn.one_hot(labels, num_classes)  # (batch_size, K, num_classes)
 
-    (loss, (outputs, param_inputs)), grads = eqx.filter_value_and_grad(
-        loss_fn, has_aux=True)(train_state.model)
+        def loss_fn(model):
+            raw_outputs, param_inputs = jax.vmap(model)(images)  # (batch_size, K*num_classes)
+            outputs = raw_outputs.reshape(-1, n_tasks, num_classes)
+            loss = loss_fn_impl(outputs, one_hot)
+            return loss, (raw_outputs, param_inputs)
+
+        (loss, (raw_outputs, param_inputs)), grads = eqx.filter_value_and_grad(
+            loss_fn, has_aux=True)(train_state.model)
+
+        # Accuracy: per-task argmax
+        outputs_reshaped = raw_outputs.reshape(-1, n_tasks, num_classes)
+        predicted = jnp.argmax(outputs_reshaped, axis=-1)  # (batch_size, K)
+        correct = (predicted == labels).astype(jnp.float32).mean()
+    else:
+        # labels: (batch_size,)
+        one_hot = jax.nn.one_hot(labels, num_classes)  # (batch_size, num_classes)
+
+        def loss_fn(model):
+            outputs, param_inputs = jax.vmap(model)(images)
+            loss = loss_fn_impl(outputs, one_hot)
+            return loss, (outputs, param_inputs)
+
+        (loss, (raw_outputs, param_inputs)), grads = eqx.filter_value_and_grad(
+            loss_fn, has_aux=True)(train_state.model)
+
+        predicted = jnp.argmax(raw_outputs, axis=-1)
+        correct = (predicted == labels).astype(jnp.float32).mean()
 
     # Optimizer update (IDBD needs prediction gradients in addition to loss gradients)
     if train_state.optimizer.name == 'idbd':
@@ -269,17 +360,13 @@ def train_step(
         new_model, param_inputs)
 
     # Restructure (only when do_restructure=True and using ConnectivityManager)
-    n_layers = new_model.max_layers if hasattr(new_model, 'max_layers') else 0
-    pruned_per_layer = jnp.zeros(n_layers, dtype=jnp.int32)
-    generated_per_layer = jnp.zeros(n_layers, dtype=jnp.int32)
+    n_model_layers = new_model.max_layers if hasattr(new_model, 'max_layers') else 0
+    pruned_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
+    generated_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
     if do_restructure and isinstance(new_tracker, ConnectivityManager):
         rng, restructure_rng = jax.random.split(train_state.rng)
         new_tracker, new_model, new_optimizer, pruned_per_layer, generated_per_layer = (
             new_tracker.modify_structure(new_model, new_optimizer, rng=restructure_rng))
-
-    # Accuracy (pre-update predictions)
-    predicted = jnp.argmax(outputs, axis=-1)  # (batch_size,)
-    correct = (predicted == labels).astype(jnp.float32).mean()
 
     new_state = tree_replace(
         train_state,
@@ -297,26 +384,108 @@ def train_step(
 
 
 # ---------------------------------------------------------------------------
+# Test evaluation
+# ---------------------------------------------------------------------------
+
+def _eval_forward(model, images, labels, loss_fn_impl, num_classes, n_tasks):
+    """Evaluate model on a batch. Designed to be vmapped over seeds."""
+    outputs, _ = jax.vmap(model)(images)
+    if n_tasks > 1:
+        one_hot = jax.nn.one_hot(labels, num_classes)
+        outputs_r = outputs.reshape(-1, n_tasks, num_classes)
+        loss = loss_fn_impl(outputs_r, one_hot)
+        predicted = jnp.argmax(outputs_r, axis=-1)
+        correct = (predicted == labels).astype(jnp.float32).mean()
+    else:
+        one_hot = jax.nn.one_hot(labels, num_classes)
+        loss = loss_fn_impl(outputs, one_hot)
+        predicted = jnp.argmax(outputs, axis=-1)
+        correct = (predicted == labels).astype(jnp.float32).mean()
+    return loss, correct
+
+
+def evaluate_test(
+    batched_model,
+    test_images: jnp.ndarray,
+    test_labels: jnp.ndarray,
+    loss_fn_impl,
+    num_classes: int,
+    n_tasks: int,
+    batch_size: int = 512,
+):
+    """Evaluate batched model on test set, chunked to manage memory.
+
+    Args:
+        batched_model: Model vmapped over seeds (leading dimension = n_seeds).
+        test_images: (N_test, input_dim)
+        test_labels: (N_test,) or (N_test, K)
+        loss_fn_impl: Loss function.
+        num_classes: Classes per task.
+        n_tasks: Number of parallel tasks.
+        batch_size: Chunk size for test evaluation.
+
+    Returns:
+        per_seed_loss: (n_seeds,)
+        per_seed_acc: (n_seeds,)
+    """
+    # Build jitted vmapped eval for a single chunk
+    @jax.jit
+    def _eval_chunk(model, imgs, lbls):
+        return jax.vmap(
+            lambda m: _eval_forward(m, imgs, lbls, loss_fn_impl, num_classes, n_tasks)
+        )(model)
+
+    n_test = test_images.shape[0]
+    total_loss = None
+    total_acc = None
+    n_chunks = 0
+
+    for start in range(0, n_test, batch_size):
+        end = min(start + batch_size, n_test)
+        chunk_imgs = jnp.array(test_images[start:end])
+        chunk_lbls = jnp.array(test_labels[start:end])
+        chunk_loss, chunk_acc = _eval_chunk(batched_model, chunk_imgs, chunk_lbls)
+        if total_loss is None:
+            total_loss = chunk_loss
+            total_acc = chunk_acc
+        else:
+            total_loss = total_loss + chunk_loss
+            total_acc = total_acc + chunk_acc
+        n_chunks += 1
+
+    return total_loss / n_chunks, total_acc / n_chunks
+
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
 def run_experiment(
     cfg: DictConfig,
     train_state: TrainState,
-    streams: List[DataStream],
-) -> Tuple[TrainState, list, list, list, list]:
+    streams: list,
+    num_classes: int,
+    n_tasks: int,
+    test_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+) -> Tuple[TrainState, list, list, list, list, list, list]:
     """Outer training loop: pre-sample data on CPU, train on GPU via vmapped scan.
 
     When structure_tracker is enabled, the scan body uses a Python for-loop
     that unrolls prune_frequency steps: (prune_frequency - 1) normal steps
     followed by 1 restructure step. This avoids a runtime conditional inside
     jax.lax.scan — JAX traces two static paths at compile time.
+
+    Returns:
+        train_state, all_losses, all_accuracies, all_per_seed_losses,
+        all_per_seed_accuracies, all_test_losses, all_test_accuracies
     """
     log_freq = cfg.train.log_freq
     num_scans = cfg.train.total_steps // log_freq
     prune_frequency = cfg.structure_tracker.get('prune_frequency', log_freq)
     use_restructure = cfg.structure_tracker.get('enabled', False)
     loss_name = cfg.train.get('loss', 'mse')
+    eval_freq = cfg.train.get('eval_freq', 0)
+    loss_fn_impl = LOSS_FNS[loss_name]
 
     if use_restructure:
         assert log_freq % prune_frequency == 0, \
@@ -330,9 +499,17 @@ def run_experiment(
             """
             all_metrics = []
             for i in range(prune_frequency - 1):
-                state, step_metrics = train_step(state, (data_block[0][i], data_block[1][i]), do_restructure=False, loss_name=loss_name)
+                state, step_metrics = train_step(
+                    state, (data_block[0][i], data_block[1][i]),
+                    do_restructure=False, loss_name=loss_name,
+                    num_classes=num_classes, n_tasks=n_tasks,
+                )
                 all_metrics.append(step_metrics)
-            state, step_metrics = train_step(state, (data_block[0][-1], data_block[1][-1]), do_restructure=True, loss_name=loss_name)
+            state, step_metrics = train_step(
+                state, (data_block[0][-1], data_block[1][-1]),
+                do_restructure=True, loss_name=loss_name,
+                num_classes=num_classes, n_tasks=n_tasks,
+            )
             all_metrics.append(step_metrics)
             stacked = jax.tree.map(lambda *args: jnp.stack(args), *all_metrics)
             return state, stacked
@@ -348,7 +525,10 @@ def run_experiment(
             return state, metrics
     else:
         def _step(state, data):
-            return train_step(state, data, loss_name=loss_name)
+            return train_step(
+                state, data, loss_name=loss_name,
+                num_classes=num_classes, n_tasks=n_tasks,
+            )
 
         def scan_steps(state, data):
             return jax.lax.scan(_step, state, data, unroll=SCAN_UNROLL)
@@ -359,6 +539,8 @@ def run_experiment(
     all_accuracies = []
     all_per_seed_losses = []
     all_per_seed_accuracies = []
+    all_test_losses = []
+    all_test_accuracies = []
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
 
     log_executor = ThreadPoolExecutor(max_workers=1)
@@ -367,11 +549,13 @@ def run_experiment(
     logging_active = (cfg.get('mlflow', False) or cfg.get('wandb', False)
                       or cfg.get('comet_ml', False))
 
-    for _ in range(num_scans):
+    is_parallel_mnist = cfg.dataset.name == 'parallel_mnist'
+
+    for scan_idx in range(num_scans):
         # Pre-sample one cycle of data on CPU per seed
         batch = [stream.sample_batch(log_freq) for stream in streams]
         images = jnp.array(np.stack([b[0] for b in batch]))  # (n_seeds, log_freq, batch_size, input_dim)
-        labels = jnp.array(np.stack([b[1] for b in batch]))  # (n_seeds, log_freq, batch_size)
+        labels = jnp.array(np.stack([b[1] for b in batch]))  # (n_seeds, log_freq, batch_size[, K])
 
         train_state, metrics = vmapped_scan(train_state, (images, labels))
 
@@ -400,10 +584,34 @@ def run_experiment(
                 structure_metrics[f'layer_{l}/pruned'] = float(pruned[:, l].mean())
                 structure_metrics[f'layer_{l}/generated'] = float(generated[:, l].mean())
 
+        # --- Test evaluation ---
+        test_metrics_dict = {}
+        if eval_freq > 0 and step % eval_freq == 0:
+            if is_parallel_mnist:
+                # Get test batch from the first stream (permutations are per-seed
+                # but we use the first seed's permutation state for simplicity)
+                t_imgs, t_lbls = streams[0].get_test_batch()
+            else:
+                t_imgs, t_lbls = test_data
+
+            test_loss, test_acc = evaluate_test(
+                train_state.model, t_imgs, t_lbls,
+                loss_fn_impl, num_classes, n_tasks,
+            )
+            mean_test_loss = float(test_loss.mean())
+            mean_test_acc = float(test_acc.mean())
+            all_test_losses.append(mean_test_loss)
+            all_test_accuracies.append(mean_test_acc)
+            test_metrics_dict = {
+                'test_loss': mean_test_loss,
+                'test_accuracy': mean_test_acc,
+            }
+
         # Background logging
         if logging_active:
             def _log_step(mean_loss, std_loss, mean_acc, std_acc,
-                          per_seed_loss, per_seed_acc, structure_metrics, step):
+                          per_seed_loss, per_seed_acc, structure_metrics,
+                          test_metrics_dict, step):
                 base_metrics = {
                     'loss': mean_loss,
                     'loss_std': std_loss,
@@ -411,6 +619,7 @@ def run_experiment(
                     'accuracy_std': std_acc,
                 }
                 base_metrics.update(structure_metrics)
+                base_metrics.update(test_metrics_dict)
                 log_metrics(base_metrics, cfg, step=step)
                 log_child_metrics(
                     {'loss': per_seed_loss, 'accuracy': per_seed_acc},
@@ -419,7 +628,8 @@ def run_experiment(
 
             log_futures.append(log_executor.submit(
                 _log_step, mean_loss, std_loss, mean_acc, std_acc,
-                per_seed_loss.tolist(), per_seed_acc.tolist(), structure_metrics, step,
+                per_seed_loss.tolist(), per_seed_acc.tolist(), structure_metrics,
+                test_metrics_dict, step,
             ))
 
         all_losses.append(mean_loss)
@@ -428,7 +638,11 @@ def run_experiment(
         all_per_seed_accuracies.append(np.array(per_seed_acc))
 
         pbar.update(log_freq)
-        pbar.set_postfix({'loss': f'{mean_loss:.4f}', 'acc': f'{mean_acc:.4f}'})
+        postfix = {'loss': f'{mean_loss:.4f}', 'acc': f'{mean_acc:.4f}'}
+        if test_metrics_dict:
+            postfix['t_loss'] = f'{test_metrics_dict["test_loss"]:.4f}'
+            postfix['t_acc'] = f'{test_metrics_dict["test_accuracy"]:.4f}'
+        pbar.set_postfix(postfix)
 
     # Wait for all logging to finish
     for f in log_futures:
@@ -436,7 +650,9 @@ def run_experiment(
     log_executor.shutdown(wait=False)
 
     pbar.close()
-    return train_state, all_losses, all_accuracies, all_per_seed_losses, all_per_seed_accuracies
+    return (train_state, all_losses, all_accuracies,
+            all_per_seed_losses, all_per_seed_accuracies,
+            all_test_losses, all_test_accuracies)
 
 
 # ---------------------------------------------------------------------------
@@ -464,11 +680,12 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed[0])
     init_child_runs(cfg.seed, cfg)
 
-    train_state, streams, n_params = prepare_experiment(cfg)
+    train_state, streams, n_params, num_classes, n_tasks, test_data = prepare_experiment(cfg)
 
     (train_state, all_losses, all_accuracies,
-     all_per_seed_losses, all_per_seed_accuracies) = run_experiment(
-        cfg, train_state, streams)
+     all_per_seed_losses, all_per_seed_accuracies,
+     all_test_losses, all_test_accuracies) = run_experiment(
+        cfg, train_state, streams, num_classes, n_tasks, test_data)
 
     # Final summary
     average_loss = float(np.mean(all_losses))
@@ -480,12 +697,21 @@ def main(cfg: DictConfig) -> None:
     print(f'Asymptotic loss: {asymptotic_loss:.4f}')
     print(f'Asymptotic accuracy: {asymptotic_accuracy:.4f}')
 
-    log_metrics({
+    summary = {
         'average_loss': average_loss,
         'asymptotic_loss': asymptotic_loss,
         'asymptotic_accuracy': asymptotic_accuracy,
         'num_params': n_params,
-    }, cfg)
+    }
+
+    if all_test_losses:
+        n_test_tail = max(1, len(all_test_losses) // 10)
+        summary['asymptotic_test_loss'] = float(np.mean(all_test_losses[-n_test_tail:]))
+        summary['asymptotic_test_accuracy'] = float(np.mean(all_test_accuracies[-n_test_tail:]))
+        print(f'Asymptotic test loss: {summary["asymptotic_test_loss"]:.4f}')
+        print(f'Asymptotic test accuracy: {summary["asymptotic_test_accuracy"]:.4f}')
+
+    log_metrics(summary, cfg)
 
     # Per-seed summary to child runs
     if all_per_seed_losses:

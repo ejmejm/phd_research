@@ -1,12 +1,18 @@
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
 
-def load_dataset(name: str) -> Tuple[np.ndarray, np.ndarray, int, int]:
+def load_dataset(
+    name: str, split: str = 'train',
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """Load and preprocess a dataset for online MLP training.
 
     Images are normalized to [0, 1] and flattened to 1D vectors.
+
+    Args:
+        name: Dataset name ('cifar10' or 'mnist').
+        split: 'train' or 'test'.
 
     Returns:
         images: Float array (N, input_dim)
@@ -16,13 +22,22 @@ def load_dataset(name: str) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """
     from torchvision import datasets
 
+    train = (split == 'train')
+
     if name == 'cifar10':
-        ds = datasets.CIFAR10(root='/tmp/data', train=True, download=True)
-        images = np.array(ds.data, dtype=np.float32) / 255.0  # (50000, 32, 32, 3)
-        images = images.reshape(images.shape[0], -1)  # (50000, 3072)
+        ds = datasets.CIFAR10(root='/tmp/data', train=train, download=True)
+        images = np.array(ds.data, dtype=np.float32) / 255.0
+        images = images.reshape(images.shape[0], -1)
         labels = np.array(ds.targets)
         num_classes = 10
         input_dim = 3072
+    elif name == 'mnist':
+        ds = datasets.MNIST(root='/tmp/data', train=train, download=True)
+        images = np.array(ds.data, dtype=np.float32) / 255.0  # (N, 28, 28)
+        images = images.reshape(images.shape[0], -1)  # (N, 784)
+        labels = np.array(ds.targets)
+        num_classes = 10
+        input_dim = 784
     else:
         raise ValueError(f'Unknown dataset: {name}')
 
@@ -55,4 +70,120 @@ class DataStream:
         indices = self.rng.integers(0, self.n_samples, size=total)
         images = self.images[indices].reshape(n_steps, self.batch_size, -1)
         labels = self.labels[indices].reshape(n_steps, self.batch_size)
+        return images, labels
+
+
+class ParallelMNISTStream:
+    """Data stream for parallel MNIST: K independent sub-tasks concatenated.
+
+    Each sample consists of K independently sampled MNIST images concatenated
+    into a single input vector of dimension K*784, with K integer labels.
+
+    Supports non-stationary mode: at regular intervals, the label mapping for
+    one randomly chosen sub-task is permuted.
+    """
+
+    def __init__(
+        self,
+        images: np.ndarray,
+        labels: np.ndarray,
+        n_tasks: int,
+        batch_size: int,
+        seed: int,
+        permute_period: int = 0,
+        test_images: Optional[np.ndarray] = None,
+        test_labels: Optional[np.ndarray] = None,
+    ):
+        self.images = images        # (N, 784)
+        self.labels = labels        # (N,)
+        self.n_tasks = n_tasks
+        self.num_classes = 10
+        self.batch_size = batch_size
+        self.n_samples = images.shape[0]
+        self.permute_period = permute_period
+        self.rng = np.random.default_rng(seed)
+
+        self.test_images = test_images  # (N_test, 784) or None
+        self.test_labels = test_labels  # (N_test,) or None
+
+        # Per-task label permutations (identity initially)
+        self.label_permutations: List[np.ndarray] = [
+            np.arange(10) for _ in range(n_tasks)
+        ]
+        self.step_counter = 0
+
+    def _advance_permutations(self, n_steps: int):
+        """Check for and apply any permutation events in the next n_steps."""
+        if self.permute_period <= 0:
+            self.step_counter += n_steps
+            return
+
+        start = self.step_counter
+        end = start + n_steps
+
+        # Find the first permutation event at or after start
+        if start == 0:
+            first_event = self.permute_period
+        else:
+            first_event = ((start - 1) // self.permute_period + 1) * self.permute_period
+
+        for event_step in range(first_event, end, self.permute_period):
+            task_idx = self.rng.integers(0, self.n_tasks)
+            self.label_permutations[task_idx] = self.rng.permutation(10)
+
+        self.step_counter = end
+
+    def sample_batch(self, n_steps: int):
+        """Sample n_steps of parallel MNIST data.
+
+        Permutation events that fall within this batch window are applied
+        before sampling, so all data in this batch uses the updated
+        permutation state.
+
+        Returns:
+            images: (n_steps, batch_size, K*784)
+            labels: (n_steps, batch_size, K)
+        """
+        # Advance permutations for this batch window
+        self._advance_permutations(n_steps)
+
+        total = n_steps * self.batch_size
+        task_images = []
+        task_labels = []
+        for k in range(self.n_tasks):
+            indices = self.rng.integers(0, self.n_samples, size=total)
+            imgs = self.images[indices].reshape(n_steps, self.batch_size, -1)
+            lbls = self.labels[indices].reshape(n_steps, self.batch_size)
+            lbls = self.label_permutations[k][lbls]
+            task_images.append(imgs)
+            task_labels.append(lbls)
+
+        # (n_steps, batch_size, K*784)
+        images = np.concatenate(task_images, axis=-1)
+        # (n_steps, batch_size, K)
+        labels = np.stack(task_labels, axis=-1)
+        return images, labels
+
+    def get_test_batch(self):
+        """Return the full test set formatted for parallel MNIST evaluation.
+
+        Each test sample i uses test_images[i] for every sub-task, with
+        per-task label permutations applied.
+
+        Returns:
+            images: (N_test, K*784)
+            labels: (N_test, K)
+        """
+        assert self.test_images is not None, 'No test data provided'
+        n_test = self.test_images.shape[0]
+
+        # Same image for each task (concatenated K times)
+        images = np.tile(self.test_images, (1, self.n_tasks))  # (N_test, K*784)
+
+        # Apply per-task permutations to labels
+        task_labels = []
+        for k in range(self.n_tasks):
+            task_labels.append(self.label_permutations[k][self.test_labels])
+        labels = np.stack(task_labels, axis=-1)  # (N_test, K)
+
         return images, labels
