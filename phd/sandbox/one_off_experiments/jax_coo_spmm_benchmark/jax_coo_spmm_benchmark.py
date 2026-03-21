@@ -1,4 +1,19 @@
 # spmm_benchmark_bcoo.py
+"""
+JAX BCOO Sparse Matrix-Vector Multiplication Benchmark
+=======================================================
+Motivation: Understand the throughput and latency characteristics of JAX's experimental
+BCOO (Batched COOrdinate) sparse format for SpMV (Y = A @ X, batch=1) across different
+matrix sizes and sparsity levels. This helps determine when sparse representations are
+worthwhile compared to dense operations.
+
+What it does: Creates random NxN sparse matrices in BCOO format at varying densities and
+benchmarks A @ X (where X is Nx1). Two modes:
+  - Single run: prints latency and GFLOP/s for one (N, density) pair.
+  - Sweep mode: sweeps over sizes [256..2048] x densities [0.05%..5%], producing
+    heatmaps of throughput (GFLOP/s) and latency (ms).
+Each config is JIT-compiled, warmed up, then timed over multiple iterations.
+"""
 import time
 import argparse
 import math

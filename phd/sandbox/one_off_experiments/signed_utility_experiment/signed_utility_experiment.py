@@ -1,3 +1,25 @@
+"""
+Signed Utility Traces: IDBD vs LMS on a Non-Stationary Tracking Task
+=====================================================================
+Motivation: Investigate whether "signed utility" traces (measuring how much each input
+reduces prediction error) can distinguish relevant from irrelevant features in a
+non-stationary online learning setting. This is a precursor to using utility-based
+metrics for feature selection or pruning in neural networks.
+
+What it does: Generates a 20-input tracking task where only 5 inputs are relevant,
+and the sign of one relevant input flips every 20 steps. Runs two algorithms:
+  1. IDBD (Incremental Delta-Bar-Delta): adapts per-feature learning rates online
+  2. LMS (Least Mean Squares): fixed learning rate baseline
+Tracks three diagnostic traces per input via EMA (decay=0.999):
+  - Signed utility: |error_without_feature| - |error_with_feature|
+  - Input-target correlation: x[i] * y_star
+  - Contribution: |x[i] * w[i]|
+
+Results: IDBD converges to lower asymptotic MSE than LMS. The signed utility and
+contribution traces clearly separate relevant inputs (positive, larger magnitude)
+from irrelevant ones (near zero), but the signed utility traces immediately go negative,
+whereas the contribution traces remain positive.
+"""
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')

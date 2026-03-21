@@ -1,4 +1,29 @@
 # benchmark_conditionals.py
+"""
+JAX Conditional Primitive Benchmark
+====================================
+Motivation: In JAX, lax.cond and lax.switch are "true" conditionals that should only
+evaluate the taken branch, while lax.select and jnp.where always evaluate both branches.
+This benchmark measures whether the true-branching primitives actually save compute when
+one branch is cheap and the other is expensive, and how the savings scale with problem
+parameters.
+
+What it does: Builds a lax.scan loop where each step either runs a cheap op (identity)
+or an expensive op (3 chained dense matmuls with nonlinearities). The frequency of the
+expensive op is controlled by EVERY_N. Six variants are compared: lax.cond, lax.switch,
+lax.select, jnp.where, always-expensive baseline, and always-cheap baseline. Three
+parameter sweeps are run:
+  1. Sweep T (scan length): 10 to 10K steps
+  2. Sweep N (vector/matrix size): 2 to 2048
+  3. Sweep EVERY_N (expensive op frequency): every 1 to every 256 steps
+Each sweep is run for both unroll=1 and unroll=8 to test the effect of loop unrolling.
+
+Results: lax.cond and lax.switch scale with the actual number of expensive-branch
+evaluations (runtime decreases as EVERY_N increases), confirming true branching. lax.select
+and jnp.where always pay the cost of both branches regardless of frequency. At large N the
+gap between branching and non-branching variants becomes very large. Unrolling has minimal
+effect on the relative ordering.
+"""
 import time
 from dataclasses import dataclass
 from typing import Dict, Callable, Sequence, Tuple
