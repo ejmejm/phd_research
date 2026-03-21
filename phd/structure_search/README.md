@@ -3,6 +3,21 @@
 The purpose of this project is to learn a good neural network architecture via feature search. The `feature_search` was used to figure out how to evaluate features of a fixed structure. This part of the project now extends that to consider different structures. The goal is to find the simplest online feature search algorithm that can outperform a fixed structure MLP given equal resources.
 
 
+### What Can Be Searched
+
+There are several dimensions of network structure that can be varied during learning:
+
+- **Connectivity** (implemented): Which units connect to which, how many connections each unit has, and when connections are added or removed. This is the primary focus of this project.
+- **Activation function** (implemented): Each hidden unit can use a different activation function, sampled from a set of valid activations at generation time.
+- **Weight initialization** (implemented): How new connections and units are initialized when they are created. Currently uses Lecun uniform initialization scaled by fan-in.
+- **Objective / update rule** (not yet implemented as a searchable dimension): What loss or auxiliary objective each feature is trained to minimize. This is the most interesting direction long-term, as it connects to the GVF discovery problem, but it is out of scope for this project.
+
+The motivation for learning connectivity in particular is threefold:
+
+1. **Parsimony.** A sparse network that has learned the right structure can match the performance of a dense network with fewer parameters. This matters for resource-constrained settings and for interpretability.
+2. **Relieving the experimenter.** Choosing a good architecture is a manual burden. If the network can discover its own connectivity, the experimenter only needs to specify capacity constraints rather than a specific topology.
+3. **Structural credit assignment.** When a network knows which inputs are relevant to which outputs, it can adapt faster when the environment changes, because gradient updates flow only through the relevant subnetwork rather than being diluted across all parameters.
+
 ### Structure Search Algorithm
 
 This is the first naive version of the structure search algorithm.
@@ -42,10 +57,21 @@ At the start of a forward pass, a vector of size equal to the total number of in
 All computation in the network should avoid jax.lax.cond and instead use jax.lax.switch to handle the different cases for better performance.
 
 
+### Environments
+
+#### Parallel MNIST
+
+The parallel MNIST task concatenates multiple independent MNIST problems into a single input-output pair. Each sub-task uses its own subset of the input vector and its own subset of the output vector, so the ideal network is block-sparse: each output group depends only on the corresponding input group, and the rest of the connections are wasted parameters. This is similar in spirit to how the [Nibbler paper](https://arxiv.org/abs/2311.02215) uses a single environment that under the hood contains multiple instances of the same environment.
+
+This task is a good fit for evaluating connectivity search for two reasons. First, the optimal sparse structure is known, so we have a strong baseline: a block-diagonal network that uses far fewer parameters than a dense network of equivalent width. If the search algorithm recovers something close to this structure, it should match dense performance with a fraction of the parameters. Second, the task supports a non-stationary variant where individual sub-tasks have their labels permuted. A network with the right sparse structure should adapt to changes in a single sub-task faster than a dense network because it does not need to marginalize updates over all sub-tasks.
+
+The task is somewhat contrived—normally if we knew we had completely separate sub-problems we would just split them up. The idea is that this is a controlled proxy for the more general setting where an agent faces a complex problem with many facets, and knowledge is stored in a sparse and distributed way across the network. Learning the right connectivity would then provide a form of structural credit assignment that allows targeted adaptation. Current networks are trained dense, with nearly every neuron contributing to every decision, so this kind of approach may not be generally useful until we move toward sparser representations. But an algorithm that learns sparse structure could itself be part of that transition.
+
+
 ### Plan
 - [x] Setup the problem, which to start will be the standard CIFAR-10 dataset.
 - [x] Implement a training script with a fixed structure MLP and a config.
 - [x] And a sweep config for baseline MLP on CIFAR-10. Include different sizes to know what performance is possible at different sizes.
-- [ ] Implement the dynamic network.
-- [ ] Implement a training script with a feature search algorithm.
+- [x] Implement the dynamic network.
+- [x] Implement a training script with a feature search algorithm.
 - [ ] Test different with single activation vs. multiple activation functions.
