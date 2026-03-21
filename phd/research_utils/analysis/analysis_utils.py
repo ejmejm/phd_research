@@ -391,7 +391,7 @@ def get_best_ablation_values(
     nan_policy: str = 'propagate', # {'propagate', 'omit'}
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, Dict[str, any]]]:
     """Get the best ablation values for each sweep.
-    
+
     Args:
         config_dfs: Dictionary mapping sweep names to config DataFrames.
         run_dfs: Dictionary mapping sweep names to run DataFrames.
@@ -411,8 +411,8 @@ def get_best_ablation_values(
         nan_policy: How to handle NaN metric values when computing the mean.
                     'propagate' (default): any NaN in a group makes the group mean NaN,
                     preventing diverged runs from being selected as best.
-                    'omit': ignore NaN values (previous behavior), computing the mean
-                    over only the non-NaN values.
+                    'omit': drop entire runs that have any NaN in the metric column
+                    before computing the mean.
     
     Returns:
         Tuple of (best_config_dfs, best_run_dfs, best_var_vals) dictionaries.
@@ -462,20 +462,26 @@ def get_best_ablation_values(
         else:
             raise ValueError(f"Invalid metric_type: {metric_type}. Must be 'cumulative' or 'final_avg'")
 
+        # Handle NaN metric values based on nan_policy
+        if nan_policy == 'omit':
+            nan_run_ids = run_df_filtered.loc[
+                run_df_filtered[metric_col].isna(), 'run_id'
+            ].unique()
+            run_df_filtered = run_df_filtered[~run_df_filtered['run_id'].isin(nan_run_ids)]
+
         # Calculate mean loss grouped by ablation vars and split vars
-        skipna = nan_policy == 'omit'
         groupby_cols = ablation_vars + split_vars
         if len(groupby_cols) == 0:
             # No groupby columns; every row is its own group
             mean_loss = run_df_filtered[[metric_col]].copy()
             mean_loss.index = pd.RangeIndex(len(mean_loss))
         else:
-            if skipna:
-                mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].mean()
-            else:
+            if nan_policy == 'propagate':
                 mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].agg(
                     lambda x: x.mean(skipna=False)
                 )
+            else:  # 'omit' (already filtered)
+                mean_loss = run_df_filtered.groupby(groupby_cols)[metric_col].mean()
 
         report_str += f"\n=== {sweep_name} ===\n"
 

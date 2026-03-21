@@ -27,10 +27,15 @@ def plot_param_sensitivity(
         pow_2_legend: bool = False,
         nan_policy: str = 'propagate', # {'propagate', 'omit'}
     ):
+    # Drop entire runs that have any NaN in the metric column if nan_policy is 'omit'
+    if nan_policy == 'omit':
+        nan_run_ids = run_df.loc[run_df[metric_col].isna(), id_col].unique()
+        run_df = run_df[~run_df[id_col].isin(nan_run_ids)]
+
     if metric_type.lower() == 'cumulative':
         if nan_policy == 'propagate':
             sum_func = lambda x: x.sum(skipna=False)
-        else:
+        else:  # 'omit' (already filtered)
             sum_func = 'sum'
         final_step_df = run_df.groupby(id_col).agg({
             metric_col: sum_func,
@@ -62,7 +67,7 @@ def plot_param_sensitivity(
         # Calculate mean of metric columns while preserving other columns
         if nan_policy == 'propagate':
             mean_func = lambda x: x.mean(skipna=False)
-        else:
+        else:  # 'omit' (already filtered)
             mean_func = 'mean'
         agg_dict = {col: mean_func if col in [metric_col, baseline_col] else 'last'
                    for col in final_step_df.columns
