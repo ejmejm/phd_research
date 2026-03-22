@@ -94,6 +94,10 @@ def compute_structure_metrics(train_state) -> dict:
                 avg_outgoing.append(0.0)
         metrics[f'layer_{l}/avg_outgoing_conns'] = float(np.mean(avg_outgoing))
 
+    # Average incoming connections per output unit (averaged across seeds)
+    output_incoming = output_mask.sum(axis=2)  # (n_seeds, output_dim)
+    metrics['avg_output_incoming_conns'] = float(output_incoming.mean())
+
     # Total active connections (averaged across seeds)
     total_incoming = (input_indices >= 0).sum(axis=(1, 2, 3))  # (n_seeds,)
     total_output = output_mask.sum(axis=(1, 2))  # (n_seeds,)
