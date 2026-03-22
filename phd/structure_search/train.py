@@ -241,6 +241,8 @@ def prepare_experiment(
                 connection_budget=cfg.structure_tracker.connection_budget,
                 decay_rate=cfg.structure_tracker.decay_rate,
                 maturity_threshold=cfg.structure_tracker.maturity_threshold,
+                max_new_units_per_step=cfg.structure_tracker.get(
+                    'max_new_units_per_step', 512),
                 output_connect_strategy=cfg.structure_tracker.get(
                     'output_connect_strategy', 'all'),
                 generate_fn=generate_fn,

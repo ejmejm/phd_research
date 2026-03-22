@@ -52,6 +52,7 @@ structure_tracker:
   prune_frequency: 100       # restructure every N steps
   generate_strategy: random  # 'random' or 'full_input'
   output_connect_strategy: all  # 'all' or 'random_sparse'
+  max_new_units_per_step: 512  # max units generated per restructure step
 
 # Training
 train:

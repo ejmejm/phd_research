@@ -160,9 +160,9 @@ def random_generate(
         avail = layer_available[cand_layer]
         n_available = jnp.sum(avail)
 
-        max_possible = jnp.minimum(n_available, max_conns)
-        max_possible = jnp.maximum(max_possible, 1)
-        n_conns = jax.random.randint(key1, (), 1, max_possible + 1)
+        # Always use max incoming connections (capped by available sources)
+        n_conns = jnp.minimum(n_available, max_conns)
+        n_conns = jnp.maximum(n_conns, 1)
 
         shuffle_noise = jax.random.uniform(key2, (buffer_size,))
         shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
@@ -188,13 +188,10 @@ def random_generate(
 
     # --- 6c2: Output cost per unit ---
     if output_connect_strategy == 'random_sparse':
-        # Sample outgoing connection count for each candidate
-        out_keys = jax.random.split(out_rng, max_new_units)
+        # Always use max_fan_out // 2 outgoing connections
         max_out = max(1, max_fan_out // 2)
-        n_out_per_unit = jax.vmap(
-            lambda k: jax.random.randint(k, (), 1, max_out + 1)
-        )(out_keys)
-        all_costs = all_input_costs + n_out_per_unit
+        n_out_per_unit = jnp.full(max_new_units, max_out, dtype=jnp.int32)
+        all_costs = all_input_costs + max_out
     else:
         n_out_per_unit = jnp.full(max_new_units, output_dim, dtype=jnp.int32)
         all_costs = all_input_costs + output_dim
@@ -333,15 +330,12 @@ def full_input_generate(
 
     # --- Compute per-unit cost and budget check ---
     if output_connect_strategy == 'random_sparse':
-        out_keys = jax.random.split(out_rng, max_new_units)
         max_out = max(1, max_fan_out // 2)
-        n_out_per_unit = jax.vmap(
-            lambda k: jax.random.randint(k, (), 1, max_out + 1)
-        )(out_keys)
-        cost_per_unit = input_dim + n_out_per_unit  # per-unit variable cost
-        costs_if_valid = jnp.where(cand_valid, cost_per_unit.astype(jnp.float32), 0.0)
-        cumulative_cost = jnp.cumsum(costs_if_valid)
-        gen_mask = cand_valid & (cumulative_cost <= budget)
+        n_out_per_unit = jnp.full(max_new_units, max_out, dtype=jnp.int32)
+        cost_per_unit_scalar = input_dim + max_out
+        n_affordable = jnp.floor(budget / cost_per_unit_scalar).astype(jnp.int32)
+        cumulative_valid = jnp.cumsum(cand_valid.astype(jnp.int32))
+        gen_mask = cand_valid & (cumulative_valid <= n_affordable)
     else:
         n_out_per_unit = jnp.full(max_new_units, output_dim, dtype=jnp.int32)
         cost_per_unit_scalar = input_dim + output_dim
@@ -432,11 +426,10 @@ def full_input_generate(
     )
 
     # Deduct spent connections
+    n_generated = jnp.sum(gen_mask.astype(jnp.int32))
     if output_connect_strategy == 'random_sparse':
-        all_costs = input_dim + n_out_per_unit
-        spent = jnp.sum(jnp.where(gen_mask, all_costs.astype(jnp.float32), 0.0))
+        spent = (n_generated * (input_dim + max_out)).astype(jnp.float32)
     else:
-        n_generated = jnp.sum(gen_mask.astype(jnp.int32))
         spent = (n_generated * (input_dim + output_dim)).astype(jnp.float32)
     new_budget = budget - spent
 

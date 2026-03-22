@@ -408,17 +408,12 @@ def test_sparse_outgoing_connections():
     buf_positions = _unit_buf_positions(net2)
     max_out = max(1, net2.max_fan_out // 2)
 
-    any_sparse = False
+    max_out = max(1, net2.max_fan_out // 2)
     for l in range(net2.max_layers):
         for u in range(net2.max_units_per_layer):
             if net2.unit_mask[l, u] == 1:
                 bp = int(buf_positions[l, u])
                 n_output_conns = int(net2.output_mask[:, bp].sum())
-                # With random_sparse, units should have at most max_fan_out//2 output conns
-                # (could have more if they existed before the sparse strategy was applied)
-                if n_output_conns < net2.output_dim:
-                    any_sparse = True
-                # No unit should have zero total outgoing (at least 1 output or hidden)
                 # Count hidden outgoing: how many later-layer units point to this bp
                 n_hidden_out = 0
                 for l2 in range(l + 1, net2.max_layers):
@@ -427,12 +422,14 @@ def test_sparse_outgoing_connections():
                             if jnp.any(net2.input_indices[l2, u2] == bp):
                                 n_hidden_out += 1
                 total_out = n_output_conns + n_hidden_out
+                # Each generated unit should have exactly max_fan_out//2 outgoing
+                # (some may be less if not enough targets were available)
                 assert total_out >= 1, (
                     f"Unit ({l}, {u}) has zero outgoing connections"
                 )
-
-    # At least some units should have sparse output connections
-    assert any_sparse, "Expected some units to have sparse (< output_dim) output connections"
+                assert total_out <= max_out, (
+                    f"Unit ({l}, {u}) has {total_out} outgoing, max is {max_out}"
+                )
 
     # No hidden unit should exceed max_connections_per_unit
     for l in range(net2.max_layers):
