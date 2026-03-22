@@ -1,0 +1,67 @@
+experiment: parallel-mnist
+sweep_name: parallel_mnist_dynamic_stationary
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_test_loss, asymptotic_test_accuracy, asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    hue: [optimizer.learning_rate]
+    params: [structure_tracker.prune_rate]
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  dataset.name: parallel_mnist
+  dataset.n_tasks: 5
+  dataset.permute_period: 0
+
+  model.type: dynamic
+  model.n_layers: 3
+  model.hidden_dim: 0
+  model.max_units_per_layer: 20000
+  model.max_connections_per_unit: 32
+  model.connect_all_to_output: false
+  model.max_fan_out: 64
+  model.init_strategy: empty
+
+  optimizer.name: adam
+
+  train.loss: cross_entropy
+  train.total_steps: 200_000
+  train.log_freq: 2000
+  train.eval_freq: 10000
+
+  structure_tracker.enabled: true
+  structure_tracker.connection_budget: "${eval:2**20}"
+  structure_tracker.decay_rate: 0.999
+  structure_tracker.maturity_threshold: 1
+  structure_tracker.prune_frequency: 50
+  structure_tracker.output_connect_strategy: random_sparse
+
+  optimizer.learning_rate:
+    - "${eval:2**-22}"
+    - "${eval:2**-20}"
+    - "${eval:2**-18}"
+    - "${eval:2**-16}"
+    - "${eval:2**-14}"
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
+
+  structure_tracker.prune_rate:
+    - 0.0
+    - 0.0001
+    - 0.001
+    - 0.05
+
+  seed:
+    type: atomic
+    value: [1, 2, 3]

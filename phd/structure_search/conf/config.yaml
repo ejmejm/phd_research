@@ -30,6 +30,7 @@ model:
   max_fan_out: null                # defaults to max_units_per_layer
   connect_all_to_output: false    # if true, all hidden units connect to output
   freeze_hidden_weights: false    # if true, only output_weights are trainable
+  init_strategy: linear           # 'linear' (input→output) or 'empty' (no connections)
 
 # Optimizer
 optimizer:
@@ -50,6 +51,7 @@ structure_tracker:
   maturity_threshold: 100    # min steps before a unit can be pruned (-1 to disable)
   prune_frequency: 100       # restructure every N steps
   generate_strategy: random  # 'random' or 'full_input'
+  output_connect_strategy: all  # 'all' or 'random_sparse'
 
 # Training
 train:

@@ -186,10 +186,11 @@ class DynamicNetwork(eqx.Module):
         max_connections_per_unit: int,
         activations: Tuple[str, ...] = ('relu',),
         max_fan_out: int | None = None,
+        init_strategy: str = 'linear',
         *,
         key: PRNGKeyArray,
     ):
-        """Initialize as a linear model (no hidden units, inputs → outputs).
+        """Initialize the dynamic network.
 
         Args:
             input_dim: Input dimensionality (e.g. 3072 for flattened CIFAR-10).
@@ -200,6 +201,8 @@ class DynamicNetwork(eqx.Module):
             activations: Tuple of activation function names from ACTIVATION_MAP.
             max_fan_out: Maximum outgoing connections per buffer position per
                 layer. Defaults to max_units_per_layer (fully-connected worst case).
+            init_strategy: 'linear' (input→output with lecun_uniform weights)
+                or 'empty' (no connections, network outputs zeros).
             key: PRNG key for weight initialization.
         """
         self.input_dim = input_dim
@@ -220,12 +223,20 @@ class DynamicNetwork(eqx.Module):
             dtype=jnp.float32,
         )
 
-        # Output layer — lecun_uniform for input-to-output, zeros for rest
-        output_w = jnp.zeros((output_dim, self.buffer_size), dtype=jnp.float32)
-        output_w = output_w.at[:, :input_dim].set(
-            lecun_uniform(key, (output_dim, input_dim), in_dim=input_dim)
-        )
-        self.output_weights = output_w
+        # Output layer
+        if init_strategy == 'linear':
+            # Linear model: lecun_uniform input-to-output
+            output_w = jnp.zeros((output_dim, self.buffer_size), dtype=jnp.float32)
+            output_w = output_w.at[:, :input_dim].set(
+                lecun_uniform(key, (output_dim, input_dim), in_dim=input_dim)
+            )
+            self.output_weights = output_w
+        elif init_strategy == 'empty':
+            # No connections — outputs zeros until units are generated
+            self.output_weights = jnp.zeros(
+                (output_dim, self.buffer_size), dtype=jnp.float32)
+        else:
+            raise ValueError(f"Unknown init_strategy: {init_strategy}")
 
         # Input indices — all -1 (no connections)
         self.input_indices = jnp.full(
@@ -244,10 +255,15 @@ class DynamicNetwork(eqx.Module):
             (max_layers, max_units_per_layer), dtype=jnp.int32,
         )
 
-        # Output mask — active for input-to-output connections only
-        output_m = jnp.zeros((output_dim, self.buffer_size), dtype=jnp.int32)
-        output_m = output_m.at[:, :input_dim].set(1)
-        self.output_mask = output_m
+        # Output mask
+        if init_strategy == 'linear':
+            output_m = jnp.zeros((output_dim, self.buffer_size), dtype=jnp.int32)
+            output_m = output_m.at[:, :input_dim].set(1)
+            self.output_mask = output_m
+        else:
+            # 'empty': no connections
+            self.output_mask = jnp.zeros(
+                (output_dim, self.buffer_size), dtype=jnp.int32)
 
         # Outgoing connection indices — all -1 (no connections)
         self.outgoing_unit_indices = jnp.full(
@@ -418,6 +434,7 @@ def init_random_dynamic_network(
     activations: Tuple[str, ...] = ('relu',),
     max_fan_out: int | None = None,
     connect_all_to_output: bool = False,
+    init_strategy: str = 'linear',
     *,
     key: PRNGKeyArray,
 ) -> DynamicNetwork:
@@ -430,6 +447,9 @@ def init_random_dynamic_network(
         connect_all_to_output: If True, all active hidden units across all
             layers connect to the output. If False (default), only the last
             hidden layer connects to the output.
+        init_strategy: 'linear' (input→output) or 'empty' (no connections).
+            Only affects the units_per_layer=0 path; when units_per_layer > 0,
+            output arrays are overwritten by the wiring logic below.
     """
     if max_units_per_layer is None:
         max_units_per_layer = units_per_layer
@@ -446,6 +466,7 @@ def init_random_dynamic_network(
         max_connections_per_unit=max_connections_per_unit,
         activations=activations,
         max_fan_out=max_fan_out,
+        init_strategy=init_strategy,
         key=key,
     )
 

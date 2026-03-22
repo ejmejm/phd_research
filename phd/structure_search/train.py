@@ -148,6 +148,11 @@ def prepare_experiment(
 
     # --- Resolve hidden_dim ---
     hidden_dim = cfg.model.hidden_dim
+    init_strategy = cfg.model.get('init_strategy', 'linear')
+    if init_strategy == 'empty' and hidden_dim != 0:
+        raise ValueError(
+            f"init_strategy='empty' requires hidden_dim=0, got hidden_dim={hidden_dim}"
+        )
     target_params = cfg.model.get('target_params', None)
     if target_params is not None:
         hidden_dim = compute_hidden_dim_for_params(
@@ -189,6 +194,7 @@ def prepare_experiment(
                 activations=(cfg.model.activation,),
                 max_fan_out=cfg.model.get('max_fan_out', None),
                 connect_all_to_output=cfg.model.get('connect_all_to_output', False),
+                init_strategy=cfg.model.get('init_strategy', 'linear'),
                 key=model_key,
             )
             if cfg.model.get('freeze_hidden_weights', False):
@@ -235,6 +241,8 @@ def prepare_experiment(
                 connection_budget=cfg.structure_tracker.connection_budget,
                 decay_rate=cfg.structure_tracker.decay_rate,
                 maturity_threshold=cfg.structure_tracker.maturity_threshold,
+                output_connect_strategy=cfg.structure_tracker.get(
+                    'output_connect_strategy', 'all'),
                 generate_fn=generate_fn,
                 rng=rng_from_string(rng, 'tracker'),
             )

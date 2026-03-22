@@ -18,9 +18,11 @@ from phd.structure_search.connectivity_manager import (
     random_generate,
     median_utility_init,
     _unit_buf_positions,
+    _reset_optimizer_state,
 )
 from phd.jax_core.optimizers import EqxOptimizer
 from phd.feature_search.jax_core.experiment_helpers import prepare_optimizer
+from phd.jax_core.optimizers.adam import custom_optax_adam
 
 
 def _make_small_network(key=None):
@@ -169,7 +171,7 @@ def test_modify_structure_runs():
         cm = cm.update_stats(net, buffer)
 
     # Now modify structure
-    cm2, net2, opt2 = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
+    cm2, net2, opt2, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
 
     # Basic validity checks
     assert net2.unit_mask.shape == net.unit_mask.shape
@@ -214,7 +216,7 @@ def test_connection_budget_invariant():
 
     # Run several modify_structure cycles
     for i in range(5):
-        cm, net, optimizer = cm.modify_structure(
+        cm, net, optimizer, _, _ = cm.modify_structure(
             net, optimizer, rng=jax.random.key(10 + i),
         )
         net = sync_outgoing_weights(net)
@@ -253,7 +255,7 @@ def test_generated_units_have_valid_layer_connections():
     for i in range(200):
         cm = cm.update_stats(net, buffer)
 
-    cm2, net2, opt2 = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
+    cm2, net2, opt2, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
 
     input_dim = net2.input_dim
     max_units = net2.max_units_per_layer
@@ -296,7 +298,7 @@ def test_output_connections_for_generated_units():
     for i in range(200):
         cm = cm.update_stats(net, buffer)
 
-    cm2, net2, opt2 = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
+    cm2, net2, opt2, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
 
     # Check all active units have output connections
     buf_positions = _unit_buf_positions(net2)
@@ -312,6 +314,139 @@ def test_output_connections_for_generated_units():
     print("PASS: test_output_connections_for_generated_units")
 
 
+def test_optimizer_state_dtype_after_reset():
+    """Adam step counts should remain int32 after _reset_optimizer_state."""
+    import equinox as eqx
+    net = _make_small_network()
+    net = sync_outgoing_weights(net)
+
+    # Create Adam optimizer
+    spec = jax.tree.map(lambda _: False, net)
+    spec = eqx.tree_at(lambda n: (n.weights, n.output_weights), spec, (True, True))
+    optimizer = prepare_optimizer(net, 'adam', {'learning_rate': 0.001}, filter_spec=spec)
+
+    # Create an affected mask (pretend we pruned some units)
+    affected = jnp.zeros((net.max_layers, net.max_units_per_layer), dtype=jnp.bool_)
+    affected = affected.at[0, 0].set(True)
+
+    new_opt = _reset_optimizer_state(optimizer, net, affected)
+
+    # Check that step field dtypes are preserved
+    # AdamState is a NamedTuple: (lr, step, exp_avg, exp_avg_sq)
+    state = new_opt.state
+    if type(state) is tuple:
+        state = state[0]
+
+    assert state.step.weights.dtype == jnp.int32, (
+        f"Step weights dtype should be int32, got {state.step.weights.dtype}"
+    )
+    assert state.step.output_weights.dtype == jnp.int32, (
+        f"Step output_weights dtype should be int32, got {state.step.output_weights.dtype}"
+    )
+
+    # exp_avg should remain float32
+    assert state.exp_avg.weights.dtype == jnp.float32
+    print("PASS: test_optimizer_state_dtype_after_reset")
+
+
+def test_empty_init_strategy():
+    """DynamicNetwork with init_strategy='empty' should have no connections."""
+    net = DynamicNetwork(
+        input_dim=8,
+        output_dim=3,
+        max_layers=2,
+        max_units_per_layer=6,
+        max_connections_per_unit=5,
+        init_strategy='empty',
+        key=jax.random.key(42),
+    )
+    assert jnp.all(net.output_mask == 0), "Empty init should have no output connections"
+    assert jnp.all(net.output_weights == 0), "Empty init should have zero output weights"
+    assert jnp.all(net.unit_mask == 0), "Empty init should have no active units"
+
+    # Forward pass should produce zeros
+    x = jax.random.normal(jax.random.key(1), (8,))
+    output, _ = net(x)
+    assert jnp.allclose(output, 0.0), "Empty network should output zeros"
+    print("PASS: test_empty_init_strategy")
+
+
+def test_sparse_outgoing_connections():
+    """random_sparse strategy should create sparse output + hidden connections."""
+    net = init_random_dynamic_network(
+        input_dim=8,
+        output_dim=3,
+        n_layers=2,
+        units_per_layer=4,
+        max_units_per_layer=6,
+        max_connections_per_unit=5,
+        max_fan_out=8,
+        activations=('relu',),
+        connect_all_to_output=True,
+        key=jax.random.key(42),
+    )
+    net = sync_outgoing_weights(net)
+    optimizer = _make_optimizer(net)
+
+    cm = ConnectivityManager(
+        model=net, prune_rate=0.5, connection_budget=200.0,
+        decay_rate=0.99, maturity_threshold=-1,
+        max_new_units_per_step=8,
+        output_connect_strategy='random_sparse',
+        rng=jax.random.key(0),
+    )
+
+    batch_size = 16
+    x = jax.random.normal(jax.random.key(1), (batch_size, 8))
+    _, buffer = jax.vmap(net)(x)
+    for i in range(200):
+        cm = cm.update_stats(net, buffer)
+
+    cm2, net2, opt2, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
+
+    # Check that newly generated units have sparse (not all) output connections
+    buf_positions = _unit_buf_positions(net2)
+    max_out = max(1, net2.max_fan_out // 2)
+
+    any_sparse = False
+    for l in range(net2.max_layers):
+        for u in range(net2.max_units_per_layer):
+            if net2.unit_mask[l, u] == 1:
+                bp = int(buf_positions[l, u])
+                n_output_conns = int(net2.output_mask[:, bp].sum())
+                # With random_sparse, units should have at most max_fan_out//2 output conns
+                # (could have more if they existed before the sparse strategy was applied)
+                if n_output_conns < net2.output_dim:
+                    any_sparse = True
+                # No unit should have zero total outgoing (at least 1 output or hidden)
+                # Count hidden outgoing: how many later-layer units point to this bp
+                n_hidden_out = 0
+                for l2 in range(l + 1, net2.max_layers):
+                    for u2 in range(net2.max_units_per_layer):
+                        if net2.unit_mask[l2, u2] == 1:
+                            if jnp.any(net2.input_indices[l2, u2] == bp):
+                                n_hidden_out += 1
+                total_out = n_output_conns + n_hidden_out
+                assert total_out >= 1, (
+                    f"Unit ({l}, {u}) has zero outgoing connections"
+                )
+
+    # At least some units should have sparse output connections
+    assert any_sparse, "Expected some units to have sparse (< output_dim) output connections"
+
+    # No hidden unit should exceed max_connections_per_unit
+    for l in range(net2.max_layers):
+        for u in range(net2.max_units_per_layer):
+            if net2.unit_mask[l, u] == 1:
+                n_conns = int(jnp.sum(net2.input_indices[l, u] >= 0))
+                assert n_conns <= net2.max_connections_per_unit, (
+                    f"Unit ({l}, {u}) has {n_conns} connections, "
+                    f"max is {net2.max_connections_per_unit}"
+                )
+
+    print("PASS: test_sparse_outgoing_connections")
+
+
 if __name__ == '__main__':
     test_init()
     test_contribution_utility_shape()
@@ -321,4 +456,7 @@ if __name__ == '__main__':
     test_connection_budget_invariant()
     test_generated_units_have_valid_layer_connections()
     test_output_connections_for_generated_units()
+    test_optimizer_state_dtype_after_reset()
+    test_empty_init_strategy()
+    test_sparse_outgoing_connections()
     print("\nAll tests passed!")

@@ -90,11 +90,19 @@ def random_generate(
     max_new_units: int,
     init_utility: Float[Array, ''],
     rng: PRNGKeyArray,
-) -> Tuple[DynamicNetwork, 'UnitStats', Float[Array, ''], Bool[Array, 'max_layers max_units_per_layer']]:
+    output_connect_strategy: str = 'all',
+) -> Tuple[DynamicNetwork, 'UnitStats', Float[Array, ''],
+           Bool[Array, 'max_layers max_units_per_layer'],
+           Tuple]:
     """Generate new units in inactive slots, spending from the connection budget.
 
     Fully vectorized: samples all candidate slots at once via vmap,
     then uses cumulative cost to determine which fit in the budget.
+
+    Returns:
+        (model, unit_stats, new_budget, gen_mask_2d, gen_info)
+        gen_info = (cand_layers, cand_units, gen_mask_flat, n_out_per_unit)
+        for use by assign_sparse_outgoing when output_connect_strategy='random_sparse'.
     """
     max_layers = model.max_layers
     max_units = model.max_units_per_layer
@@ -102,13 +110,16 @@ def random_generate(
     input_dim = model.input_dim
     buffer_size = model.buffer_size
     output_dim = model.output_dim
+    max_fan_out = model.max_fan_out
 
-    rng, slot_rng, sample_rng = jax.random.split(rng, 3)
+    n_total_slots = max_layers * max_units
+    max_new_units = min(max_new_units, n_total_slots)
+
+    rng, slot_rng, sample_rng, out_rng = jax.random.split(rng, 4)
 
     # --- 6a: Find and shuffle inactive slots ---
     inactive = (model.unit_mask == 0)  # (max_layers, max_units)
     inactive_flat = inactive.reshape(-1)  # (max_layers * max_units,)
-    n_total_slots = max_layers * max_units
 
     # Shuffle inactive slots to front via noise + argsort
     noise = jax.random.uniform(slot_rng, (n_total_slots,))
@@ -120,130 +131,125 @@ def random_generate(
     cand_valid = inactive_flat[cand_flat_idx]  # True if slot is actually inactive
 
     # --- 6b: Per-layer available source masks ---
-    # layer_available[l, pos] = True if buffer position pos is available to layer l
-    # Inputs are always available; hidden unit at (l2, u) available if l2 < l and active
-    hidden_layers = jnp.arange(max_layers)  # (max_layers,)
-    hidden_units_arr = jnp.arange(max_units)  # (max_units,)
+    hidden_layers = jnp.arange(max_layers)
+    hidden_units_arr = jnp.arange(max_units)
     hidden_buf_pos = (
         input_dim
         + hidden_layers[:, None] * max_units
         + hidden_units_arr[None, :]
-    )  # (max_layers, max_units)
+    )
 
-    # For each target layer l, hidden layer l2 is available if l2 < l
-    # shape: (max_layers_target, max_layers_source, max_units)
     target_layers = jnp.arange(max_layers)[:, None, None]
     source_layers = hidden_layers[None, :, None]
-    source_active = model.unit_mask[None, :, :]  # (1, max_layers, max_units)
+    source_active = model.unit_mask[None, :, :]
     hidden_available = (source_layers < target_layers) & (source_active == 1)
-    # (max_layers, max_layers, max_units) -> flatten source dims to buffer positions
 
-    # Build full layer_available: (max_layers, buffer_size)
     layer_available = jnp.zeros((max_layers, buffer_size), dtype=jnp.bool_)
     layer_available = layer_available.at[:, :input_dim].set(True)
-    # Scatter hidden availability
     for_scatter = hidden_available.reshape(max_layers, max_layers * max_units)
-    hidden_buf_flat = hidden_buf_pos.reshape(-1)  # (max_layers * max_units,)
+    hidden_buf_flat = hidden_buf_pos.reshape(-1)
     layer_available = layer_available.at[:, hidden_buf_flat].set(for_scatter)
 
-    # --- 6c: Vectorized connection sampling ---
+    # --- 6c: Vectorized input connection sampling ---
     sample_keys = jax.random.split(sample_rng, max_new_units)
 
     def sample_one_unit(key, cand_layer):
-        """Sample connections for one candidate unit. Pure function for vmap."""
+        """Sample input connections for one candidate unit."""
         key1, key2, key3 = jax.random.split(key, 3)
 
-        avail = layer_available[cand_layer]  # (buffer_size,)
+        avail = layer_available[cand_layer]
         n_available = jnp.sum(avail)
 
-        # Number of connections: uniform from 1 to min(n_available, max_conns)
         max_possible = jnp.minimum(n_available, max_conns)
-        # Clamp to at least 1 to avoid randint(1, 1) issues when no sources
         max_possible = jnp.maximum(max_possible, 1)
         n_conns = jax.random.randint(key1, (), 1, max_possible + 1)
 
-        # Shuffle available positions to front
         shuffle_noise = jax.random.uniform(key2, (buffer_size,))
         shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
         sorted_idx = jnp.argsort(shuffle_key)
         selected = sorted_idx[:max_conns]
 
-        # Mask beyond n_conns with -1
         conn_active = jnp.arange(max_conns) < n_conns
         new_indices = jnp.where(conn_active, selected, -1).astype(jnp.int32)
 
-        # LecunUniform weights (inlined to avoid static_argnames issues with traced n_conns)
         bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(n_conns, 1).astype(jnp.float32))
         new_weights = jax.random.uniform(key3, (max_conns,), minval=-bound, maxval=bound)
         new_weights = jnp.where(conn_active, new_weights, 0.0)
 
-        cost = n_conns + output_dim
-        return new_indices, new_weights, cost, n_available
+        # Return input cost only; output cost added separately
+        return new_indices, new_weights, n_conns, n_available
 
-    all_indices, all_weights, all_costs, all_n_avail = jax.vmap(
+    all_indices, all_weights, all_input_costs, all_n_avail = jax.vmap(
         sample_one_unit
     )(sample_keys, cand_layers)
-    # all_indices: (max_new_units, max_conns)
-    # all_weights: (max_new_units, max_conns)
-    # all_costs: (max_new_units,)
 
     # Units with no available sources should not be generated
     cand_valid = cand_valid & (all_n_avail > 0)
+
+    # --- 6c2: Output cost per unit ---
+    if output_connect_strategy == 'random_sparse':
+        # Sample outgoing connection count for each candidate
+        out_keys = jax.random.split(out_rng, max_new_units)
+        max_out = max(1, max_fan_out // 2)
+        n_out_per_unit = jax.vmap(
+            lambda k: jax.random.randint(k, (), 1, max_out + 1)
+        )(out_keys)
+        all_costs = all_input_costs + n_out_per_unit
+    else:
+        n_out_per_unit = jnp.full(max_new_units, output_dim, dtype=jnp.int32)
+        all_costs = all_input_costs + output_dim
 
     # --- 6d: Determine which units fit in budget ---
     costs_if_valid = jnp.where(cand_valid, all_costs.astype(jnp.float32), 0.0)
     cumulative_cost = jnp.cumsum(costs_if_valid)
     gen_mask = cand_valid & (cumulative_cost <= budget)
 
-    # --- 6e: Apply all changes via scatter ---
-    # Input indices
-    old_indices = model.input_indices[cand_layers, cand_units]  # (max_new_units, max_conns)
+    # --- 6e: Apply input connections via scatter ---
+    old_indices = model.input_indices[cand_layers, cand_units]
     new_input_indices_vals = jnp.where(gen_mask[:, None], all_indices, old_indices)
     new_input_indices = model.input_indices.at[cand_layers, cand_units].set(
         new_input_indices_vals
     )
 
-    # Weights
     old_weights = model.weights[cand_layers, cand_units]
     new_weights_vals = jnp.where(gen_mask[:, None], all_weights, old_weights)
     new_weights = model.weights.at[cand_layers, cand_units].set(new_weights_vals)
 
-    # Unit mask
     old_umask = model.unit_mask[cand_layers, cand_units]
     new_umask_vals = jnp.where(gen_mask, 1, old_umask).astype(jnp.int32)
     new_unit_mask = model.unit_mask.at[cand_layers, cand_units].set(new_umask_vals)
 
-    # Activation indices (0 = ReLU)
     old_act = model.activation_indices[cand_layers, cand_units]
     new_act_vals = jnp.where(gen_mask, 0, old_act).astype(jnp.int32)
     new_activation_indices = model.activation_indices.at[cand_layers, cand_units].set(
         new_act_vals
     )
 
-    # Output connections: set output_mask and output_weights for generated units
+    # --- 6f: Output connections ---
     cand_buf_pos = (
         input_dim + cand_layers * max_units + cand_units
-    )  # (max_new_units,)
+    )
 
-    # For output_mask: set columns at cand_buf_pos to 1 where gen_mask is True
-    # output_mask shape: (output_dim, buffer_size)
-    new_output_mask = model.output_mask
-    new_output_weights = model.output_weights
-    # Build a (buffer_size,) mask of generated buf positions
-    gen_buf_mask = jnp.zeros(buffer_size, dtype=jnp.bool_)
-    gen_buf_mask = gen_buf_mask.at[cand_buf_pos].set(gen_mask)
-    # Set output_mask columns to 1 where generated
-    new_output_mask = jnp.where(
-        gen_buf_mask[None, :],
-        jnp.ones_like(new_output_mask),
-        new_output_mask,
-    )
-    # Set output_weights columns to 0 where generated
-    new_output_weights = jnp.where(
-        gen_buf_mask[None, :].astype(jnp.float32),
-        0.0,
-        new_output_weights,
-    )
+    if output_connect_strategy == 'random_sparse':
+        # Output connections handled by assign_sparse_outgoing after generation
+        new_output_mask = model.output_mask
+        new_output_weights = model.output_weights
+    else:
+        # Connect to ALL output dims (existing behavior)
+        new_output_mask = model.output_mask
+        new_output_weights = model.output_weights
+        gen_buf_mask = jnp.zeros(buffer_size, dtype=jnp.bool_)
+        gen_buf_mask = gen_buf_mask.at[cand_buf_pos].set(gen_mask)
+        new_output_mask = jnp.where(
+            gen_buf_mask[None, :],
+            jnp.ones_like(new_output_mask),
+            new_output_mask,
+        )
+        new_output_weights = jnp.where(
+            gen_buf_mask[None, :].astype(jnp.float32),
+            0.0,
+            new_output_weights,
+        )
 
     model = eqx.tree_at(
         lambda m: (
@@ -280,7 +286,8 @@ def random_generate(
     gen_mask_2d = jnp.zeros((max_layers, max_units), dtype=jnp.bool_)
     gen_mask_2d = gen_mask_2d.at[cand_layers, cand_units].set(gen_mask)
 
-    return model, unit_stats, new_budget, gen_mask_2d
+    gen_info = (cand_layers, cand_units, gen_mask, n_out_per_unit)
+    return model, unit_stats, new_budget, gen_mask_2d, gen_info
 
 
 def full_input_generate(
@@ -290,12 +297,14 @@ def full_input_generate(
     max_new_units: int,
     init_utility: Float[Array, ''],
     rng: PRNGKeyArray,
-) -> Tuple[DynamicNetwork, 'UnitStats', Float[Array, ''], Bool[Array, 'max_layers max_units_per_layer']]:
+    output_connect_strategy: str = 'all',
+) -> Tuple[DynamicNetwork, 'UnitStats', Float[Array, ''],
+           Bool[Array, 'max_layers max_units_per_layer'],
+           Tuple]:
     """Generate new units fully connected to all inputs with ±1 weights.
 
     Every generated unit connects to ALL input_dim inputs with random ±1
-    weights and to ALL outputs with weight 0. Fixed cost per unit =
-    input_dim + output_dim.
+    weights. Output connections depend on output_connect_strategy.
     """
     max_layers = model.max_layers
     max_units = model.max_units_per_layer
@@ -303,15 +312,15 @@ def full_input_generate(
     input_dim = model.input_dim
     buffer_size = model.buffer_size
     output_dim = model.output_dim
+    max_fan_out = model.max_fan_out
 
-    cost_per_unit = input_dim + output_dim
     n_total_slots = max_layers * max_units
     max_new_units = min(max_new_units, n_total_slots)
 
-    rng, slot_rng, weight_rng = jax.random.split(rng, 3)
+    rng, slot_rng, weight_rng, out_rng = jax.random.split(rng, 4)
 
     # --- Find and shuffle inactive slots (same pattern as random_generate) ---
-    inactive = (model.unit_mask == 0)  # (max_layers, max_units)
+    inactive = (model.unit_mask == 0)
     inactive_flat = inactive.reshape(-1)
 
     noise = jax.random.uniform(slot_rng, (n_total_slots,))
@@ -322,11 +331,23 @@ def full_input_generate(
     cand_units = cand_flat_idx % max_units
     cand_valid = inactive_flat[cand_flat_idx]
 
-    # --- Determine how many units fit in budget ---
-    n_affordable = jnp.floor(budget / cost_per_unit).astype(jnp.int32)
-    # Use cumulative count of valid candidates vs budget
-    cumulative_valid = jnp.cumsum(cand_valid.astype(jnp.int32))
-    gen_mask = cand_valid & (cumulative_valid <= n_affordable)
+    # --- Compute per-unit cost and budget check ---
+    if output_connect_strategy == 'random_sparse':
+        out_keys = jax.random.split(out_rng, max_new_units)
+        max_out = max(1, max_fan_out // 2)
+        n_out_per_unit = jax.vmap(
+            lambda k: jax.random.randint(k, (), 1, max_out + 1)
+        )(out_keys)
+        cost_per_unit = input_dim + n_out_per_unit  # per-unit variable cost
+        costs_if_valid = jnp.where(cand_valid, cost_per_unit.astype(jnp.float32), 0.0)
+        cumulative_cost = jnp.cumsum(costs_if_valid)
+        gen_mask = cand_valid & (cumulative_cost <= budget)
+    else:
+        n_out_per_unit = jnp.full(max_new_units, output_dim, dtype=jnp.int32)
+        cost_per_unit_scalar = input_dim + output_dim
+        n_affordable = jnp.floor(budget / cost_per_unit_scalar).astype(jnp.int32)
+        cumulative_valid = jnp.cumsum(cand_valid.astype(jnp.int32))
+        gen_mask = cand_valid & (cumulative_valid <= n_affordable)
 
     # --- Build input_indices: all inputs [0, 1, ..., input_dim-1] padded to max_conns ---
     full_indices = jnp.full(max_conns, -1, dtype=jnp.int32)
@@ -336,52 +357,52 @@ def full_input_generate(
     weight_keys = jax.random.split(weight_rng, max_new_units)
     def _sample_binary_weights(key):
         return 2.0 * jax.random.bernoulli(key, 0.5, (max_conns,)).astype(jnp.float32) - 1.0
-    all_weights = jax.vmap(_sample_binary_weights)(weight_keys)  # (max_new_units, max_conns)
-    # Zero out padding positions beyond input_dim
+    all_weights = jax.vmap(_sample_binary_weights)(weight_keys)
     conn_mask = (jnp.arange(max_conns) < input_dim).astype(jnp.float32)
     all_weights = all_weights * conn_mask[None, :]
 
-    # --- Apply changes via scatter (same pattern as random_generate) ---
-    # Input indices
+    # --- Apply changes via scatter ---
     old_indices = model.input_indices[cand_layers, cand_units]
     new_input_indices_vals = jnp.where(gen_mask[:, None], full_indices[None, :], old_indices)
     new_input_indices = model.input_indices.at[cand_layers, cand_units].set(
         new_input_indices_vals
     )
 
-    # Weights
     old_weights = model.weights[cand_layers, cand_units]
     new_weights_vals = jnp.where(gen_mask[:, None], all_weights, old_weights)
     new_weights = model.weights.at[cand_layers, cand_units].set(new_weights_vals)
 
-    # Unit mask
     old_umask = model.unit_mask[cand_layers, cand_units]
     new_umask_vals = jnp.where(gen_mask, 1, old_umask).astype(jnp.int32)
     new_unit_mask = model.unit_mask.at[cand_layers, cand_units].set(new_umask_vals)
 
-    # Activation indices (0 = first activation in tuple, e.g. ltu)
     old_act = model.activation_indices[cand_layers, cand_units]
     new_act_vals = jnp.where(gen_mask, 0, old_act).astype(jnp.int32)
     new_activation_indices = model.activation_indices.at[cand_layers, cand_units].set(
         new_act_vals
     )
 
-    # Output connections
+    # --- Output connections ---
     cand_buf_pos = (
         input_dim + cand_layers * max_units + cand_units
     )
-    gen_buf_mask = jnp.zeros(buffer_size, dtype=jnp.bool_)
-    gen_buf_mask = gen_buf_mask.at[cand_buf_pos].set(gen_mask)
-    new_output_mask = jnp.where(
-        gen_buf_mask[None, :],
-        jnp.ones_like(model.output_mask),
-        model.output_mask,
-    )
-    new_output_weights = jnp.where(
-        gen_buf_mask[None, :].astype(jnp.float32),
-        0.0,
-        model.output_weights,
-    )
+
+    if output_connect_strategy == 'random_sparse':
+        new_output_mask = model.output_mask
+        new_output_weights = model.output_weights
+    else:
+        gen_buf_mask = jnp.zeros(buffer_size, dtype=jnp.bool_)
+        gen_buf_mask = gen_buf_mask.at[cand_buf_pos].set(gen_mask)
+        new_output_mask = jnp.where(
+            gen_buf_mask[None, :],
+            jnp.ones_like(model.output_mask),
+            model.output_mask,
+        )
+        new_output_weights = jnp.where(
+            gen_buf_mask[None, :].astype(jnp.float32),
+            0.0,
+            model.output_weights,
+        )
 
     model = eqx.tree_at(
         lambda m: (
@@ -411,15 +432,166 @@ def full_input_generate(
     )
 
     # Deduct spent connections
-    n_generated = jnp.sum(gen_mask.astype(jnp.int32))
-    spent = (n_generated * cost_per_unit).astype(jnp.float32)
+    if output_connect_strategy == 'random_sparse':
+        all_costs = input_dim + n_out_per_unit
+        spent = jnp.sum(jnp.where(gen_mask, all_costs.astype(jnp.float32), 0.0))
+    else:
+        n_generated = jnp.sum(gen_mask.astype(jnp.int32))
+        spent = (n_generated * (input_dim + output_dim)).astype(jnp.float32)
     new_budget = budget - spent
 
     # Build 2D affected mask for optimizer reset
     gen_mask_2d = jnp.zeros((max_layers, max_units), dtype=jnp.bool_)
     gen_mask_2d = gen_mask_2d.at[cand_layers, cand_units].set(gen_mask)
 
-    return model, unit_stats, new_budget, gen_mask_2d
+    gen_info = (cand_layers, cand_units, gen_mask, n_out_per_unit)
+    return model, unit_stats, new_budget, gen_mask_2d, gen_info
+
+
+def assign_sparse_outgoing(
+    model: DynamicNetwork,
+    gen_info: Tuple,
+    max_new_units: int,
+    rng: PRNGKeyArray,
+) -> DynamicNetwork:
+    """Assign sparse outgoing connections (output + hidden) for generated units.
+
+    Processes units sequentially via nested jax.lax.scan to avoid conflicting
+    writes when multiple new units target the same hidden unit's empty slot.
+
+    Args:
+        model: DynamicNetwork after generation (units have input connections
+            but no outgoing connections yet).
+        gen_info: (cand_layers, cand_units, gen_mask_flat, n_out_per_unit)
+            from random_generate/full_input_generate.
+        max_new_units: Maximum number of candidate units.
+        rng: PRNG key for target sampling.
+    """
+    cand_layers, cand_units, gen_mask_flat, n_out_per_unit = gen_info
+
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    input_dim = model.input_dim
+    output_dim = model.output_dim
+    max_fan_out = model.max_fan_out
+    max_out = max(1, max_fan_out // 2)
+
+    # Combined target pool: output neurons + hidden units
+    # Pool index 0..output_dim-1 = output neurons
+    # Pool index output_dim + l*max_units + u = hidden unit (l, u)
+    hidden_pool_size = max_layers * max_units
+    pool_size = output_dim + hidden_pool_size
+
+    keys = jax.random.split(rng, max_new_units)
+
+    # Carry: mutable model arrays
+    input_indices = model.input_indices
+    weights = model.weights
+    output_mask = model.output_mask
+    output_weights = model.output_weights
+    unit_mask = model.unit_mask  # read-only reference for availability
+
+    def process_one_unit(carry, idx):
+        input_indices, weights, output_mask, output_weights = carry
+
+        key = keys[idx]
+        is_valid = gen_mask_flat[idx]
+        source_layer = cand_layers[idx]
+        source_unit = cand_units[idx]
+        source_bp = input_dim + source_layer * max_units + source_unit
+        n_out = n_out_per_unit[idx]
+
+        # Build target availability mask
+        # Output neurons: always available
+        output_available = jnp.ones(output_dim, dtype=jnp.bool_)
+
+        # Hidden units: active, in later layer, with at least 1 empty input slot
+        has_empty = jnp.any(input_indices == -1, axis=-1)  # (max_layers, max_units)
+        is_later = jnp.arange(max_layers)[:, None] > source_layer
+        hidden_available = (
+            has_empty & is_later & (unit_mask == 1)
+        ).reshape(-1)  # (hidden_pool_size,)
+
+        pool_available = jnp.concatenate([output_available, hidden_available])
+
+        # Shuffle available targets to front, select first n_out
+        noise = jax.random.uniform(key, (pool_size,))
+        sort_key = jnp.where(pool_available, noise, 2.0)
+        sorted_idx = jnp.argsort(sort_key)
+        selected = sorted_idx[:max_out]  # (max_out,)
+        selected_valid = (jnp.arange(max_out) < n_out) & is_valid
+
+        # Process each selected target
+        def assign_one_target(carry, j):
+            input_indices, weights, output_mask, output_weights = carry
+            target_pool_idx = selected[j]
+            should_assign = selected_valid[j]
+
+            is_output_target = target_pool_idx < output_dim
+
+            # --- Output target path ---
+            safe_output_idx = jnp.where(is_output_target, target_pool_idx, 0)
+            out_current = output_mask[safe_output_idx, source_bp]
+            out_new = jnp.where(
+                should_assign & is_output_target, 1, out_current
+            ).astype(jnp.int32)
+            output_mask = output_mask.at[safe_output_idx, source_bp].set(out_new)
+
+            # Zero the output weight for new connections
+            ow_current = output_weights[safe_output_idx, source_bp]
+            ow_new = jnp.where(
+                should_assign & is_output_target, 0.0, ow_current
+            )
+            output_weights = output_weights.at[safe_output_idx, source_bp].set(ow_new)
+
+            # --- Hidden target path ---
+            hidden_flat_idx = target_pool_idx - output_dim
+            target_layer = hidden_flat_idx // max_units
+            target_unit_idx = hidden_flat_idx % max_units
+
+            # Safe indices (when is_output_target, use 0,0 — write is no-op)
+            safe_tl = jnp.where(~is_output_target, target_layer, 0)
+            safe_tu = jnp.where(~is_output_target, target_unit_idx, 0)
+
+            # Find first empty slot in target unit's input_indices
+            slots = input_indices[safe_tl, safe_tu]  # (max_conns,)
+            empty = slots == -1
+            has_empty_slot = jnp.any(empty)
+            first_empty = jnp.argmax(empty)
+
+            should_hidden = should_assign & ~is_output_target & has_empty_slot
+            idx_current = input_indices[safe_tl, safe_tu, first_empty]
+            idx_new = jnp.where(should_hidden, source_bp, idx_current).astype(jnp.int32)
+            input_indices = input_indices.at[safe_tl, safe_tu, first_empty].set(idx_new)
+
+            # Weight = 0 for new hidden connections
+            w_current = weights[safe_tl, safe_tu, first_empty]
+            w_new = jnp.where(should_hidden, 0.0, w_current)
+            weights = weights.at[safe_tl, safe_tu, first_empty].set(w_new)
+
+            return (input_indices, weights, output_mask, output_weights), None
+
+        (input_indices, weights, output_mask, output_weights), _ = jax.lax.scan(
+            assign_one_target,
+            (input_indices, weights, output_mask, output_weights),
+            jnp.arange(max_out),
+        )
+
+        return (input_indices, weights, output_mask, output_weights), None
+
+    (input_indices, weights, output_mask, output_weights), _ = jax.lax.scan(
+        process_one_unit,
+        (input_indices, weights, output_mask, output_weights),
+        jnp.arange(max_new_units),
+    )
+
+    model = eqx.tree_at(
+        lambda m: (m.input_indices, m.weights, m.output_mask, m.output_weights),
+        model,
+        (input_indices, weights, output_mask, output_weights),
+    )
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +634,7 @@ class ConnectivityManager(eqx.Module):
     decay_rate: float = eqx.field(static=True)
     maturity_threshold: int = eqx.field(static=True)
     max_new_units_per_step: int = eqx.field(static=True)
+    output_connect_strategy: str = eqx.field(static=True)
     utility_fn: Callable = eqx.field(static=True)
     generate_fn: Callable = eqx.field(static=True)
     utility_init_fn: Callable = eqx.field(static=True)
@@ -480,6 +653,7 @@ class ConnectivityManager(eqx.Module):
         decay_rate: float = 0.99,
         maturity_threshold: int = -1,
         max_new_units_per_step: int = 512,
+        output_connect_strategy: str = 'all',
         utility_fn: Optional[Callable] = None,
         generate_fn: Optional[Callable] = None,
         utility_init_fn: Optional[Callable] = None,
@@ -489,6 +663,7 @@ class ConnectivityManager(eqx.Module):
         self.decay_rate = decay_rate
         self.maturity_threshold = maturity_threshold
         self.max_new_units_per_step = max_new_units_per_step
+        self.output_connect_strategy = output_connect_strategy
         self.prune_rate = prune_rate
         self.connection_budget = connection_budget
         self.rng = rng
@@ -623,11 +798,19 @@ class ConnectivityManager(eqx.Module):
         )
 
         # --- Generate new units ---
-        model, unit_stats, _, gen_mask_2d = self.generate_fn(
+        model, unit_stats, _, gen_mask_2d, gen_info = self.generate_fn(
             model, unit_stats, gen_budget,
             self.max_new_units_per_step,
             init_utility, gen_rng,
+            output_connect_strategy=self.output_connect_strategy,
         )
+
+        # --- Assign sparse outgoing connections if needed ---
+        if self.output_connect_strategy == 'random_sparse':
+            rng, sparse_rng = jax.random.split(rng)
+            model = assign_sparse_outgoing(
+                model, gen_info, self.max_new_units_per_step, sparse_rng,
+            )
 
         # --- Rebuild outgoing indices ---
         model = build_outgoing_indices(model)
@@ -730,22 +913,28 @@ def _reset_optimizer_state(
     output_mask = buf_mask[None, :]  # (1, buffer_size)
 
     core_state = optimizer.state
-    is_chained = isinstance(core_state, tuple)
+    # optax.chain wraps states in a plain tuple; NamedTuples (e.g. AdamState)
+    # are also tuples, so use type() to distinguish.
+    is_chained = type(core_state) is tuple
     if is_chained:
         core_state = core_state[0]
 
     new_fields = []
     for i, val in enumerate(core_state):
-        if val is None or jnp.isscalar(val):
+        if val is None:
             new_fields.append(val)
-        else:
+        elif hasattr(val, 'weights') and hasattr(val, 'output_weights'):
             # val is a filtered DynamicNetwork PyTree — has .weights and .output_weights
-            new_w = jnp.where(weights_mask, 0.0, val.weights)
-            new_ow = jnp.where(output_mask, 0.0, val.output_weights)
+            # Use zeros_like to preserve dtype (e.g. Adam step counts are int32)
+            new_w = jnp.where(weights_mask, jnp.zeros_like(val.weights), val.weights)
+            new_ow = jnp.where(output_mask, jnp.zeros_like(val.output_weights), val.output_weights)
             new_val = eqx.tree_at(
                 lambda v: (v.weights, v.output_weights), val, (new_w, new_ow),
             )
             new_fields.append(new_val)
+        else:
+            # Scalar or other non-parameter state (e.g. learning rate) — keep as-is
+            new_fields.append(val)
 
     new_core = core_state.__class__(*new_fields)
     new_state = (new_core, *optimizer.state[1:]) if is_chained else new_core
