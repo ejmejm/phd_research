@@ -12,9 +12,9 @@ spec:
 
 plot_params:
   metrics: [average_loss, asymptotic_loss, asymptotic_accuracy]
-  split_by: [dataset.permute_period]
   sensitivity:
-    params: [optimizer.learning_rate]
+    hue: [optimizer.learning_rate]
+    params: [dataset.permute_period]
 
 # Use a parameter budget where both models converge to similar performance
 # in the stationary setting. Adjust after seeing stationary results.
@@ -44,12 +44,10 @@ parameters:
 
   optimizer.name: adam
 
-  # Center around 2^-12 for block-sparse
+  # 2^-12 best for block-sparse, plus 4x higher and 4x lower
   optimizer.learning_rate:
     - "${eval:2**-14}"
-    - "${eval:2**-13}"
     - "${eval:2**-12}"
-    - "${eval:2**-11}"
     - "${eval:2**-10}"
 
   seed:
