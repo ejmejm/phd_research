@@ -160,8 +160,9 @@ def random_generate(
         avail = layer_available[cand_layer]
         n_available = jnp.sum(avail)
 
-        # Always use max incoming connections (capped by available sources)
-        n_conns = jnp.minimum(n_available, max_conns)
+        # Use half of max incoming connections (capped by available sources)
+        half_conns = jnp.maximum(max_conns // 2, 1)
+        n_conns = jnp.minimum(n_available, half_conns)
         n_conns = jnp.maximum(n_conns, 1)
 
         shuffle_noise = jax.random.uniform(key2, (buffer_size,))

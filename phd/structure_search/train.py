@@ -263,8 +263,10 @@ def prepare_experiment(
         net = train_states[0].model
         n_units = count_active_units(net)
         n_conns = count_active_connections(net)
+        max_conns = net.weights.size + net.output_weights.size
         print(f'Model: DynamicNetwork, Params: {n_params}, '
-              f'Units: {n_units}, Connections: {n_conns}, Seeds: {seeds}')
+              f'Units: {n_units}, Connections: {n_conns}/{max_conns}, '
+              f'Seeds: {seeds}')
     elif model_type == 'block_sparse':
         print(f'Model: BlockSparseMLP, Params: {n_params}, '
               f'hidden_dim={hidden_dim}, n_tasks={n_tasks}, Seeds: {seeds}')
