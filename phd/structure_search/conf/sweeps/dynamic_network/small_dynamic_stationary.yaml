@@ -1,5 +1,5 @@
-experiment: parallel-mnist
-sweep_name: parallel_mnist_dynamic_stationary
+experiment: parallel-mnist-small
+sweep_name: parallel_mnist_small_dynamic_stationary
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
@@ -12,6 +12,7 @@ spec:
 
 plot_params:
   metrics: [asymptotic_test_loss, asymptotic_test_accuracy, asymptotic_loss, asymptotic_accuracy]
+  split_by: [structure_tracker.utility_fn]
   sensitivity:
     hue: [optimizer.learning_rate]
     params: [structure_tracker.prune_rate]
@@ -25,10 +26,10 @@ parameters:
   dataset.permute_period: 0
 
   model.type: dynamic
-  model.n_layers: 3
+  model.n_layers: 2
   model.hidden_dim: 0
-  model.max_units_per_layer: 20000
-  model.max_connections_per_unit: 32
+  model.max_units_per_layer: 600
+  model.max_connections_per_unit: 64
   model.connect_all_to_output: false
   model.max_fan_out: 64
   model.init_strategy: empty
@@ -41,16 +42,16 @@ parameters:
   train.eval_freq: 10000
 
   structure_tracker.enabled: true
-  structure_tracker.connection_budget: "${eval:2**20}"
+  structure_tracker.connection_budget: 50_000
   structure_tracker.decay_rate: 0.999
   structure_tracker.maturity_threshold: 1
-  structure_tracker.prune_frequency: 50
+  structure_tracker.prune_frequency: 200
   structure_tracker.output_connect_strategy: random_sparse
+  structure_tracker.max_new_units_per_step: 256
+
+  structure_tracker.utility_fn: [contribution, upgd]
 
   optimizer.learning_rate:
-    - "${eval:2**-22}"
-    - "${eval:2**-20}"
-    - "${eval:2**-18}"
     - "${eval:2**-16}"
     - "${eval:2**-14}"
     - "${eval:2**-12}"

@@ -332,6 +332,7 @@ def full_input_generate(
     init_utility: Float[Array, ''],
     rng: PRNGKeyArray,
     output_connect_strategy: str = 'all',
+    output_weight_init: str = 'zero',
 ) -> Tuple[DynamicNetwork, 'UnitStats', Float[Array, ''],
            Bool[Array, 'max_layers max_units_per_layer'],
            Tuple]:
@@ -483,6 +484,7 @@ def assign_sparse_outgoing(
     gen_info: Tuple,
     max_new_units: int,
     rng: PRNGKeyArray,
+    output_weight_init: str = 'zero',
 ) -> DynamicNetwork:
     """Assign sparse outgoing connections (output + hidden) for generated units.
 
@@ -496,6 +498,9 @@ def assign_sparse_outgoing(
             from random_generate/full_input_generate.
         max_new_units: Maximum number of candidate units.
         rng: PRNG key for target sampling.
+        output_weight_init: 'zero' or 'lecun_uniform'. If 'lecun_uniform',
+            outgoing weights are sampled from U(-bound, bound) with
+            bound = sqrt(3 / fan_out) where fan_out = n_out_per_unit.
     """
     cand_layers, cand_units, gen_mask_flat, n_out_per_unit = gen_info
 
@@ -513,7 +518,21 @@ def assign_sparse_outgoing(
     hidden_pool_size = max_layers * max_units
     pool_size = output_dim + hidden_pool_size
 
+    rng, init_rng = jax.random.split(rng)
     keys = jax.random.split(rng, max_new_units)
+
+    # Pre-generate random weights for lecun_uniform init
+    # Shape: (max_new_units, max_out) — one weight per outgoing connection per unit
+    if output_weight_init == 'lecun_uniform':
+        init_keys = jax.random.split(init_rng, max_new_units)
+        bound = jnp.sqrt(3.0 / jnp.maximum(n_out_per_unit, 1).astype(jnp.float32))
+        # (max_new_units,) bounds, sample (max_new_units, max_out) uniform
+        raw = jax.vmap(
+            lambda k: jax.random.uniform(k, (max_out,), minval=-1.0, maxval=1.0)
+        )(init_keys)
+        init_weights = raw * bound[:, None]  # (max_new_units, max_out)
+    else:
+        init_weights = jnp.zeros((max_new_units, max_out))
 
     # Carry: mutable model arrays
     input_indices = model.input_indices
@@ -551,12 +570,14 @@ def assign_sparse_outgoing(
         sorted_idx = jnp.argsort(sort_key)
         selected = sorted_idx[:max_out]  # (max_out,)
         selected_valid = (jnp.arange(max_out) < n_out) & is_valid
+        unit_init_weights = init_weights[idx]  # (max_out,)
 
         # Process each selected target
         def assign_one_target(carry, j):
             input_indices, weights, output_mask, output_weights = carry
             target_pool_idx = selected[j]
             should_assign = selected_valid[j]
+            w_init = unit_init_weights[j]
 
             is_output_target = target_pool_idx < output_dim
 
@@ -568,10 +589,10 @@ def assign_sparse_outgoing(
             ).astype(jnp.int32)
             output_mask = output_mask.at[safe_output_idx, source_bp].set(out_new)
 
-            # Zero the output weight for new connections
+            # Initialize output weight for new connections
             ow_current = output_weights[safe_output_idx, source_bp]
             ow_new = jnp.where(
-                should_assign & is_output_target, 0.0, ow_current
+                should_assign & is_output_target, w_init, ow_current
             )
             output_weights = output_weights.at[safe_output_idx, source_bp].set(ow_new)
 
@@ -595,9 +616,9 @@ def assign_sparse_outgoing(
             idx_new = jnp.where(should_hidden, source_bp, idx_current).astype(jnp.int32)
             input_indices = input_indices.at[safe_tl, safe_tu, first_empty].set(idx_new)
 
-            # Weight = 0 for new hidden connections
+            # Initialize weight for new hidden connections
             w_current = weights[safe_tl, safe_tu, first_empty]
-            w_new = jnp.where(should_hidden, 0.0, w_current)
+            w_new = jnp.where(should_hidden, w_init, w_current)
             weights = weights.at[safe_tl, safe_tu, first_empty].set(w_new)
 
             return (input_indices, weights, output_mask, output_weights), None
@@ -665,6 +686,7 @@ class ConnectivityManager(eqx.Module):
     maturity_threshold: int = eqx.field(static=True)
     max_new_units_per_step: int = eqx.field(static=True)
     output_connect_strategy: str = eqx.field(static=True)
+    output_weight_init: str = eqx.field(static=True)
     utility_fn: Callable = eqx.field(static=True)
     generate_fn: Callable = eqx.field(static=True)
     utility_init_fn: Callable = eqx.field(static=True)
@@ -684,6 +706,7 @@ class ConnectivityManager(eqx.Module):
         maturity_threshold: int = -1,
         max_new_units_per_step: int = 512,
         output_connect_strategy: str = 'all',
+        output_weight_init: str = 'zero',
         utility_fn: Optional[Callable] = None,
         generate_fn: Optional[Callable] = None,
         utility_init_fn: Optional[Callable] = None,
@@ -694,6 +717,7 @@ class ConnectivityManager(eqx.Module):
         self.maturity_threshold = maturity_threshold
         self.max_new_units_per_step = max_new_units_per_step
         self.output_connect_strategy = output_connect_strategy
+        self.output_weight_init = output_weight_init
         self.prune_rate = prune_rate
         self.connection_budget = connection_budget
         self.rng = rng
@@ -842,6 +866,7 @@ class ConnectivityManager(eqx.Module):
             rng, sparse_rng = jax.random.split(rng)
             model = assign_sparse_outgoing(
                 model, gen_info, self.max_new_units_per_step, sparse_rng,
+                output_weight_init=self.output_weight_init,
             )
 
         # --- Rebuild outgoing indices ---

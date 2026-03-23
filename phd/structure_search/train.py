@@ -255,6 +255,8 @@ def prepare_experiment(
                     'max_new_units_per_step', 512),
                 output_connect_strategy=cfg.structure_tracker.get(
                     'output_connect_strategy', 'all'),
+                output_weight_init=cfg.structure_tracker.get(
+                    'output_weight_init', 'zero'),
                 utility_fn=utility_fn,
                 generate_fn=generate_fn,
                 rng=rng_from_string(rng, 'tracker'),

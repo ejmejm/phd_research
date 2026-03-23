@@ -44,7 +44,6 @@ def plot_param_sensitivity(
         }).reset_index()
         if config_df is not None:
             final_step_df = final_step_df.merge(config_df, on=id_col, how='left')
-        y_label = f'Cumulative {y_label}'
         
     elif metric_type.lower() == 'last':
         final_step_df = run_df.groupby(id_col).last().reset_index()
@@ -78,8 +77,6 @@ def plot_param_sensitivity(
         # Merge with config data
         if config_df is not None:
             final_step_df = final_step_df.merge(config_df, on=id_col, how='left')
-
-        y_label = f'{y_label} (Final 5%)'
         
     else:
         raise ValueError(f"Invalid metric type: {metric_type}!")
