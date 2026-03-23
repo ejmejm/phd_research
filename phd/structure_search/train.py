@@ -39,7 +39,7 @@ from phd.structure_search.block_sparse_mlp import (
 from phd.structure_search.data import load_dataset, DataStream, ParallelMNISTStream
 from phd.structure_search.connectivity_manager import (
     ConnectivityManager, full_input_generate,
-    contribution_utility, upgd_utility, si_utility,
+    contribution_utility, upgd_utility, si_utility, loo_utility,
 )
 from phd.structure_search.dynamic_network import (
     DynamicNetwork, sync_outgoing_weights, build_outgoing_indices,
@@ -65,7 +65,8 @@ class DummyStructureTracker(eqx.Module):
     """
     rng: PRNGKeyArray
 
-    def update_stats(self, model, param_inputs, grads=None, updates=None):
+    def update_stats(self, model, param_inputs, grads=None, updates=None,
+                      targets=None, predictions=None):
         """Update feature/structure statistics after a training step."""
         return self
 
@@ -242,6 +243,7 @@ def prepare_experiment(
                 'contribution': contribution_utility,
                 'upgd': upgd_utility,
                 'si': si_utility,
+                'loo': loo_utility,
             }
             utility_fn = utility_fn_map.get(
                 cfg.structure_tracker.get('utility_fn', 'contribution'))
@@ -382,7 +384,8 @@ def train_step(
 
     # Structure tracker: always update stats
     new_tracker = train_state.structure_tracker.update_stats(
-        new_model, param_inputs, grads=grads, updates=updates)
+        new_model, param_inputs, grads=grads, updates=updates,
+        targets=one_hot.reshape(raw_outputs.shape), predictions=raw_outputs)
 
     # Restructure (only when do_restructure=True and using ConnectivityManager)
     n_model_layers = new_model.max_layers if hasattr(new_model, 'max_layers') else 0

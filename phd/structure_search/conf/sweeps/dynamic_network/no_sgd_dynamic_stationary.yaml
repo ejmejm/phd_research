@@ -50,12 +50,14 @@ parameters:
   structure_tracker.output_weight_init: lecun_uniform
   structure_tracker.max_new_units_per_step: 256
 
-  structure_tracker.utility_fn: [contribution, upgd]
+  structure_tracker.utility_fn: [contribution, upgd, loo, si]
 
   structure_tracker.prune_rate:
     - 0.0
     - 0.00001
     - 0.0001
+    - 0.001
+    - 0.01
   seed:
     type: atomic
     value: [1, 2, 3]

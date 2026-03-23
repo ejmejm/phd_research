@@ -35,6 +35,8 @@ def contribution_utility(
     buffer: Float[Array, 'batch_size buffer_size'],
     grads=None,
     updates=None,
+    targets=None,
+    predictions=None,
 ) -> Float[Array, 'max_layers max_units_per_layer']:
     """Contribution utility: mean(|activation|) * sum(|outgoing_weights|).
 
@@ -75,6 +77,8 @@ def upgd_utility(
     buffer: Float[Array, 'batch_size buffer_size'],
     grads=None,
     updates=None,
+    targets=None,
+    predictions=None,
 ) -> Float[Array, 'max_layers max_units_per_layer']:
     """UPGD first-order feature utility: Σ_j -(dL/dW_j * W_j) per unit.
 
@@ -92,6 +96,8 @@ def si_utility(
     buffer: Float[Array, 'batch_size buffer_size'],
     grads=None,
     updates=None,
+    targets=None,
+    predictions=None,
 ) -> Float[Array, 'max_layers max_units_per_layer']:
     """Synaptic Intelligence utility: Σ_j -(dL/dW_j * ΔW_j) per unit.
 
@@ -102,6 +108,108 @@ def si_utility(
     per_weight = -grads.weights * updates.weights * conn_mask
     step_utility = per_weight.sum(axis=-1)
     return step_utility * model.unit_mask.astype(jnp.float32)
+
+
+def loo_utility(
+    model: DynamicNetwork,
+    buffer: Float[Array, 'batch_size buffer_size'],
+    grads=None,
+    updates=None,
+    targets=None,
+    predictions=None,
+) -> Float[Array, 'max_layers max_units_per_layer']:
+    """LOO utility (Approach J): signed output normalization, signed derivative
+    pseudo-error, overflow-only hidden normalization.
+
+    Computes leave-one-out scores at the output layer, then propagates backward
+    through hidden layers using the sparse connectivity structure. Assumes ReLU
+    activation (derives f' from post-activation signs in buffer).
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    input_dim = model.input_dim
+    output_dim = model.output_dim
+    buffer_size = model.buffer_size
+
+    # --- Output layer LOO ---
+    # e: (batch, output_dim)
+    e = targets - predictions
+
+    # Contribution of each buffer position to each output dim
+    # output_weights: (output_dim, buffer_size), output_mask: (output_dim, buffer_size)
+    ow_masked = model.output_weights * model.output_mask.astype(jnp.float32)
+    # c: (batch, output_dim, buffer_size) = e offset by each unit's contribution
+    c = ow_masked[None, :, :] * buffer[:, None, :]  # (batch, output_dim, buffer_size)
+
+    # LOO: |e + c| - |e| per output dim, summed over dims
+    abs_e = jnp.abs(e)  # (batch, output_dim)
+    u_raw_per_dim = jnp.abs(e[:, :, None] + c) - abs_e[:, :, None]  # (batch, output_dim, buffer_size)
+    u_raw = u_raw_per_dim.sum(axis=1).mean(axis=0)  # (buffer_size,) — sum over dims, mean over batch
+
+    # Signed normalization
+    error_reduced = (jnp.abs(targets).sum(axis=-1) - abs_e.sum(axis=-1)).mean()  # scalar
+    signed_sum = u_raw.sum()
+    can_normalize = jnp.abs(signed_sum) > 1e-10
+    scale = jnp.where(can_normalize, error_reduced / signed_sum, 1.0)
+    U = u_raw * scale  # (buffer_size,)
+
+    # --- Backward through hidden layers ---
+    U_child = jnp.zeros(buffer_size)
+
+    # Buffer positions for hidden units: bp = input_dim + l * max_units + u
+    layer_offsets = jnp.arange(max_layers) * max_units + input_dim  # (max_layers,)
+
+    for l in range(max_layers - 1, -1, -1):
+        offset = input_dim + l * max_units
+        # U for units in this layer: (max_units,)
+        U_layer = U[offset:offset + max_units]
+        unit_active = model.unit_mask[l].astype(jnp.float32)  # (max_units,)
+
+        # ReLU derivative from post-activations: f' = (a > 0), batch-averaged
+        layer_acts = buffer[:, offset:offset + max_units]  # (batch, max_units)
+        f_prime = (layer_acts > 0).astype(jnp.float32).mean(axis=0)  # (max_units,)
+        f_prime = jnp.maximum(f_prime, 1e-6)
+
+        # Signed derivative pseudo-error: e_j = U_j / f'_j
+        pseudo_error = U_layer / f_prime  # (max_units,)
+        pseudo_error = pseudo_error * unit_active
+
+        # Gather source activations for all connections
+        # input_indices[l]: (max_units, max_conns), weights[l]: (max_units, max_conns)
+        idx = model.input_indices[l]  # (max_units, max_conns)
+        conn_mask = (idx >= 0).astype(jnp.float32)  # (max_units, max_conns)
+        safe_idx = jnp.maximum(idx, 0)
+
+        # source_acts: (batch, max_units, max_conns)
+        source_acts = buffer[:, safe_idx]  # buffer is (batch, buffer_size) → gather
+        contributions = model.weights[l][None, :, :] * source_acts  # (batch, max_units, max_conns)
+
+        # LOO: |pseudo_error + contribution| - |pseudo_error|, per sample then mean
+        pe = pseudo_error[None, :, None]  # (1, max_units, 1) for broadcasting
+        s_raw = (jnp.abs(pe + contributions) - jnp.abs(pe)) * conn_mask[None, :, :]
+        s_raw = s_raw.mean(axis=0)  # (max_units, max_conns) — mean over batch
+
+        # Overflow-only normalization (per unit)
+        s_sum = s_raw.sum(axis=-1)  # (max_units,)
+        s_abs = jnp.abs(s_sum)
+        U_abs = jnp.abs(U_layer)
+        needs_norm = s_abs > U_abs
+        safe_s_sum = jnp.where(s_abs > 1e-10, s_sum, 1.0)
+        norm_scale = jnp.where(needs_norm, U_layer / safe_s_sum, 1.0)
+        s_normed = s_raw * norm_scale[:, None]  # (max_units, max_conns)
+
+        # Scatter-add to child positions
+        # Flatten and scatter: each connection's score goes to its source buffer position
+        flat_idx = safe_idx.reshape(-1)  # (max_units * max_conns,)
+        flat_scores = (s_normed * conn_mask).reshape(-1)  # (max_units * max_conns,)
+        U_child = U_child.at[flat_idx].add(flat_scores)
+
+    # Extract per-unit utilities from U_child (hidden unit region of buffer)
+    layers_idx = jnp.arange(max_layers)
+    units_idx = jnp.arange(max_units)
+    bp = input_dim + layers_idx[:, None] * max_units + units_idx[None, :]
+    result = U_child[bp] * model.unit_mask.astype(jnp.float32)
+    return result
 
 
 def median_utility_init(
@@ -739,9 +847,14 @@ class ConnectivityManager(eqx.Module):
         buffer: Float[Array, 'batch_size buffer_size'],
         grads=None,
         updates=None,
+        targets=None,
+        predictions=None,
     ) -> 'ConnectivityManager':
         """Update per-unit utility estimates and accumulate connection budget."""
-        step_utility = self.utility_fn(model, buffer, grads=grads, updates=updates)
+        step_utility = self.utility_fn(
+            model, buffer, grads=grads, updates=updates,
+            targets=targets, predictions=predictions,
+        )
 
         # EMA update
         new_utility = (

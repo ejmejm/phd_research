@@ -50,7 +50,7 @@ structure_tracker:
   decay_rate: 0.99           # EMA decay for utility tracking
   maturity_threshold: 100    # min steps before a unit can be pruned (-1 to disable)
   prune_frequency: 100       # restructure every N steps
-  utility_fn: contribution   # 'contribution', 'upgd', or 'si'
+  utility_fn: contribution   # 'contribution', 'upgd', 'si', or 'loo'
   generate_strategy: random  # 'random' or 'full_input'
   output_connect_strategy: all  # 'all' or 'random_sparse'
   output_weight_init: zero      # 'zero' or 'lecun_uniform'
