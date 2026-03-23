@@ -33,6 +33,8 @@ MAX_FLOAT = jnp.finfo(jnp.float32).max
 def contribution_utility(
     model: DynamicNetwork,
     buffer: Float[Array, 'batch_size buffer_size'],
+    grads=None,
+    updates=None,
 ) -> Float[Array, 'max_layers max_units_per_layer']:
     """Contribution utility: mean(|activation|) * sum(|outgoing_weights|).
 
@@ -66,6 +68,40 @@ def contribution_utility(
     step_utility = mean_abs_act * (h2h + h2o)
     step_utility = step_utility * model.unit_mask.astype(jnp.float32)
     return step_utility
+
+
+def upgd_utility(
+    model: DynamicNetwork,
+    buffer: Float[Array, 'batch_size buffer_size'],
+    grads=None,
+    updates=None,
+) -> Float[Array, 'max_layers max_units_per_layer']:
+    """UPGD first-order feature utility: Σ_j -(dL/dW_j * W_j) per unit.
+
+    Equivalent to batch-averaged -(dL/da) * a where a is the pre-activation,
+    derived by expanding a = Σ_j W_j * x_j and using grad_W_j = E[δ * x_j].
+    """
+    conn_mask = (model.input_indices >= 0).astype(jnp.float32)
+    per_weight = -grads.weights * model.weights * conn_mask
+    step_utility = per_weight.sum(axis=-1)
+    return step_utility * model.unit_mask.astype(jnp.float32)
+
+
+def si_utility(
+    model: DynamicNetwork,
+    buffer: Float[Array, 'batch_size buffer_size'],
+    grads=None,
+    updates=None,
+) -> Float[Array, 'max_layers max_units_per_layer']:
+    """Synaptic Intelligence utility: Σ_j -(dL/dW_j * ΔW_j) per unit.
+
+    Instantaneous per-step contribution of each unit's incoming connections
+    to loss reduction, fed into the existing EMA tracker.
+    """
+    conn_mask = (model.input_indices >= 0).astype(jnp.float32)
+    per_weight = -grads.weights * updates.weights * conn_mask
+    step_utility = per_weight.sum(axis=-1)
+    return step_utility * model.unit_mask.astype(jnp.float32)
 
 
 def median_utility_init(
@@ -677,9 +713,11 @@ class ConnectivityManager(eqx.Module):
         self,
         model: DynamicNetwork,
         buffer: Float[Array, 'batch_size buffer_size'],
+        grads=None,
+        updates=None,
     ) -> 'ConnectivityManager':
         """Update per-unit utility estimates and accumulate connection budget."""
-        step_utility = self.utility_fn(model, buffer)
+        step_utility = self.utility_fn(model, buffer, grads=grads, updates=updates)
 
         # EMA update
         new_utility = (

@@ -37,7 +37,10 @@ from phd.structure_search.block_sparse_mlp import (
     BlockSparseMLP, compute_hidden_dim_for_params,
 )
 from phd.structure_search.data import load_dataset, DataStream, ParallelMNISTStream
-from phd.structure_search.connectivity_manager import ConnectivityManager, full_input_generate
+from phd.structure_search.connectivity_manager import (
+    ConnectivityManager, full_input_generate,
+    contribution_utility, upgd_utility, si_utility,
+)
 from phd.structure_search.dynamic_network import (
     DynamicNetwork, sync_outgoing_weights, build_outgoing_indices,
     init_random_dynamic_network,
@@ -62,7 +65,7 @@ class DummyStructureTracker(eqx.Module):
     """
     rng: PRNGKeyArray
 
-    def update_stats(self, model, param_inputs):
+    def update_stats(self, model, param_inputs, grads=None, updates=None):
         """Update feature/structure statistics after a training step."""
         return self
 
@@ -235,6 +238,13 @@ def prepare_experiment(
         if model_type == 'dynamic' and cfg.structure_tracker.get('enabled', False):
             generate_strategy = cfg.structure_tracker.get('generate_strategy', 'random')
             generate_fn = full_input_generate if generate_strategy == 'full_input' else None
+            utility_fn_map = {
+                'contribution': contribution_utility,
+                'upgd': upgd_utility,
+                'si': si_utility,
+            }
+            utility_fn = utility_fn_map.get(
+                cfg.structure_tracker.get('utility_fn', 'contribution'))
             tracker = ConnectivityManager(
                 model=model,
                 prune_rate=cfg.structure_tracker.prune_rate,
@@ -245,6 +255,7 @@ def prepare_experiment(
                     'max_new_units_per_step', 512),
                 output_connect_strategy=cfg.structure_tracker.get(
                     'output_connect_strategy', 'all'),
+                utility_fn=utility_fn,
                 generate_fn=generate_fn,
                 rng=rng_from_string(rng, 'tracker'),
             )
@@ -369,7 +380,7 @@ def train_step(
 
     # Structure tracker: always update stats
     new_tracker = train_state.structure_tracker.update_stats(
-        new_model, param_inputs)
+        new_model, param_inputs, grads=grads, updates=updates)
 
     # Restructure (only when do_restructure=True and using ConnectivityManager)
     n_model_layers = new_model.max_layers if hasattr(new_model, 'max_layers') else 0
@@ -504,26 +515,29 @@ def run_experiment(
             f'log_freq ({log_freq}) must be divisible by prune_frequency ({prune_frequency})'
         n_inner_blocks = log_freq // prune_frequency
 
+        def _normal_step(state, data):
+            return train_step(
+                state, data, do_restructure=False, loss_name=loss_name,
+                num_classes=num_classes, n_tasks=n_tasks,
+            )
+
         def _inner_step(state, data_block):
             """One restructure cycle: (prune_frequency-1) normal steps + 1 restructure step.
 
             data_block: (prune_frequency, batch_size, ...) slice of the data.
             """
-            all_metrics = []
-            for i in range(prune_frequency - 1):
-                state, step_metrics = train_step(
-                    state, (data_block[0][i], data_block[1][i]),
-                    do_restructure=False, loss_name=loss_name,
-                    num_classes=num_classes, n_tasks=n_tasks,
-                )
-                all_metrics.append(step_metrics)
-            state, step_metrics = train_step(
+            normal_data = (data_block[0][:-1], data_block[1][:-1])
+            state, normal_metrics = jax.lax.scan(_normal_step, state, normal_data, unroll=SCAN_UNROLL)
+
+            state, restructure_metrics = train_step(
                 state, (data_block[0][-1], data_block[1][-1]),
                 do_restructure=True, loss_name=loss_name,
                 num_classes=num_classes, n_tasks=n_tasks,
             )
-            all_metrics.append(step_metrics)
-            stacked = jax.tree.map(lambda *args: jnp.stack(args), *all_metrics)
+            stacked = jax.tree.map(
+                lambda a, b: jnp.concatenate([a, b[None]]),
+                normal_metrics, restructure_metrics,
+            )
             return state, stacked
 
         def scan_steps(state, data):
