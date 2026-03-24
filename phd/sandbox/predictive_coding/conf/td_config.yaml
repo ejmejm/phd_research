@@ -18,6 +18,8 @@ model:
   num_layers: 3              # Total layers including input + output (2->64->64->1)
   hidden_dim: 64
   activation: tanh
+  tile_coding: false         # Tile-code x,y into one-hot bins (input becomes 2*tile_bins)
+  tile_bins: 16              # Number of bins per coordinate (ignored if tile_coding=false)
 
 # iPC algorithm settings (only used when algorithm=ipc)
 ipc:

@@ -54,8 +54,47 @@ from phd.sandbox.predictive_coding.models import (
 
 
 SCAN_UNROLL = 4
-INPUT_DIM = 2
 OUTPUT_DIM = 1
+
+
+# ---------------------------------------------------------------------------
+# Tile coding
+# ---------------------------------------------------------------------------
+
+def _get_input_dim(cfg):
+    """Return the input dimension based on tile coding config."""
+    if cfg.model.get('tile_coding', False):
+        n_bins = cfg.model.get('tile_bins', 16)
+        return 2 * n_bins
+    return 2
+
+
+def tile_code_positions(positions: np.ndarray, n_bins: int = 16) -> np.ndarray:
+    """Tile-code (x, y) positions into one-hot bin vectors.
+
+    Each coordinate in [0, 1] is discretized into n_bins equal-width bins,
+    producing a one-hot vector of length n_bins. The x and y vectors are
+    concatenated, giving a total feature vector of length 2 * n_bins.
+
+    Args:
+        positions: (..., 2) array of (x, y) positions in [0, 1].
+        n_bins: Number of bins per coordinate.
+
+    Returns:
+        (..., 2 * n_bins) array of tile-coded features (float32).
+    """
+    shape = positions.shape[:-1]
+    flat = positions.reshape(-1, 2)
+
+    # Bin indices in [0, n_bins - 1]
+    bin_idx = np.clip((flat * n_bins).astype(np.int32), 0, n_bins - 1)
+
+    out = np.zeros((flat.shape[0], 2 * n_bins), dtype=np.float32)
+    rows = np.arange(flat.shape[0])
+    out[rows, bin_idx[:, 0]] = 1.0                  # x bins
+    out[rows, n_bins + bin_idx[:, 1]] = 1.0          # y bins
+
+    return out.reshape(*shape, 2 * n_bins)
 
 
 # ---------------------------------------------------------------------------
@@ -314,13 +353,14 @@ def _build_ipc_optimizer(cfg):
 def prepare_ipc_experiment(cfg):
     """Create per-seed PCTrainState objects."""
     seeds = cfg.seed
+    input_dim = _get_input_dim(cfg)
 
-    # Layer dims: (output=1, hidden..., input=2)
+    # Layer dims: (output=1, hidden..., input=input_dim)
     n_hidden = cfg.model.num_layers - 2
     layer_dims = (
         [OUTPUT_DIM]
         + [cfg.model.hidden_dim] * n_hidden
-        + [INPUT_DIM]
+        + [input_dim]
     )
 
     optimizer = _build_ipc_optimizer(cfg)
@@ -364,6 +404,7 @@ def prepare_ipc_experiment(cfg):
 def prepare_bp_experiment(cfg, linear=False):
     """Create per-seed BPTrainState objects."""
     seeds = cfg.seed
+    input_dim = _get_input_dim(cfg)
     train_states = []
 
     for seed in seeds:
@@ -372,7 +413,7 @@ def prepare_bp_experiment(cfg, linear=False):
         if linear:
             # Linear model: 1 weight layer, linear activation
             model = MLP(
-                input_dim=INPUT_DIM,
+                input_dim=input_dim,
                 output_dim=OUTPUT_DIM,
                 n_layers=1,
                 hidden_dim=1,  # unused for n_layers=1
@@ -382,7 +423,7 @@ def prepare_bp_experiment(cfg, linear=False):
             )
         else:
             model = MLP(
-                input_dim=INPUT_DIM,
+                input_dim=input_dim,
                 output_dim=OUTPUT_DIM,
                 n_layers=cfg.model.num_layers - 1,
                 hidden_dim=cfg.model.hidden_dim,
@@ -451,6 +492,8 @@ def run_ipc_experiment(cfg, train_state, grid_world, eval_grid_np, v_star_interp
     ema_beta = cfg.ipc.ema_beta
     n_seeds = len(cfg.seed)
     use_optimizer = cfg.ipc.get('optimizer', 'none') != 'none'
+    use_tile_coding = cfg.model.get('tile_coding', False)
+    tile_bins = cfg.model.get('tile_bins', 16)
 
     if use_optimizer:
         optimizer = _build_ipc_optimizer(cfg)
@@ -475,12 +518,15 @@ def run_ipc_experiment(cfg, train_state, grid_world, eval_grid_np, v_star_interp
     vmapped_scan = jax.jit(jax.vmap(scan_steps))
 
     # JIT the MSVE evaluation (extract one seed's network for eval)
-    eval_grid_jax = jnp.array(eval_grid_np)
+    if use_tile_coding:
+        eval_grid_encoded = jnp.array(tile_code_positions(eval_grid_np, tile_bins))
+    else:
+        eval_grid_encoded = jnp.array(eval_grid_np)
     n_eval = eval_grid_np.shape[0]
 
     @jax.jit
     def eval_msve_all_seeds(batched_network):
-        return jax.vmap(lambda net: _evaluate_msve_ipc(net, eval_grid_jax, n_eval))(batched_network)
+        return jax.vmap(lambda net: _evaluate_msve_ipc(net, eval_grid_encoded, n_eval))(batched_network)
 
     # Per-seed trajectory generators
     trajectory_seeds = [
@@ -504,8 +550,14 @@ def run_ipc_experiment(cfg, train_state, grid_world, eval_grid_np, v_star_interp
             positions, rewards, barrier_crossings = grid_world.sample_trajectory(
                 log_freq, seed=traj_seed,
             )
-            s_t_list.append(positions[:-1].astype(np.float32))      # (log_freq, 2)
-            s_next_list.append(positions[1:].astype(np.float32))     # (log_freq, 2)
+            s_t_pos = positions[:-1].astype(np.float32)      # (log_freq, 2)
+            s_next_pos = positions[1:].astype(np.float32)     # (log_freq, 2)
+            if use_tile_coding:
+                s_t_list.append(tile_code_positions(s_t_pos, tile_bins))
+                s_next_list.append(tile_code_positions(s_next_pos, tile_bins))
+            else:
+                s_t_list.append(s_t_pos)
+                s_next_list.append(s_next_pos)
             reward_list.append(rewards.astype(np.float32))           # (log_freq,)
             bc_list.append(barrier_crossings.astype(np.float32))     # (log_freq,)
 
@@ -598,6 +650,8 @@ def run_bp_experiment(cfg, train_state, grid_world, eval_grid_np, v_star_interp)
     num_scans = cfg.train.total_steps // log_freq
     gamma_td = cfg.env.gamma_td
     n_seeds = len(cfg.seed)
+    use_tile_coding = cfg.model.get('tile_coding', False)
+    tile_bins = cfg.model.get('tile_bins', 16)
 
     def _step(state, observation):
         return td_bp_step(state, observation, gamma_td=gamma_td)
@@ -607,12 +661,15 @@ def run_bp_experiment(cfg, train_state, grid_world, eval_grid_np, v_star_interp)
 
     vmapped_scan = jax.jit(jax.vmap(scan_steps))
 
-    eval_grid_jax = jnp.array(eval_grid_np)
+    if use_tile_coding:
+        eval_grid_encoded = jnp.array(tile_code_positions(eval_grid_np, tile_bins))
+    else:
+        eval_grid_encoded = jnp.array(eval_grid_np)
     n_eval = eval_grid_np.shape[0]
 
     @jax.jit
     def eval_msve_all_seeds(batched_model):
-        return jax.vmap(lambda m: _evaluate_msve_bp(m, eval_grid_jax, n_eval))(batched_model)
+        return jax.vmap(lambda m: _evaluate_msve_bp(m, eval_grid_encoded, n_eval))(batched_model)
 
     trajectory_seeds = [
         np.random.default_rng(seed * 100_000) for seed in cfg.seed
@@ -634,8 +691,14 @@ def run_bp_experiment(cfg, train_state, grid_world, eval_grid_np, v_star_interp)
             positions, rewards, barrier_crossings = grid_world.sample_trajectory(
                 log_freq, seed=traj_seed,
             )
-            s_t_list.append(positions[:-1].astype(np.float32))
-            s_next_list.append(positions[1:].astype(np.float32))
+            s_t_pos = positions[:-1].astype(np.float32)
+            s_next_pos = positions[1:].astype(np.float32)
+            if use_tile_coding:
+                s_t_list.append(tile_code_positions(s_t_pos, tile_bins))
+                s_next_list.append(tile_code_positions(s_next_pos, tile_bins))
+            else:
+                s_t_list.append(s_t_pos)
+                s_next_list.append(s_next_pos)
             reward_list.append(rewards.astype(np.float32))
             bc_list.append(barrier_crossings.astype(np.float32))
 
