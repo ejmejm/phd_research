@@ -12,6 +12,8 @@ spec:
 
 plot_params:
   metrics: [asymptotic_msve, asymptotic_td_error]
+  sensitivity:
+    hue: [ipc.alpha]
 
 parameters:
   mlflow: true
