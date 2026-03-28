@@ -1,0 +1,24 @@
+name: adam_sweep_debug_rescaled
+project: atari-prediction
+command: python train.py --config-name=all_games_debug_config
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+
+  optimizer.name: adam
+
+  optimizer.learning_rate:
+    - "${eval:2**-19}"
+    - "${eval:2**-13}"
+
+  train.reinit_at_game_boundary: [false, true]
+  train.rescale_returns: true
+
+  seed:
+    value: [1, 2, 3]

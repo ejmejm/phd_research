@@ -1,0 +1,23 @@
+name: return_prediction_dummy_test_rescaled
+project: atari-prediction
+command: python train.py --config-name=all_games_config
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+
+  optimizer.name: adam
+
+  optimizer.learning_rate: ["${eval:2**-15}", "${eval:2**-13}", "${eval:2**-11}"]
+
+  train.reinit_at_game_boundary: false
+  train.total_steps: 2600000
+  train.rescale_returns: true
+
+  seed:
+    value: [1, 2, 3]
