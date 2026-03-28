@@ -1,0 +1,39 @@
+defaults:
+  - config
+
+dataset:
+  name: parallel_mnist
+  n_tasks: 5
+  permute_period: 0
+
+model:
+  type: dynamic
+  n_layers: 2
+  hidden_dim: 520              # 520 * 96 = 49,920 connections at init
+  max_units_per_layer: 1040   # 2x hidden_dim; both divisible by n_tasks=5
+  max_connections_per_unit: 64
+  max_fan_out: 64
+  connect_all_to_output: false
+  activation: relu
+
+optimizer:
+  name: adam
+  learning_rate: ${eval:2**-11}
+
+train:
+  loss: cross_entropy
+  total_steps: 200_000
+  log_freq: 2000
+  eval_freq: 10000
+
+structure_tracker:
+  enabled: true
+  connection_budget: 50_000
+  decay_rate: 0.999
+  maturity_threshold: 1
+  prune_frequency: 200
+  prune_rate: 0.0001
+  max_new_units_per_step: 256
+
+seed: 1
+mlflow: false

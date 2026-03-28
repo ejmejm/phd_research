@@ -74,4 +74,4 @@ The task is somewhat contrived—normally if we knew we had completely separate 
 - [x] And a sweep config for baseline MLP on CIFAR-10. Include different sizes to know what performance is possible at different sizes.
 - [x] Implement the dynamic network.
 - [x] Implement a training script with a feature search algorithm.
-- [ ] Test different with single activation vs. multiple activation functions.
+<!-- - [ ] Test different with single activation vs. multiple activation functions. -->
