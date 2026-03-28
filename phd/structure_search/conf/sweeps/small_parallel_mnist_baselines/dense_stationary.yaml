@@ -1,0 +1,47 @@
+experiment: parallel-mnist-small
+sweep_name: dense_stationary_baseline
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_test_loss, asymptotic_test_accuracy, asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    params: [optimizer.learning_rate]
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  dataset.name: parallel_mnist
+  dataset.n_tasks: 5
+  dataset.permute_period: 0
+
+  model.type: mlp
+  model.n_layers: 3
+
+  train.loss: cross_entropy
+  train.total_steps: 200_000
+  train.log_freq: 2000
+  train.eval_freq: 10000
+
+  model.target_params: 50_000
+
+  optimizer.name: adam
+
+  optimizer.learning_rate:
+    - "${eval:2**-15}"
+    - "${eval:2**-14}"
+    - "${eval:2**-13}"
+    - "${eval:2**-12}"
+    - "${eval:2**-11}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3]
