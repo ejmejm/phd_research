@@ -6,6 +6,7 @@ Includes standard Atari preprocessing: grayscale, resize, and framestacking.
 """
 
 from concurrent.futures import ThreadPoolExecutor, Future
+import json
 from pathlib import Path
 from typing import Tuple
 
@@ -61,7 +62,8 @@ class ContinualAtariStream:
     """
 
     def __init__(self, data_dir: str, game_order: list, steps_per_game: int,
-                 data_seed: int = 0, preprocessing: DictConfig = None):
+                 data_seed: int = 0, preprocessing: DictConfig = None,
+                 rescale_returns: bool = False):
         data_path = Path(data_dir)
 
         # Validate that required data files exist
@@ -86,6 +88,11 @@ class ContinualAtariStream:
         self.total_steps = len(self.dataset)
         self.current_step = 0
 
+        # Per-step return scale (std per game) for equal-weighting across games
+        self._return_scales = None
+        if rescale_returns:
+            self._return_scales = self._compute_return_scales(game_order)
+
         # Preprocessing config
         self._preprocess = preprocessing is not None
         if self._preprocess:
@@ -96,6 +103,39 @@ class ContinualAtariStream:
             self._frame_buffer = None
         else:
             self._n_stack = 1
+
+    def _compute_return_scales(self, game_order: list) -> np.ndarray:
+        """Load per-game return std from stats.json files.
+
+        Each step is assigned the std of returns from its game (aggregated
+        across all seeds at collection time). Returns are divided by this
+        scale in sample_batch so every game contributes equally to the MSE
+        without removing the mean.
+
+        Raises FileNotFoundError if stats.json is missing — run
+        dataset/compute_stats.py to generate it.
+        """
+        sps = self.dataset.steps_per_game
+        n_games = self.total_steps // sps
+        scales = np.ones(self.total_steps, dtype=np.float32)
+
+        print('Return rescaling (std per game):')
+        for i in range(n_games):
+            game_name = game_order[i].replace('ALE/', '').replace('-v5', '')
+            stats_path = self.dataset._data_dir / game_name / 'stats.json'
+            if not stats_path.exists():
+                raise FileNotFoundError(
+                    f"Stats file not found: {stats_path}\n"
+                    f"Run: python dataset/compute_stats.py --data_dir <data_dir>"
+                )
+            with open(stats_path) as f:
+                stats = json.load(f)
+            std = max(stats['return_std'], 1e-6)
+            start, end = i * sps, (i + 1) * sps
+            scales[start:end] = std
+            print(f'  {game_name}: std={std:.2f}')
+
+        return scales
 
     def _load_raw_observations(self, n_steps: int) -> np.ndarray:
         """Bulk-load raw observations from chunk files.
@@ -172,6 +212,12 @@ class ContinualAtariStream:
         returns = self.dataset._returns[
             self.current_step:self.current_step + n_steps
         ].astype(np.float32).reshape(n_steps, 1)
+
+        if self._return_scales is not None:
+            scales = self._return_scales[
+                self.current_step:self.current_step + n_steps
+            ].reshape(n_steps, 1)
+            returns = returns / scales
 
         # Load raw observations
         raw_obs = self._load_raw_observations(n_steps)
@@ -255,4 +301,5 @@ def load_atari_data(cfg: DictConfig) -> ContinualAtariStream:
         steps_per_game=cfg.dataset.steps_per_game,
         data_seed=cfg.dataset.data_seed,
         preprocessing=cfg.get('preprocessing', None),
+        rescale_returns=cfg.train.get('rescale_returns', False),
     )

@@ -76,6 +76,7 @@ train:
   log_freq: 4000
   batch_size: 1
   reinit_at_game_boundary: false
+  rescale_returns: false
 
 # Seed: single int or list of ints for multi-seed
 seed: [1, 2, 3, 4, 5]
