@@ -37,3 +37,4 @@ structure_tracker:
 
 seed: 1
 mlflow: false
+project: column-guided-parallel-mnist

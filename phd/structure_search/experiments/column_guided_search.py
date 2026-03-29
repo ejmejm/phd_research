@@ -225,7 +225,7 @@ def column_assign_outgoing(
         def assign_one_target(carry, j):
             input_indices, weights_arr, output_mask, output_weights = carry
             target_pool_idx = selected[j]
-            should_assign = selected_valid[j]
+            should_assign = selected_valid[j] & pool_available[target_pool_idx]
 
             is_out = target_pool_idx < output_dim
 
