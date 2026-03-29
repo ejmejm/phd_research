@@ -1,0 +1,6 @@
+defaults:
+  - stationary
+  - _self_
+
+variant: no_column
+project: column-guided-no-column-parallel-mnist

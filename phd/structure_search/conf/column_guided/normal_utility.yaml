@@ -1,0 +1,6 @@
+defaults:
+  - stationary
+  - _self_
+
+variant: normal_utility
+project: column-guided-normal-utility-parallel-mnist

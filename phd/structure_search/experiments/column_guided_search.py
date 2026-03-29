@@ -280,6 +280,153 @@ def column_assign_outgoing(
     )
 
 
+def assign_outgoing_relaxed(
+    model: DynamicNetwork,
+    gen_info: tuple,
+    max_new_units: int,
+    rng: PRNGKeyArray,
+    *,
+    n_tasks: int,
+    column_priority: bool = True,
+) -> DynamicNetwork:
+    """Push sparse outgoing connections with an expanded target pool.
+
+    Unlike column_assign_outgoing, the pool includes ALL outputs and ALL
+    later-layer active hidden units (not restricted to the source column).
+
+    column_priority=True (variants 1+2): within-column targets are sorted
+    first (sort_key in [0,1)); cross-column available targets come next
+    (sort_key in [1,2)); unavailable targets are last (sort_key=3.0).
+
+    column_priority=False (variant 3): purely random ranking over all
+    available targets; no column distinction.
+
+    n_out_per_unit in gen_info is sampled randomly (1..max_out) per unit.
+    """
+    cand_layers, cand_units, gen_mask_flat, n_out_per_unit = gen_info
+
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    input_dim = model.input_dim
+    output_dim = model.output_dim
+    max_fan_out = model.max_fan_out
+    max_out = max(1, max_fan_out // 2)
+
+    col_size = max_units // n_tasks
+    out_col_size = output_dim // n_tasks
+
+    pool_size = output_dim + max_layers * max_units
+    keys = jax.random.split(rng, max_new_units)
+
+    input_indices = model.input_indices    # (max_layers, max_units, max_conns)
+    weights_arr = model.weights            # (max_layers, max_units, max_conns)
+    output_mask = model.output_mask        # (output_dim, buffer_size)
+    output_weights = model.output_weights  # (output_dim, buffer_size)
+    unit_mask = model.unit_mask            # (max_layers, max_units)
+
+    def process_one_unit(carry, idx):
+        input_indices, weights_arr, output_mask, output_weights = carry
+
+        key = keys[idx]
+        is_valid = gen_mask_flat[idx]
+        source_layer = cand_layers[idx]
+        source_unit = cand_units[idx]
+        source_col = source_unit // col_size
+        source_bp = input_dim + source_layer * max_units + source_unit
+        n_out = n_out_per_unit[idx]
+
+        # All outputs are available targets
+        out_idx = jnp.arange(output_dim)
+        output_available = jnp.ones(output_dim, dtype=jnp.bool_)
+
+        # Hidden targets: later layer, active, has an empty slot (no column restriction)
+        has_empty_slot = jnp.any(input_indices == -1, axis=-1)  # (max_layers, max_units)
+        is_later = jnp.arange(max_layers)[:, None] > source_layer
+        hidden_available = (
+            has_empty_slot & is_later & (unit_mask == 1)
+        ).reshape(-1)
+
+        pool_available = jnp.concatenate([output_available, hidden_available])
+
+        noise = jax.random.uniform(key, (pool_size,))
+
+        if column_priority:
+            col_out_start = source_col * out_col_size
+            out_in_col = (out_idx >= col_out_start) & (out_idx < col_out_start + out_col_size)
+            unit_col_arr = jnp.arange(max_units) // col_size
+            hid_in_col = (
+                (unit_col_arr[None, :] == source_col) & (unit_mask == 1)
+                & has_empty_slot & is_later
+            ).reshape(-1)
+            pool_in_col = jnp.concatenate([out_in_col, hid_in_col])
+            sort_key = jnp.where(
+                pool_available & pool_in_col, noise,
+                jnp.where(pool_available & ~pool_in_col, 1.0 + noise, 3.0),
+            )
+        else:
+            sort_key = jnp.where(pool_available, noise, 2.0)
+
+        selected = jnp.argsort(sort_key)[:max_out]
+        selected_valid = (jnp.arange(max_out) < n_out) & is_valid
+
+        def assign_one_target(carry, j):
+            input_indices, weights_arr, output_mask, output_weights = carry
+            target_pool_idx = selected[j]
+            should_assign = selected_valid[j] & pool_available[target_pool_idx]
+
+            is_out = target_pool_idx < output_dim
+
+            # Output path
+            safe_out = jnp.where(is_out, target_pool_idx, 0)
+            out_new = jnp.where(
+                should_assign & is_out, 1, output_mask[safe_out, source_bp]
+            ).astype(jnp.int32)
+            output_mask = output_mask.at[safe_out, source_bp].set(out_new)
+            ow_new = jnp.where(
+                should_assign & is_out, 0.0, output_weights[safe_out, source_bp]
+            )
+            output_weights = output_weights.at[safe_out, source_bp].set(ow_new)
+
+            # Hidden path
+            hid_flat = target_pool_idx - output_dim
+            tl = hid_flat // max_units
+            tu = hid_flat % max_units
+            safe_tl = jnp.where(~is_out, tl, 0)
+            safe_tu = jnp.where(~is_out, tu, 0)
+
+            slots = input_indices[safe_tl, safe_tu]  # (max_conns,)
+            first_empty = jnp.argmax(slots == -1)
+            has_slot = jnp.any(slots == -1)
+            should_hid = should_assign & ~is_out & has_slot
+
+            idx_new = jnp.where(
+                should_hid, source_bp, input_indices[safe_tl, safe_tu, first_empty]
+            ).astype(jnp.int32)
+            input_indices = input_indices.at[safe_tl, safe_tu, first_empty].set(idx_new)
+            w_new = jnp.where(should_hid, 0.0, weights_arr[safe_tl, safe_tu, first_empty])
+            weights_arr = weights_arr.at[safe_tl, safe_tu, first_empty].set(w_new)
+
+            return (input_indices, weights_arr, output_mask, output_weights), None
+
+        (input_indices, weights_arr, output_mask, output_weights), _ = jax.lax.scan(
+            assign_one_target,
+            (input_indices, weights_arr, output_mask, output_weights),
+            jnp.arange(max_out),
+        )
+        return (input_indices, weights_arr, output_mask, output_weights), None
+
+    (input_indices, weights_arr, output_mask, output_weights), _ = jax.lax.scan(
+        process_one_unit,
+        (input_indices, weights_arr, output_mask, output_weights),
+        jnp.arange(max_new_units),
+    )
+    return eqx.tree_at(
+        lambda m: (m.input_indices, m.weights, m.output_mask, m.output_weights),
+        model,
+        (input_indices, weights_arr, output_mask, output_weights),
+    )
+
+
 def column_generate(
     model: DynamicNetwork,
     unit_stats: UnitStats,
@@ -458,6 +605,290 @@ def column_generate(
     return model, unit_stats, new_budget, gen_mask_2d, gen_info
 
 
+def column_generate_relaxed(
+    model: DynamicNetwork,
+    unit_stats: UnitStats,
+    budget: Float[Array, ''],
+    max_new_units: int,
+    init_utility: Float[Array, ''],
+    rng: PRNGKeyArray,
+    output_connect_strategy: str = 'all',
+    *,
+    n_tasks: int,
+):
+    """Variant 1+2: column-restricted incoming connections, relaxed outgoing.
+
+    Incoming connections are still limited to within-column sources (same as
+    column_generate).  Outgoing connections use assign_outgoing_relaxed with
+    column_priority=True, so within-column targets are preferred but the pool
+    extends to all outputs and all later-layer hidden units.  The number of
+    outgoing connections per unit is sampled uniformly from [1, max_out].
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    input_dim = model.input_dim
+    buffer_size = model.buffer_size
+    output_dim = model.output_dim
+
+    col_size = max_units // n_tasks
+    input_col_size = input_dim // n_tasks
+
+    n_total_slots = max_layers * max_units
+    max_new_units = min(max_new_units, n_total_slots)
+
+    rng, slot_rng, sample_rng, output_rng, nout_rng = jax.random.split(rng, 5)
+    max_out = max(1, model.max_fan_out // 2)
+
+    # --- Find and shuffle inactive slots ---
+    inactive_flat = (model.unit_mask == 0).reshape(-1)
+    noise = jax.random.uniform(slot_rng, (n_total_slots,))
+    sort_key = jnp.where(inactive_flat, noise, 2.0)
+    perm = jnp.argsort(sort_key)
+    cand_flat_idx = perm[:max_new_units]
+    cand_layers = cand_flat_idx // max_units
+    cand_units = cand_flat_idx % max_units
+    cand_cols = cand_units // col_size
+    cand_valid = inactive_flat[cand_flat_idx]
+
+    # --- Build column-aware source mask (same as column_generate) ---
+    buf_idx = jnp.arange(buffer_size)
+    n_tasks_arr = jnp.arange(n_tasks)
+
+    is_input = buf_idx < input_dim
+    input_col_of_each = buf_idx // input_col_size
+    input_avail_per_col = (
+        is_input[None, :] & (input_col_of_each[None, :] == n_tasks_arr[:, None])
+    )
+
+    is_hidden = buf_idx >= input_dim
+    safe_buf = jnp.maximum(buf_idx - input_dim, 0)
+    hidden_layer_of_j = safe_buf // max_units
+    hidden_unit_of_j = safe_buf % max_units
+    hidden_col_of_j = hidden_unit_of_j // col_size
+    hidden_is_active = model.unit_mask[hidden_layer_of_j, hidden_unit_of_j]
+
+    target_l = jnp.arange(max_layers)[:, None, None]
+    src_l = hidden_layer_of_j[None, None, :]
+    col_c = n_tasks_arr[None, :, None]
+    src_c = hidden_col_of_j[None, None, :]
+
+    hidden_avail = (
+        is_hidden[None, None, :]
+        & (src_l < target_l)
+        & (src_c == col_c)
+        & hidden_is_active[None, None, :]
+    )
+    column_available = input_avail_per_col[None, :, :] | hidden_avail
+
+    # --- Sample input connections per candidate ---
+    sample_keys = jax.random.split(sample_rng, max_new_units)
+
+    def sample_one_unit(key, cand_layer, cand_col):
+        _, key2, key3 = jax.random.split(key, 3)
+        avail = column_available[cand_layer, cand_col]
+        n_available = jnp.sum(avail)
+        half_conns = jnp.maximum(max_conns // 2, 1)
+        n_conns = jnp.minimum(n_available, half_conns)
+        n_conns = jnp.maximum(n_conns, 1)
+        shuffle_noise = jax.random.uniform(key2, (buffer_size,))
+        shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
+        sorted_idx = jnp.argsort(shuffle_key)
+        selected = sorted_idx[:max_conns]
+        conn_active = jnp.arange(max_conns) < n_conns
+        new_indices = jnp.where(conn_active, selected, -1).astype(jnp.int32)
+        bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(n_conns, 1).astype(jnp.float32))
+        new_weights = jax.random.uniform(key3, (max_conns,), minval=-bound, maxval=bound)
+        new_weights = jnp.where(conn_active, new_weights, 0.0)
+        return new_indices, new_weights, n_conns, n_available
+
+    all_indices, all_weights, all_input_costs, all_n_avail = jax.vmap(
+        sample_one_unit
+    )(sample_keys, cand_layers, cand_cols)
+
+    cand_valid = cand_valid & (all_n_avail > 0)
+
+    # Random n_out per unit in [1, max_out]
+    n_out_per_unit = jax.random.randint(nout_rng, (max_new_units,), 1, max_out + 1)
+    all_costs = all_input_costs + n_out_per_unit
+
+    costs_if_valid = jnp.where(cand_valid, all_costs.astype(jnp.float32), 0.0)
+    cumulative_cost = jnp.cumsum(costs_if_valid)
+    gen_mask = cand_valid & (cumulative_cost <= budget)
+
+    old_indices = model.input_indices[cand_layers, cand_units]
+    new_input_indices = model.input_indices.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask[:, None], all_indices, old_indices)
+    )
+    new_weights_arr = model.weights.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask[:, None], all_weights, model.weights[cand_layers, cand_units])
+    )
+    new_unit_mask = model.unit_mask.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 1, model.unit_mask[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    new_activation_indices = model.activation_indices.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 0, model.activation_indices[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    model = eqx.tree_at(
+        lambda m: (m.input_indices, m.weights, m.unit_mask, m.activation_indices),
+        model,
+        (new_input_indices, new_weights_arr, new_unit_mask, new_activation_indices),
+    )
+
+    new_utility = unit_stats.utility.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, init_utility, unit_stats.utility[cand_layers, cand_units])
+    )
+    new_age = unit_stats.age.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 0, unit_stats.age[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    unit_stats = UnitStats(age=new_age, utility=new_utility, accumulator=unit_stats.accumulator)
+
+    spent = jnp.sum(jnp.where(gen_mask, all_costs.astype(jnp.float32), 0.0))
+    new_budget = budget - spent
+
+    gen_mask_2d = jnp.zeros((max_layers, max_units), dtype=jnp.bool_)
+    gen_mask_2d = gen_mask_2d.at[cand_layers, cand_units].set(gen_mask)
+
+    gen_info = (cand_layers, cand_units, gen_mask, n_out_per_unit)
+
+    model = assign_outgoing_relaxed(
+        model, gen_info, max_new_units, output_rng, n_tasks=n_tasks, column_priority=True,
+    )
+    return model, unit_stats, new_budget, gen_mask_2d, gen_info
+
+
+def free_generate(
+    model: DynamicNetwork,
+    unit_stats: UnitStats,
+    budget: Float[Array, ''],
+    max_new_units: int,
+    init_utility: Float[Array, ''],
+    rng: PRNGKeyArray,
+    output_connect_strategy: str = 'all',
+    *,
+    n_tasks: int,
+):
+    """Variant 3: no column restrictions on either incoming or outgoing connections.
+
+    Incoming connections are sampled from any available source (all inputs and
+    all prior-layer active hidden units).  Outgoing connections use
+    assign_outgoing_relaxed with column_priority=False, so targets are chosen
+    purely at random from all outputs and all later-layer hidden units.
+    The number of outgoing connections per unit is sampled from [1, max_out].
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    input_dim = model.input_dim
+    buffer_size = model.buffer_size
+
+    n_total_slots = max_layers * max_units
+    max_new_units = min(max_new_units, n_total_slots)
+
+    rng, slot_rng, sample_rng, output_rng, nout_rng = jax.random.split(rng, 5)
+    max_out = max(1, model.max_fan_out // 2)
+
+    # --- Find and shuffle inactive slots ---
+    inactive_flat = (model.unit_mask == 0).reshape(-1)
+    noise = jax.random.uniform(slot_rng, (n_total_slots,))
+    sort_key = jnp.where(inactive_flat, noise, 2.0)
+    perm = jnp.argsort(sort_key)
+    cand_flat_idx = perm[:max_new_units]
+    cand_layers = cand_flat_idx // max_units
+    cand_units = cand_flat_idx % max_units
+    cand_valid = inactive_flat[cand_flat_idx]
+
+    # --- Unrestricted source availability: all inputs + prior-layer active hidden ---
+    buf_idx = jnp.arange(buffer_size)
+    is_input = buf_idx < input_dim
+    is_hidden = buf_idx >= input_dim
+    safe_buf = jnp.maximum(buf_idx - input_dim, 0)
+    hidden_layer_of_j = safe_buf // max_units
+    hidden_is_active = model.unit_mask[hidden_layer_of_j, safe_buf % max_units]
+
+    target_l = jnp.arange(max_layers)[:, None]   # (max_layers, 1)
+    src_l = hidden_layer_of_j[None, :]            # (1, buffer_size)
+
+    available = (
+        is_input[None, :]
+        | (is_hidden[None, :] & (src_l < target_l) & hidden_is_active[None, :])
+    )  # (max_layers, buffer_size)
+
+    # --- Sample input connections per candidate ---
+    sample_keys = jax.random.split(sample_rng, max_new_units)
+
+    def sample_one_unit(key, cand_layer):
+        _, key2, key3 = jax.random.split(key, 3)
+        avail = available[cand_layer]
+        n_available = jnp.sum(avail)
+        half_conns = jnp.maximum(max_conns // 2, 1)
+        n_conns = jnp.minimum(n_available, half_conns)
+        n_conns = jnp.maximum(n_conns, 1)
+        shuffle_noise = jax.random.uniform(key2, (buffer_size,))
+        shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
+        sorted_idx = jnp.argsort(shuffle_key)
+        selected = sorted_idx[:max_conns]
+        conn_active = jnp.arange(max_conns) < n_conns
+        new_indices = jnp.where(conn_active, selected, -1).astype(jnp.int32)
+        bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(n_conns, 1).astype(jnp.float32))
+        new_weights = jax.random.uniform(key3, (max_conns,), minval=-bound, maxval=bound)
+        new_weights = jnp.where(conn_active, new_weights, 0.0)
+        return new_indices, new_weights, n_conns, n_available
+
+    all_indices, all_weights, all_input_costs, all_n_avail = jax.vmap(
+        sample_one_unit
+    )(sample_keys, cand_layers)
+
+    cand_valid = cand_valid & (all_n_avail > 0)
+
+    n_out_per_unit = jax.random.randint(nout_rng, (max_new_units,), 1, max_out + 1)
+    all_costs = all_input_costs + n_out_per_unit
+
+    costs_if_valid = jnp.where(cand_valid, all_costs.astype(jnp.float32), 0.0)
+    cumulative_cost = jnp.cumsum(costs_if_valid)
+    gen_mask = cand_valid & (cumulative_cost <= budget)
+
+    old_indices = model.input_indices[cand_layers, cand_units]
+    new_input_indices = model.input_indices.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask[:, None], all_indices, old_indices)
+    )
+    new_weights_arr = model.weights.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask[:, None], all_weights, model.weights[cand_layers, cand_units])
+    )
+    new_unit_mask = model.unit_mask.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 1, model.unit_mask[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    new_activation_indices = model.activation_indices.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 0, model.activation_indices[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    model = eqx.tree_at(
+        lambda m: (m.input_indices, m.weights, m.unit_mask, m.activation_indices),
+        model,
+        (new_input_indices, new_weights_arr, new_unit_mask, new_activation_indices),
+    )
+
+    new_utility = unit_stats.utility.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, init_utility, unit_stats.utility[cand_layers, cand_units])
+    )
+    new_age = unit_stats.age.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 0, unit_stats.age[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    unit_stats = UnitStats(age=new_age, utility=new_utility, accumulator=unit_stats.accumulator)
+
+    spent = jnp.sum(jnp.where(gen_mask, all_costs.astype(jnp.float32), 0.0))
+    new_budget = budget - spent
+
+    gen_mask_2d = jnp.zeros((max_layers, max_units), dtype=jnp.bool_)
+    gen_mask_2d = gen_mask_2d.at[cand_layers, cand_units].set(gen_mask)
+
+    gen_info = (cand_layers, cand_units, gen_mask, n_out_per_unit)
+
+    model = assign_outgoing_relaxed(
+        model, gen_info, max_new_units, output_rng, n_tasks=n_tasks, column_priority=False,
+    )
+    return model, unit_stats, new_budget, gen_mask_2d, gen_info
+
+
 # ---------------------------------------------------------------------------
 # Experiment setup
 # ---------------------------------------------------------------------------
@@ -556,6 +987,20 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
             filter_spec=_make_filter_spec(model),
         )
 
+        variant = cfg.get('variant', 'column_guided')
+        if variant == 'relaxed_outputs':
+            utility_fn = partial(column_utility, n_tasks=n_tasks)
+            generate_fn = partial(column_generate_relaxed, n_tasks=n_tasks)
+        elif variant == 'normal_utility':
+            utility_fn = contribution_utility
+            generate_fn = partial(column_generate_relaxed, n_tasks=n_tasks)
+        elif variant == 'no_column':
+            utility_fn = contribution_utility
+            generate_fn = partial(free_generate, n_tasks=n_tasks)
+        else:  # 'column_guided' (original)
+            utility_fn = partial(column_utility, n_tasks=n_tasks)
+            generate_fn = partial(column_generate, n_tasks=n_tasks)
+
         tracker = ConnectivityManager(
             model=model,
             prune_rate=cfg.structure_tracker.prune_rate,
@@ -563,10 +1008,10 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
             decay_rate=cfg.structure_tracker.decay_rate,
             maturity_threshold=cfg.structure_tracker.maturity_threshold,
             max_new_units_per_step=cfg.structure_tracker.get('max_new_units_per_step', 512),
-            output_connect_strategy='all',  # column_generate handles outputs internally; 'random_sparse' not used
+            output_connect_strategy='all',  # generate_fn handles outputs internally
             output_weight_init='zero',
-            utility_fn=partial(column_utility, n_tasks=n_tasks),
-            generate_fn=partial(column_generate, n_tasks=n_tasks),
+            utility_fn=utility_fn,
+            generate_fn=generate_fn,
             utility_init_fn=median_utility_init,
             rng=rng_from_string(rng, 'tracker'),
         )
