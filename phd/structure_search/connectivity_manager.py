@@ -22,7 +22,7 @@ from phd.structure_search.dynamic_network import (
 )
 
 
-EPSILON = 1e-8
+EPSILON = 1e-4  # tie-breaking perturbation; must exceed float32 ULP at typical utility magnitudes (~10-50)
 MAX_FLOAT = jnp.finfo(jnp.float32).max
 
 
