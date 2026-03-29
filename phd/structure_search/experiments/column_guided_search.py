@@ -65,8 +65,45 @@ SCAN_UNROLL = 4
 
 
 # ---------------------------------------------------------------------------
-# Column-aware utility
+# Utility functions
 # ---------------------------------------------------------------------------
+
+def normalized_contribution_utility(
+    model: DynamicNetwork,
+    buffer: Float[Array, 'batch_size buffer_size'],
+    grads=None,
+    updates=None,
+    targets=None,
+    predictions=None,
+) -> Float[Array, 'max_layers max_units_per_layer']:
+    """Contribution utility divided by the number of active outgoing connections.
+
+    Counts all active outgoing connections per unit (hidden-to-hidden via
+    outgoing_unit_indices, plus hidden-to-output via output_mask) and
+    divides the raw contribution utility by that count (clamped to >= 1).
+    """
+    contrib = contribution_utility(
+        model, buffer, grads=grads, updates=updates,
+        targets=targets, predictions=predictions,
+    )
+
+    layers = jnp.arange(model.max_layers)
+    units = jnp.arange(model.max_units_per_layer)
+    buf_positions = (
+        model.input_dim
+        + layers[:, None] * model.max_units_per_layer
+        + units[None, :]
+    )  # (max_layers, max_units)
+
+    # Hidden-to-hidden outgoing count: sum over all layers and fan_out slots
+    h2h_count = (model.outgoing_unit_indices >= 0).sum(axis=(0, 2))[buf_positions]
+
+    # Hidden-to-output outgoing count
+    h2o_count = model.output_mask[:, buf_positions].astype(jnp.int32).sum(axis=0)
+
+    n_out = jnp.maximum((h2h_count + h2o_count).astype(jnp.float32), 1.0)
+    return contrib / n_out
+
 
 def column_utility(
     model: DynamicNetwork,
@@ -992,7 +1029,7 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
             utility_fn = partial(column_utility, n_tasks=n_tasks)
             generate_fn = partial(column_generate_relaxed, n_tasks=n_tasks)
         elif variant == 'normal_utility':
-            utility_fn = contribution_utility
+            utility_fn = normalized_contribution_utility
             generate_fn = partial(column_generate_relaxed, n_tasks=n_tasks)
         elif variant == 'no_column':
             utility_fn = contribution_utility
