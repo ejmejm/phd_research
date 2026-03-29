@@ -1352,7 +1352,7 @@ def run_experiment(cfg, train_state, streams, num_classes, n_tasks, test_data=No
 # Entry point
 # ---------------------------------------------------------------------------
 
-@hydra.main(config_path='../conf', config_name='config', version_base='1.1')
+@hydra.main(config_path='../conf/column_guided', config_name='stationary', version_base='1.1')
 def main(cfg: DictConfig) -> None:
     configure_jax(cfg)
     cfg = init_experiment(cfg.project, cfg)
