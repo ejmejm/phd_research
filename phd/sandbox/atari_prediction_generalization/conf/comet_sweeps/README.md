@@ -36,21 +36,34 @@ sbatch --array=1-150%56 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
 
 ### v2 (with return rescaling; upgd sigma=1.0 removed)
 
+Ran on Vulcan (L40S). Measured resource usage:
+
+| Resource | Measured | Recommended (with 30% overhead) |
+|----------|----------|--------------------------------|
+| Memory (peak) | ~9.2 GB avg, 10.5 GB max | `--mem=14G` |
+| CPUs | ~1.25 effective | `--cpus-per-task=2` |
+| Time per trial | ~56 min at 772 it/s | — |
+| Trials per 12h job | ~10 | — |
+
+To estimate num jobs: `ceil(num_trials / 10 * 1.3)`.
+
 | Config | Sweep ID | Trials | Hrs/trial | Total hrs | Job time | Num jobs |
 |--------|----------|--------|-----------|-----------|----------|----------|
-| adam_sweep_v2_rescaled | `d60d25541b0b458ca7f4f1b18bacff77` | 14 | ~2.5 | 35 | 12h | 5 |
-| upgd_sweep_v2_rescaled | `a27e851d8cc74eaaae999a985bc9de63` | 480 | ~2.5 | 1200 | 12h | 140 |
+| adam_sweep_v2_rescaled | `d60d25541b0b458ca7f4f1b18bacff77` | 14 | ~0.93 | 13 | 12h | 5 |
+| upgd_sweep_v2_rescaled | `a27e851d8cc74eaaae999a985bc9de63` | 480 | ~0.93 | 448 | 12h | 65 |
+
+53 of 140 UPGD jobs did actual work; the rest found the sweep already completed. 65 jobs (ceil(480/10*1.3)) would have been sufficient.
 
 ```bash
 # adam_sweep_v2_rescaled (Vulcan, L40S)
 sbatch --array=1-5 --gpus-per-node=1 \
-  --cpus-per-task=2 --mem=16G --time=12:00:00 \
+  --cpus-per-task=2 --mem=14G --time=12:00:00 \
   launch_comet_agent.sbatch -s d60d25541b0b458ca7f4f1b18bacff77 \
   -p $HOME/scratch/phd_research/phd/sandbox/atari_prediction_generalization
 
 # upgd_sweep_v2_rescaled (Vulcan, L40S)
-sbatch --array=1-140%50 --gpus-per-node=1 \
-  --cpus-per-task=2 --mem=16G --time=12:00:00 \
+sbatch --array=1-65%50 --gpus-per-node=1 \
+  --cpus-per-task=2 --mem=14G --time=12:00:00 \
   launch_comet_agent.sbatch -s a27e851d8cc74eaaae999a985bc9de63 \
   -p $HOME/scratch/phd_research/phd/sandbox/atari_prediction_generalization
 ```
