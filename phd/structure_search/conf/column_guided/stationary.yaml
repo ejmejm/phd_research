@@ -1,7 +1,7 @@
 device: cuda
 jax_jit_cache_dir: /tmp/jax_cache
 wandb: false
-mlflow: false
+mlflow: true
 comet_ml: false
 log_individual_seeds: false
 
