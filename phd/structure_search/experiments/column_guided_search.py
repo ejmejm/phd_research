@@ -1032,7 +1032,7 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
             utility_fn = normalized_contribution_utility
             generate_fn = partial(column_generate_relaxed, n_tasks=n_tasks)
         elif variant == 'no_column':
-            utility_fn = contribution_utility
+            utility_fn = normalized_contribution_utility
             generate_fn = partial(free_generate, n_tasks=n_tasks)
         else:  # 'column_guided' (original)
             utility_fn = partial(column_utility, n_tasks=n_tasks)

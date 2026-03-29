@@ -3,4 +3,4 @@ defaults:
   - _self_
 
 variant: relaxed_outputs
-project: column-guided-relaxed-outputs-parallel-mnist
+project: column-guided-parallel-mnist
