@@ -1,5 +1,9 @@
-defaults:
-  - config
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+wandb: false
+mlflow: false
+comet_ml: false
+log_individual_seeds: false
 
 dataset:
   name: parallel_mnist
@@ -15,12 +19,15 @@ model:
   max_fan_out: 64
   connect_all_to_output: false
   activation: relu
+  init_strategy: linear
 
 optimizer:
   name: adam
   learning_rate: ${eval:2**-11}
+  weight_decay: 0
 
 train:
+  batch_size: 1
   loss: cross_entropy
   total_steps: 200_000
   log_freq: 2000
@@ -36,5 +43,4 @@ structure_tracker:
   max_new_units_per_step: 256
 
 seed: 1
-mlflow: false
 project: column-guided-parallel-mnist
