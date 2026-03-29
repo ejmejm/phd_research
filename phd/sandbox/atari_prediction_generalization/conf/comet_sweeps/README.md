@@ -42,14 +42,14 @@ sbatch --array=1-150%56 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
 | upgd_sweep_v2_rescaled | `a27e851d8cc74eaaae999a985bc9de63` | 480 | ~2.5 | 1200 | 12h | 140 |
 
 ```bash
-# adam_sweep_v2_rescaled
-sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+# adam_sweep_v2_rescaled (Vulcan, L40S)
+sbatch --array=1-5 --gpus-per-node=1 \
   --cpus-per-task=2 --mem=16G --time=12:00:00 \
   launch_comet_agent.sbatch -s d60d25541b0b458ca7f4f1b18bacff77 \
   -p $HOME/scratch/phd_research/phd/sandbox/atari_prediction_generalization
 
-# upgd_sweep_v2_rescaled
-sbatch --array=1-140%50 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+# upgd_sweep_v2_rescaled (Vulcan, L40S)
+sbatch --array=1-140%50 --gpus-per-node=1 \
   --cpus-per-task=2 --mem=16G --time=12:00:00 \
   launch_comet_agent.sbatch -s a27e851d8cc74eaaae999a985bc9de63 \
   -p $HOME/scratch/phd_research/phd/sandbox/atari_prediction_generalization
