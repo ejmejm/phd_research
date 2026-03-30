@@ -1,0 +1,44 @@
+name: upgd_sweep_v2_rescaled
+project: atari-prediction
+command: python train.py --config-name=all_games_config
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+
+  optimizer.name: upgd
+
+  optimizer.learning_rate:
+    - "${eval:2**-8}" # 
+    - "${eval:2**-10}" # 
+    - "${eval:2**-12}"
+    - "${eval:2**-14}"
+    - "${eval:2**-16}"
+    - "${eval:2**-18}"
+
+  optimizer.beta_utility:
+    - 0.9
+    - 0.99
+    - 0.999
+
+  optimizer.sigma:
+    - 0.001
+    - 0.01
+    - 0.1
+    - 0.2 #
+    - 0.5 #
+
+  optimizer.weight_decay:
+    - 0.0001 #
+    - 0.0 #
+
+  train.reinit_at_game_boundary: [false, true]
+  train.rescale_returns: true
+
+  seed:
+    value: [1, 2, 3, 4, 5]
