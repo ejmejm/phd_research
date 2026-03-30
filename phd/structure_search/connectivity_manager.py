@@ -960,10 +960,13 @@ class ConnectivityManager(eqx.Module):
         ).astype(jnp.float32)
         gen_budget = jnp.maximum(0.0, self.connection_budget - active_conns_after_prune)
 
+        # Subtract freed connections from accumulator; carry remainder to next cycle
+        new_accumulator = jnp.maximum(0.0, self.unit_stats.accumulator - n_freed)
+
         unit_stats = UnitStats(
             age=new_age,
             utility=new_utility,
-            accumulator=jnp.array(0.0),  # Reset accumulator after pruning
+            accumulator=new_accumulator,
         )
 
         # --- Generate new units ---

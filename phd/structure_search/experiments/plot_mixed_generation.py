@@ -491,7 +491,7 @@ def main():
     fig = plot_layer(
         lifetimes, agg, layer=None,
         step_indices=data['step_indices'],
-        max_steps=args.max_steps, fraction=args.fraction,
+        max_steps=args.max_steps, fractions=args.fractions,
         title='Feature Utility Trajectories — All Layers',
     )
     path = os.path.join(args.output_dir, 'global_trajectories.html')

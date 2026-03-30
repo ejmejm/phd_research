@@ -1277,6 +1277,7 @@ class MixedConnectivityManager(ConnectivityManager):
         n_freed_output = jnp.sum(
             model.output_mask * pruned_buf_mask[None, :].astype(jnp.int32)
         ).astype(jnp.float32)
+        n_freed = n_freed_incoming + n_freed_output
 
         # Batch prune
         prune_3d = prune_mask[:, :, None]
@@ -1312,8 +1313,9 @@ class MixedConnectivityManager(ConnectivityManager):
         gen_budget = jnp.maximum(
             0.0, self.connection_budget - active_conns_after_prune)
 
+        new_accumulator = jnp.maximum(0.0, self.unit_stats.accumulator - n_freed)
         unit_stats = UnitStats(
-            age=new_age, utility=new_utility, accumulator=jnp.array(0.0))
+            age=new_age, utility=new_utility, accumulator=new_accumulator)
 
         # Generate new units — pass column_tag via kwarg
         model, unit_stats, _, gen_mask_2d, gen_info = self.generate_fn(
