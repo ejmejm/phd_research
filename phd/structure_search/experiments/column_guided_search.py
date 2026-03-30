@@ -2113,21 +2113,10 @@ def log_utility_distributions(train_state, streams, cfg, n_tasks):
     import plotly.graph_objects as go
     import mlflow
 
-    # Forward pass to get buffer activations
-    batch = [stream.sample_batch(1) for stream in streams]
-    images = jnp.array(np.stack([b[0] for b in batch]))  # (n_seeds, 1, bs, input_dim)
-    images = images[:, 0]  # (n_seeds, bs, input_dim)
+    # Use EMA utility from tracker (consistent with GIF and scalar logging)
+    utility = np.array(train_state.structure_tracker.unit_stats.utility)  # (n_seeds, L, U)
+    unit_mask = np.array(train_state.model.unit_mask)                     # (n_seeds, L, U)
 
-    @jax.jit
-    @jax.vmap
-    def _get_utility(model, imgs):
-        _, param_inputs = jax.vmap(model)(imgs)
-        return normalized_contribution_utility(model, param_inputs)
-
-    utility = np.array(_get_utility(train_state.model, images))  # (n_seeds, L, U)
-    unit_mask = np.array(train_state.model.unit_mask)             # (n_seeds, L, U)
-
-    variant = cfg.get('variant', 'column_guided')
     has_tags = hasattr(train_state.structure_tracker, 'column_tag')
     if has_tags:
         column_tag = np.array(train_state.structure_tracker.column_tag)
@@ -2144,7 +2133,7 @@ def log_utility_distributions(train_state, streams, cfg, n_tasks):
             fig = go.Figure()
             # Compute shared bin edges from all active units
             all_vals = utility[s, l][active]
-            n_bins = 100
+            n_bins = 50
             bin_lo, bin_hi = float(all_vals.min()), float(all_vals.max())
             bin_size = max((bin_hi - bin_lo) / n_bins, 1e-8)
 
@@ -2169,8 +2158,8 @@ def log_utility_distributions(train_state, streams, cfg, n_tasks):
                     xbins=dict(start=bin_lo, end=bin_hi, size=bin_size)))
 
             fig.update_layout(
-                title=f'Utility Distribution — Seed {cfg.seed[s]}, Layer {l}',
-                xaxis_title='Normalized Contribution Utility',
+                title=f'EMA Utility Distribution — Seed {cfg.seed[s]}, Layer {l}',
+                xaxis_title='EMA Utility',
                 yaxis_title='Count',
             )
             mlflow.log_figure(
@@ -2242,7 +2231,7 @@ def _save_utility_distribution_gif(full_data, cfg, n_frames=60, seed_idx=0):
         return
     x_lo = float(np.percentile(all_active_utils, 0.5))
     x_hi = float(np.percentile(all_active_utils, 99.5))
-    n_bins = 80
+    n_bins = 40
     bin_edges = np.linspace(x_lo, x_hi, n_bins + 1)
 
     tag_config = [
@@ -2254,10 +2243,19 @@ def _save_utility_distribution_gif(full_data, cfg, n_frames=60, seed_idx=0):
     ]
 
     for l in range(n_layers):
-        fig, ax = plt.subplots(figsize=(8, 4))
-        title_text = ax.set_title('', fontsize=11)
+        # Pre-compute y-axis max across all frames for this layer
+        all_maxes = []
+        for t in frame_indices:
+            active = unit_mask[t, l].astype(bool)
+            vals = utility[t, l][active]
+            if vals.size > 0:
+                counts, _ = np.histogram(vals, bins=bin_edges)
+                all_maxes.append(counts.max())
+        y_max = int(np.percentile(all_maxes, 95) * 1.15) if all_maxes else 1
 
-        def animate(frame_num, layer=l):
+        fig, ax = plt.subplots(figsize=(8, 4))
+
+        def animate(frame_num, layer=l, ym=y_max):
             ax.clear()
             t = frame_indices[frame_num]
             step = int(step_indices[t])
@@ -2277,7 +2275,8 @@ def _save_utility_distribution_gif(full_data, cfg, n_frames=60, seed_idx=0):
                             label=f'All ({vals.size})')
 
             ax.set_xlim(x_lo, x_hi)
-            ax.set_xlabel('Normalized Contribution Utility')
+            ax.set_ylim(0, ym)
+            ax.set_xlabel('EMA Utility')
             ax.set_ylabel('Count')
             ax.set_title(f'Layer {layer} — Step {step}')
             ax.legend(loc='upper right', fontsize=8)

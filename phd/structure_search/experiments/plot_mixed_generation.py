@@ -10,7 +10,7 @@ Usage:
 Options:
     --run-id        MLflow run ID to pull data from
     --max-steps     Only plot up to this many training steps (default: all)
-    --fraction      Fraction of feature lifetimes to plot (default: 0.1)
+    --fractions     Slider fraction steps (default: 0.01 0.05 0.1)
     --seed          Which seed index to plot (default: 0)
     --output-dir    Directory to save HTML plots (default: ./plots)
     --prune-freq    Restructure frequency in training steps (default: 200)
@@ -125,44 +125,55 @@ def extract_lifetimes(data: dict, seed: int):
     return lifetimes
 
 
+def _masked_stats(utility, mask):
+    """Vectorized mean/median/5th-percentile over last axis with a boolean mask.
+
+    Args:
+        utility: (T, U) array of values
+        mask:    (T, U) boolean array — True for active units
+
+    Returns:
+        mean, median, threshold arrays each of shape (T,)
+    """
+    T, U = utility.shape
+    # Replace inactive with nan, then use nanmean/nanmedian/nanpercentile
+    masked = np.where(mask, utility, np.nan)
+
+    with np.errstate(all='ignore'):
+        mean = np.nanmean(masked, axis=1)
+        median = np.nanmedian(masked, axis=1)
+        # Sort-based 5th percentile: sort each row, pick the index
+        # corresponding to 5% of active count
+        sorted_vals = np.sort(masked, axis=1)  # nans go to end
+        n_active = mask.sum(axis=1)  # (T,)
+        pct_idx = np.clip((n_active * 0.05).astype(int), 0, U - 1)
+        threshold = sorted_vals[np.arange(T), pct_idx]
+
+    # Fill nans (no active units) with 0
+    mean = np.nan_to_num(mean, nan=0.0)
+    median = np.nan_to_num(median, nan=0.0)
+    threshold = np.nan_to_num(threshold, nan=0.0)
+    return mean, median, threshold
+
+
 def compute_aggregate_curves(data: dict, seed: int):
     """Compute mean/median utility and pruning threshold per timestep."""
     utility = data['utility'][seed]       # (T, L, U)
     unit_mask = data['unit_mask'][seed]   # (T, L, U)
-    age = data['age'][seed]               # (T, L, U)
     step_indices = data['step_indices']
 
     T, L, U = utility.shape
 
-    mean_util = np.zeros(T)
-    median_util = np.zeros(T)
-    threshold = np.zeros(T)
+    # Global: flatten layers into unit dimension → (T, L*U)
+    global_util = utility.reshape(T, -1)
+    global_mask = unit_mask.reshape(T, -1).astype(bool)
+    mean_util, median_util, threshold = _masked_stats(global_util, global_mask)
 
-    for t in range(T):
-        active = unit_mask[t].astype(bool)
-        active_utils = utility[t][active]
-        if active_utils.size == 0:
-            continue
-        mean_util[t] = active_utils.mean()
-        median_util[t] = np.median(active_utils)
-        # Rough threshold: 5th percentile of active utilities
-        threshold[t] = np.percentile(active_utils, 5)
-
-    # Per-layer aggregates
+    # Per-layer
     per_layer = {}
     for l in range(L):
-        per_layer[l] = {
-            'mean': np.zeros(T),
-            'median': np.zeros(T),
-            'threshold': np.zeros(T),
-        }
-        for t in range(T):
-            active = unit_mask[t, l].astype(bool)
-            vals = utility[t, l][active]
-            if vals.size > 0:
-                per_layer[l]['mean'][t] = vals.mean()
-                per_layer[l]['median'][t] = np.median(vals)
-                per_layer[l]['threshold'][t] = np.percentile(vals, 5)
+        m, med, thr = _masked_stats(utility[:, l], unit_mask[:, l].astype(bool))
+        per_layer[l] = {'mean': m, 'median': med, 'threshold': thr}
 
     return {
         'step_indices': step_indices,
@@ -224,7 +235,7 @@ def _build_batched_traces(lts, max_steps, tag, colors):
     return traces
 
 
-def plot_layer(lifetimes, agg, layer, step_indices, max_steps, fraction, title):
+def plot_layer(lifetimes, agg, layer, step_indices, max_steps, fractions, title):
     """Create a plotly figure for one layer (or global) with a fraction slider."""
     fig = go.Figure()
 
@@ -252,22 +263,27 @@ def plot_layer(lifetimes, agg, layer, step_indices, max_steps, fraction, title):
     }
     TAG_IDS = sorted(TAG_COLORS.keys())
 
-    # Pre-build batched traces for each slider fraction
-    # Each step: 3 tags × up to 3 traces each (line, birth, death) = up to 9 traces
-    slider_fracs = [0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+    # Sort lifetimes by rank within each tag so we can slice for fractions
+    tag_sorted = {}  # tag -> list of lifetimes sorted by rank (ascending)
+    for tag in TAG_IDS:
+        indices = [i for i, lt in enumerate(lts) if lt['column_tag'] == tag]
+        indices.sort(key=lambda i: ranks[i])
+        tag_sorted[tag] = [lts[i] for i in indices]
+
+    # Pre-build batched traces for each slider fraction by slicing the sorted lists
+    slider_fracs = sorted(fractions)
     traces_per_step = []
     for frac in slider_fracs:
         step_traces = []
         for tag in TAG_IDS:
-            tag_lts = [lt for li, lt in enumerate(lts)
-                       if lt['column_tag'] == tag and ranks[li] < frac]
+            sorted_lts = tag_sorted[tag]
+            n_keep = max(1, int(len(sorted_lts) * frac)) if sorted_lts else 0
             step_traces.extend(
-                _build_batched_traces(tag_lts, max_steps, tag, TAG_COLORS[tag]))
+                _build_batched_traces(sorted_lts[:n_keep], max_steps, tag, TAG_COLORS[tag]))
         traces_per_step.append(step_traces)
 
     # Add all traces for all steps, initially only the active step is visible
-    active_idx = min(range(len(slider_fracs)),
-                     key=lambda i: abs(slider_fracs[i] - fraction))
+    active_idx = len(slider_fracs) - 1  # default to max
 
     trace_step_ranges = []  # (start, end) index in fig.data for each step
     for si, step_traces in enumerate(traces_per_step):
@@ -425,8 +441,8 @@ def main():
     parser.add_argument('--run-id', required=True, help='MLflow run ID')
     parser.add_argument('--max-steps', type=int, default=None,
                         help='Plot up to this many training steps')
-    parser.add_argument('--fraction', type=float, default=0.1,
-                        help='Fraction of features to plot (0-1)')
+    parser.add_argument('--fractions', type=float, nargs='+', default=[0.01, 0.05, 0.1],
+                        help='Slider fraction steps (e.g., 0.01 0.05 0.1 1.0)')
     parser.add_argument('--seed', type=int, default=0,
                         help='Seed index to plot')
     parser.add_argument('--output-dir', type=str, default='./plots',
@@ -464,7 +480,7 @@ def main():
         fig = plot_layer(
             lifetimes, agg, layer=l,
             step_indices=data['step_indices'],
-            max_steps=args.max_steps, fraction=args.fraction,
+            max_steps=args.max_steps, fractions=args.fractions,
             title=f'Feature Utility Trajectories — Layer {l}',
         )
         path = os.path.join(args.output_dir, f'layer_{l}_trajectories.html')
