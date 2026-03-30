@@ -129,3 +129,74 @@ The column of each unit/source is determined entirely by position:
 
 Over successive prune/generate cycles the network converges to fully independent
 subnetworks — one per task.
+
+## Incremental Relaxation Experiments
+
+Three additional configs relax the column guidance incrementally to isolate
+which component (utility function vs generation restriction) drives performance:
+
+| Config | Utility | Generation | Result |
+|--------|---------|-----------|--------|
+| `stationary` (baseline) | `column_utility` | `column_generate` | ~95.6% |
+| `relaxed_outputs` | `column_utility` | `column_generate_relaxed` | ~95.6% |
+| `normal_utility` | `normalized_contribution_utility` | `column_generate_relaxed` | ~89.4% |
+| `no_column` | `normalized_contribution_utility` | `free_generate` | ~89.4% |
+
+**Conclusion**: The column-based utility function (not the generation restriction)
+is the dominant factor.  Without it, performance drops regardless of how units
+are generated.
+
+## Experiment: Utility Comparison (`utility_comparison`)
+
+**Question**: Is the average/sum utility of units in a column-constrained network
+higher than in a random network?
+
+Two runs with the same architecture, both with **no pruning or generation** — just
+training and utility tracking via `normalized_contribution_utility`:
+
+- **Run A** (`init_mode=random`): Normal random init (cross-column connections).
+- **Run B** (`init_mode=column`): All connections within-column; units evenly
+  distributed across columns (104 per column per layer).
+
+At end of training, plotly histograms of per-unit utility distributions are logged
+as mlflow artifacts (one per seed per layer), plus scalar summary metrics.
+
+```bash
+# Run A
+python experiments/column_guided_search.py --config-name utility_comparison init_mode=random
+# Run B
+python experiments/column_guided_search.py --config-name utility_comparison init_mode=column
+```
+
+## Experiment: Mixed Generation (`mixed_generation`)
+
+**Questions**:
+1. If units are generated with and without column constraints, do the
+   within-column units develop higher utility?
+2. How frequently do within-column units survive pruning vs free units?
+
+Uses `normalized_contribution_utility` (no column bias in utility).  Half of
+generated units use `column_generate` (column-constrained incoming + outgoing)
+and are tagged `column_tag=1`.  The other half use `free_generate_protected`
+(unrestricted incoming, outgoing restricted from targeting tagged units in other
+columns).  This prevents free units from contaminating tagged units with
+cross-column connections.
+
+Per-unit snapshots (utility, mask, age, tag) are captured at every training step
+inside JIT and subsampled outside for storage.  The full snapshot data is saved
+as `unit_snapshots.npz` mlflow artifact.
+
+```bash
+python experiments/column_guided_search.py --config-name mixed_generation
+```
+
+### Analysis
+
+```bash
+python experiments/plot_mixed_generation.py --run-id <RUN_ID> --fraction 0.1
+```
+
+Produces per-layer and global interactive plotly plots of feature utility
+trajectories (blue = column-constrained, red = free), with mean/median/threshold
+overlays.  Also prints summary statistics (survival rates, mean lifetime,
+utility comparisons) to answer Q2 and Q3.

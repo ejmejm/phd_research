@@ -1,0 +1,10 @@
+defaults:
+  - stationary
+  - _self_
+
+variant: utility_comparison
+init_mode: random   # override with init_mode=column for column-constrained init
+project: column-guided-utility-deep-dive
+
+structure_tracker:
+  enabled: false   # disables pruning and generation; utility still tracked via EMA

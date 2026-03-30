@@ -52,8 +52,11 @@ from phd.research_utils.logging import (
 )
 from phd.structure_search.connectivity_manager import (
     ConnectivityManager, UnitStats, contribution_utility, median_utility_init,
+    _unit_buf_positions, _prune_mask_to_buf_mask, _reset_optimizer_state,
+    assign_sparse_outgoing,
 )
 from phd.structure_search.data import load_dataset, ParallelMNISTStream
+from phd.jax_core.models import lecun_uniform
 from phd.structure_search.dynamic_network import (
     DynamicNetwork, sync_outgoing_weights, build_outgoing_indices,
     init_random_dynamic_network, count_active_connections, count_active_units,
@@ -927,6 +930,534 @@ def free_generate(
 
 
 # ---------------------------------------------------------------------------
+# Mixed generation (column + free with tag protection)
+# ---------------------------------------------------------------------------
+
+def assign_outgoing_protected(
+    model: DynamicNetwork,
+    gen_info: tuple,
+    max_new_units: int,
+    rng: PRNGKeyArray,
+    *,
+    n_tasks: int,
+    protected_tags: Array,
+) -> DynamicNetwork:
+    """Like assign_outgoing_relaxed(column_priority=False) but excludes
+    cross-column connections to units tagged as column-constrained.
+
+    Free-generated units can connect to any available target EXCEPT hidden
+    units that are column-tagged and in a different column from the source.
+    """
+    cand_layers, cand_units, gen_mask_flat, n_out_per_unit = gen_info
+
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    input_dim = model.input_dim
+    output_dim = model.output_dim
+    max_fan_out = model.max_fan_out
+    max_out = max(1, max_fan_out // 2)
+
+    col_size = max_units // n_tasks
+    pool_size = output_dim + max_layers * max_units
+    keys = jax.random.split(rng, max_new_units)
+
+    input_indices = model.input_indices
+    weights_arr = model.weights
+    output_mask = model.output_mask
+    output_weights = model.output_weights
+    unit_mask = model.unit_mask
+
+    # Pre-compute column-tag protection mask for hidden pool
+    # tag_flat: (max_layers * max_units,)
+    tag_flat = protected_tags.reshape(-1)
+    unit_col_arr = jnp.arange(max_units) // col_size  # (max_units,)
+    hid_col = jnp.tile(unit_col_arr, max_layers)  # (max_layers * max_units,)
+
+    def process_one_unit(carry, idx):
+        input_indices, weights_arr, output_mask, output_weights = carry
+
+        key = keys[idx]
+        is_valid = gen_mask_flat[idx]
+        source_layer = cand_layers[idx]
+        source_unit = cand_units[idx]
+        source_col = source_unit // col_size
+        source_bp = input_dim + source_layer * max_units + source_unit
+        n_out = n_out_per_unit[idx]
+
+        # All outputs are available targets
+        output_available = jnp.ones(output_dim, dtype=jnp.bool_)
+
+        # Hidden targets: later layer, active, has empty slot
+        has_empty_slot = jnp.any(input_indices == -1, axis=-1)
+        is_later = jnp.arange(max_layers)[:, None] > source_layer
+        hidden_available = (
+            has_empty_slot & is_later & (unit_mask == 1)
+        ).reshape(-1)
+
+        # Exclude cross-column connections to tagged units
+        protected_cross = (tag_flat == 1) & (hid_col != source_col)
+        hidden_available = hidden_available & ~protected_cross
+
+        pool_available = jnp.concatenate([output_available, hidden_available])
+
+        noise = jax.random.uniform(key, (pool_size,))
+        sort_key = jnp.where(pool_available, noise, 2.0)
+        selected = jnp.argsort(sort_key)[:max_out]
+        selected_valid = (jnp.arange(max_out) < n_out) & is_valid
+
+        def assign_one_target(carry, j):
+            input_indices, weights_arr, output_mask, output_weights = carry
+            target_pool_idx = selected[j]
+            should_assign = selected_valid[j] & pool_available[target_pool_idx]
+
+            is_out = target_pool_idx < output_dim
+
+            safe_out = jnp.where(is_out, target_pool_idx, 0)
+            out_new = jnp.where(
+                should_assign & is_out, 1, output_mask[safe_out, source_bp]
+            ).astype(jnp.int32)
+            output_mask = output_mask.at[safe_out, source_bp].set(out_new)
+            ow_new = jnp.where(
+                should_assign & is_out, 0.0, output_weights[safe_out, source_bp]
+            )
+            output_weights = output_weights.at[safe_out, source_bp].set(ow_new)
+
+            hid_flat = target_pool_idx - output_dim
+            tl = hid_flat // max_units
+            tu = hid_flat % max_units
+            safe_tl = jnp.where(~is_out, tl, 0)
+            safe_tu = jnp.where(~is_out, tu, 0)
+
+            slots = input_indices[safe_tl, safe_tu]
+            first_empty = jnp.argmax(slots == -1)
+            has_slot = jnp.any(slots == -1)
+            should_hid = should_assign & ~is_out & has_slot
+
+            idx_new = jnp.where(
+                should_hid, source_bp, input_indices[safe_tl, safe_tu, first_empty]
+            ).astype(jnp.int32)
+            input_indices = input_indices.at[safe_tl, safe_tu, first_empty].set(idx_new)
+            w_new = jnp.where(should_hid, 0.0, weights_arr[safe_tl, safe_tu, first_empty])
+            weights_arr = weights_arr.at[safe_tl, safe_tu, first_empty].set(w_new)
+
+            return (input_indices, weights_arr, output_mask, output_weights), None
+
+        (input_indices, weights_arr, output_mask, output_weights), _ = jax.lax.scan(
+            assign_one_target,
+            (input_indices, weights_arr, output_mask, output_weights),
+            jnp.arange(max_out),
+        )
+        return (input_indices, weights_arr, output_mask, output_weights), None
+
+    (input_indices, weights_arr, output_mask, output_weights), _ = jax.lax.scan(
+        process_one_unit,
+        (input_indices, weights_arr, output_mask, output_weights),
+        jnp.arange(max_new_units),
+    )
+    return eqx.tree_at(
+        lambda m: (m.input_indices, m.weights, m.output_mask, m.output_weights),
+        model,
+        (input_indices, weights_arr, output_mask, output_weights),
+    )
+
+
+def free_generate_protected(
+    model: DynamicNetwork,
+    unit_stats: UnitStats,
+    budget: Float[Array, ''],
+    max_new_units: int,
+    init_utility: Float[Array, ''],
+    rng: PRNGKeyArray,
+    output_connect_strategy: str = 'all',
+    *,
+    n_tasks: int,
+    column_tag: Array,
+):
+    """Like free_generate but outgoing connections respect column_tag protection.
+
+    Free-generated units cannot push outgoing connections to column-tagged units
+    in a different column.  Uses assign_outgoing_protected instead of
+    assign_outgoing_relaxed.
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    input_dim = model.input_dim
+    buffer_size = model.buffer_size
+
+    n_total_slots = max_layers * max_units
+    max_new_units = min(max_new_units, n_total_slots)
+
+    rng, slot_rng, sample_rng, output_rng, nout_rng = jax.random.split(rng, 5)
+    max_out = max(1, model.max_fan_out // 2)
+
+    # --- Find and shuffle inactive slots ---
+    inactive_flat = (model.unit_mask == 0).reshape(-1)
+    noise = jax.random.uniform(slot_rng, (n_total_slots,))
+    sort_key = jnp.where(inactive_flat, noise, 2.0)
+    perm = jnp.argsort(sort_key)
+    cand_flat_idx = perm[:max_new_units]
+    cand_layers = cand_flat_idx // max_units
+    cand_units = cand_flat_idx % max_units
+    cand_valid = inactive_flat[cand_flat_idx]
+
+    # --- Unrestricted source availability ---
+    buf_idx = jnp.arange(buffer_size)
+    is_input = buf_idx < input_dim
+    is_hidden = buf_idx >= input_dim
+    safe_buf = jnp.maximum(buf_idx - input_dim, 0)
+    hidden_layer_of_j = safe_buf // max_units
+    hidden_is_active = model.unit_mask[hidden_layer_of_j, safe_buf % max_units]
+
+    target_l = jnp.arange(max_layers)[:, None]
+    src_l = hidden_layer_of_j[None, :]
+
+    available = (
+        is_input[None, :]
+        | (is_hidden[None, :] & (src_l < target_l) & hidden_is_active[None, :])
+    )
+
+    sample_keys = jax.random.split(sample_rng, max_new_units)
+
+    def sample_one_unit(key, cand_layer):
+        _, key2, key3 = jax.random.split(key, 3)
+        avail = available[cand_layer]
+        n_available = jnp.sum(avail)
+        half_conns = jnp.maximum(max_conns // 2, 1)
+        n_conns = jnp.minimum(n_available, half_conns)
+        n_conns = jnp.maximum(n_conns, 1)
+        shuffle_noise = jax.random.uniform(key2, (buffer_size,))
+        shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
+        sorted_idx = jnp.argsort(shuffle_key)
+        selected = sorted_idx[:max_conns]
+        conn_active = jnp.arange(max_conns) < n_conns
+        new_indices = jnp.where(conn_active, selected, -1).astype(jnp.int32)
+        bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(n_conns, 1).astype(jnp.float32))
+        new_weights = jax.random.uniform(key3, (max_conns,), minval=-bound, maxval=bound)
+        new_weights = jnp.where(conn_active, new_weights, 0.0)
+        return new_indices, new_weights, n_conns, n_available
+
+    all_indices, all_weights, all_input_costs, all_n_avail = jax.vmap(
+        sample_one_unit
+    )(sample_keys, cand_layers)
+
+    cand_valid = cand_valid & (all_n_avail > 0)
+
+    n_out_per_unit = jax.random.randint(nout_rng, (max_new_units,), 1, max_out + 1)
+    all_costs = all_input_costs + n_out_per_unit
+
+    costs_if_valid = jnp.where(cand_valid, all_costs.astype(jnp.float32), 0.0)
+    cumulative_cost = jnp.cumsum(costs_if_valid)
+    gen_mask = cand_valid & (cumulative_cost <= budget)
+
+    old_indices = model.input_indices[cand_layers, cand_units]
+    new_input_indices = model.input_indices.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask[:, None], all_indices, old_indices)
+    )
+    new_weights_arr = model.weights.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask[:, None], all_weights, model.weights[cand_layers, cand_units])
+    )
+    new_unit_mask = model.unit_mask.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 1, model.unit_mask[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    new_activation_indices = model.activation_indices.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 0, model.activation_indices[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    model = eqx.tree_at(
+        lambda m: (m.input_indices, m.weights, m.unit_mask, m.activation_indices),
+        model,
+        (new_input_indices, new_weights_arr, new_unit_mask, new_activation_indices),
+    )
+
+    new_utility = unit_stats.utility.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, init_utility, unit_stats.utility[cand_layers, cand_units])
+    )
+    new_age = unit_stats.age.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 0, unit_stats.age[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    unit_stats = UnitStats(age=new_age, utility=new_utility, accumulator=unit_stats.accumulator)
+
+    spent = jnp.sum(jnp.where(gen_mask, all_costs.astype(jnp.float32), 0.0))
+    new_budget = budget - spent
+
+    gen_mask_2d = jnp.zeros((max_layers, max_units), dtype=jnp.bool_)
+    gen_mask_2d = gen_mask_2d.at[cand_layers, cand_units].set(gen_mask)
+
+    gen_info = (cand_layers, cand_units, gen_mask, n_out_per_unit)
+
+    model = assign_outgoing_protected(
+        model, gen_info, max_new_units, output_rng,
+        n_tasks=n_tasks, protected_tags=column_tag,
+    )
+    return model, unit_stats, new_budget, gen_mask_2d, gen_info
+
+
+def mixed_generate(
+    model: DynamicNetwork,
+    unit_stats: UnitStats,
+    budget: Float[Array, ''],
+    max_new_units: int,
+    init_utility: Float[Array, ''],
+    rng: PRNGKeyArray,
+    output_connect_strategy: str = 'all',
+    *,
+    n_tasks: int,
+    column_tag: Array,
+):
+    """Generate units: half column-constrained, half free (with tag protection).
+
+    Column-constrained units use column_generate (within-column incoming and
+    outgoing).  Free units use free_generate_protected (unrestricted incoming,
+    outgoing protected from cross-column connections to tagged units).
+
+    Returns updated column_tag as the last element of gen_info so the caller
+    can extract and store it.
+    """
+    half_budget = budget / 2
+    half_units = max_new_units // 2
+    rng1, rng2 = jax.random.split(rng)
+
+    # Column-constrained half
+    model, unit_stats, remaining1, gen_mask_col, _ = column_generate(
+        model, unit_stats, half_budget, half_units, init_utility, rng1,
+        n_tasks=n_tasks,
+    )
+
+    # Tag newly created column units as 1
+    column_tag = jnp.where(gen_mask_col, 1, column_tag).astype(jnp.int32)
+
+    # Free half with protection — strict half budget, no leftover from column
+    model, unit_stats, remaining2, gen_mask_free, gen_info = free_generate_protected(
+        model, unit_stats, half_budget, half_units, init_utility, rng2,
+        n_tasks=n_tasks, column_tag=column_tag,
+    )
+
+    # Tag newly created free units as 2
+    column_tag = jnp.where(gen_mask_free, 2, column_tag).astype(jnp.int32)
+
+    gen_mask_2d = gen_mask_col | gen_mask_free
+    # Stash updated column_tag in gen_info for MixedConnectivityManager to extract
+    gen_info_with_tag = gen_info + (column_tag,)
+    total_remaining = remaining1 + remaining2
+    return model, unit_stats, total_remaining, gen_mask_2d, gen_info_with_tag
+
+
+class MixedConnectivityManager(ConnectivityManager):
+    """ConnectivityManager extended with per-unit column tagging.
+
+    Tracks which units were generated as column-constrained (column_tag=1) vs
+    free (column_tag=0).  Overrides modify_structure to pass the tag to
+    mixed_generate and extract the updated tag from gen_info.
+    """
+    column_tag: Array  # (max_layers, max_units_per_layer), int32
+
+    def __init__(self, model, **kwargs):
+        super().__init__(model=model, **kwargs)
+        self.column_tag = jnp.zeros(
+            (model.max_layers, model.max_units_per_layer), dtype=jnp.int32)
+
+    def modify_structure(self, model, optimizer, *, rng):
+        rng, prune_rng, gen_rng = jax.random.split(rng, 3)
+
+        # Compute initial utility for new units
+        init_utility = self.utility_init_fn(
+            self.unit_stats.utility, model.unit_mask,
+        )
+
+        # Prune mask
+        prune_mask, n_pruned = self._make_prune_mask(model, rng=prune_rng)
+
+        # Count freed connections before clearing
+        pruned_conn_valid = (model.input_indices >= 0) & prune_mask[:, :, None]
+        n_freed_incoming = jnp.sum(pruned_conn_valid).astype(jnp.float32)
+
+        buf_positions = _unit_buf_positions(model)
+        pruned_buf_mask = _prune_mask_to_buf_mask(
+            prune_mask, buf_positions, model.buffer_size)
+        n_freed_output = jnp.sum(
+            model.output_mask * pruned_buf_mask[None, :].astype(jnp.int32)
+        ).astype(jnp.float32)
+
+        # Batch prune
+        prune_3d = prune_mask[:, :, None]
+        new_unit_mask = jnp.where(prune_mask, 0, model.unit_mask).astype(jnp.int32)
+        new_weights = jnp.where(prune_3d, 0.0, model.weights)
+        new_input_indices = jnp.where(
+            prune_3d, -1, model.input_indices).astype(jnp.int32)
+
+        pruned_buf_2d = pruned_buf_mask[None, :]
+        new_output_mask = model.output_mask * (1 - pruned_buf_2d.astype(jnp.int32))
+        new_output_weights = (
+            model.output_weights * (1 - pruned_buf_2d.astype(jnp.float32)))
+
+        model = eqx.tree_at(
+            lambda m: (m.unit_mask, m.weights, m.input_indices,
+                       m.output_mask, m.output_weights),
+            model,
+            (new_unit_mask, new_weights, new_input_indices,
+             new_output_mask, new_output_weights),
+        )
+
+        # Reset stats and tags for pruned units
+        new_age = jnp.where(prune_mask, 0, self.unit_stats.age).astype(jnp.int32)
+        new_utility = jnp.where(prune_mask, 0.0, self.unit_stats.utility)
+        new_column_tag = jnp.where(
+            prune_mask, 0, self.column_tag).astype(jnp.int32)
+
+        # Generation budget
+        active_conns_after_prune = (
+            jnp.sum(model.input_indices >= 0)
+            + jnp.sum(model.output_mask)
+        ).astype(jnp.float32)
+        gen_budget = jnp.maximum(
+            0.0, self.connection_budget - active_conns_after_prune)
+
+        unit_stats = UnitStats(
+            age=new_age, utility=new_utility, accumulator=jnp.array(0.0))
+
+        # Generate new units — pass column_tag via kwarg
+        model, unit_stats, _, gen_mask_2d, gen_info = self.generate_fn(
+            model, unit_stats, gen_budget,
+            self.max_new_units_per_step,
+            init_utility, gen_rng,
+            output_connect_strategy=self.output_connect_strategy,
+            column_tag=new_column_tag,
+        )
+
+        # Extract updated column_tag from gen_info (last element)
+        updated_tag = gen_info[-1]
+
+        # Assign sparse outgoing if needed
+        if self.output_connect_strategy == 'random_sparse':
+            rng, sparse_rng = jax.random.split(rng)
+            model = assign_sparse_outgoing(
+                model, gen_info[:-1], self.max_new_units_per_step, sparse_rng,
+                output_weight_init=self.output_weight_init,
+            )
+
+        # Rebuild outgoing indices
+        model = build_outgoing_indices(model)
+
+        # Reset optimizer state
+        affected_mask = prune_mask | gen_mask_2d
+        optimizer = _reset_optimizer_state(optimizer, model, affected_mask)
+
+        # Per-layer counts
+        pruned_per_layer = prune_mask.sum(axis=1).astype(jnp.int32)
+        generated_per_layer = gen_mask_2d.sum(axis=1).astype(jnp.int32)
+
+        new_manager = tree_replace(
+            self, unit_stats=unit_stats, rng=rng, column_tag=updated_tag)
+        return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
+
+
+# ---------------------------------------------------------------------------
+# Column-constrained initialization
+# ---------------------------------------------------------------------------
+
+def _column_init(
+    model: DynamicNetwork,
+    n_tasks: int,
+    key: PRNGKeyArray,
+) -> DynamicNetwork:
+    """Rewire an existing network so units are evenly distributed across columns
+    and all connections are within-column.
+
+    Takes a model that was already created by ``init_random_dynamic_network``
+    (with random cross-column connections) and replaces its connectivity with
+    purely within-column wiring.  Units are distributed as ``hidden_dim //
+    n_tasks`` per column per layer (e.g. 104 with hidden_dim=520, n_tasks=5).
+
+    The model's static fields (activation_fns, etc.) are preserved so that it
+    remains stackable with models from the same constructor call.
+    """
+    input_dim = model.input_dim
+    output_dim = model.output_dim
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    buffer_size = model.buffer_size
+
+    col_size = max_units // n_tasks
+    input_col_size = input_dim // n_tasks
+    out_col_size = output_dim // n_tasks
+
+    # Count current active units to determine units_per_col
+    # (uses the first layer's active count as reference)
+    hidden_dim = int(model.unit_mask[0].sum())
+    units_per_col = hidden_dim // n_tasks
+
+    # Start from zeroed arrays
+    weights = jnp.zeros_like(model.weights)
+    input_indices = jnp.full_like(model.input_indices, -1)
+    unit_mask = jnp.zeros_like(model.unit_mask)
+    output_mask = jnp.zeros_like(model.output_mask)
+    output_weights = jnp.zeros_like(model.output_weights)
+
+    for c in range(n_tasks):
+        col_start = c * col_size
+        col_end = col_start + units_per_col
+        inp_start = c * input_col_size
+        inp_end = inp_start + input_col_size
+
+        for l in range(max_layers):
+            avail_positions = list(range(inp_start, inp_end))
+            for prev_l in range(l):
+                offset = input_dim + prev_l * max_units
+                avail_positions.extend(range(offset + col_start, offset + col_end))
+            avail_arr = jnp.array(avail_positions, dtype=jnp.int32)
+            n_available = len(avail_positions)
+            half_conns = max(1, max_conns // 2)
+            n_conns = min(n_available, half_conns)
+
+            key, layer_key = jax.random.split(key)
+            unit_keys = jax.random.split(layer_key, units_per_col)
+
+            def _sample_unit(unit_key, avail=avail_arr, n_avail=n_available,
+                             n_c=n_conns):
+                perm = jax.random.permutation(unit_key, n_avail)[:n_c]
+                sources = avail[perm]
+                padded = jnp.full(max_conns, -1, dtype=jnp.int32)
+                padded = padded.at[:n_c].set(sources)
+                return padded
+
+            layer_indices = jax.vmap(_sample_unit)(unit_keys)
+
+            key, w_key = jax.random.split(key)
+            bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.float32(max(n_conns, 1)))
+            w = jax.random.uniform(
+                w_key, (units_per_col, max_conns), minval=-bound, maxval=bound)
+            conn_mask = (layer_indices >= 0).astype(jnp.float32)
+            w = w * conn_mask
+
+            input_indices = input_indices.at[l, col_start:col_end].set(layer_indices)
+            weights = weights.at[l, col_start:col_end].set(w)
+            unit_mask = unit_mask.at[l, col_start:col_end].set(1)
+
+        # Output connections: last-layer units → same-column outputs
+        last_offset = input_dim + (max_layers - 1) * max_units
+        buf_positions = jnp.arange(last_offset + col_start, last_offset + col_end)
+        out_indices = jnp.arange(c * out_col_size, (c + 1) * out_col_size)
+        output_mask = output_mask.at[
+            out_indices[:, None], buf_positions[None, :]
+        ].set(1)
+        key, ow_key = jax.random.split(key)
+        ow = lecun_uniform(ow_key, (out_col_size, units_per_col),
+                           in_dim=units_per_col)
+        output_weights = output_weights.at[
+            out_indices[:, None], buf_positions[None, :]
+        ].set(ow)
+
+    model = eqx.tree_at(
+        lambda n: (n.weights, n.input_indices, n.unit_mask,
+                   n.output_mask, n.output_weights),
+        model,
+        (weights, input_indices, unit_mask, output_mask, output_weights),
+    )
+    return build_outgoing_indices(model)
+
+
+# ---------------------------------------------------------------------------
 # Experiment setup
 # ---------------------------------------------------------------------------
 
@@ -1034,11 +1565,25 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
         elif variant == 'no_column':
             utility_fn = normalized_contribution_utility
             generate_fn = partial(free_generate, n_tasks=n_tasks)
+        elif variant == 'utility_comparison':
+            utility_fn = normalized_contribution_utility
+            generate_fn = partial(column_generate, n_tasks=n_tasks)  # unused
+            if cfg.get('init_mode', 'random') == 'column':
+                model = _column_init(
+                    model, n_tasks=n_tasks,
+                    key=rng_from_string(rng, 'column_init'),
+                )
+        elif variant == 'mixed_generation':
+            utility_fn = normalized_contribution_utility
+            generate_fn = partial(mixed_generate, n_tasks=n_tasks)
         else:  # 'column_guided' (original)
             utility_fn = partial(column_utility, n_tasks=n_tasks)
             generate_fn = partial(column_generate, n_tasks=n_tasks)
 
-        tracker = ConnectivityManager(
+        tracker_cls = (MixedConnectivityManager
+                       if variant == 'mixed_generation'
+                       else ConnectivityManager)
+        tracker = tracker_cls(
             model=model,
             prune_rate=cfg.structure_tracker.prune_rate,
             connection_budget=cfg.structure_tracker.connection_budget,
@@ -1259,11 +1804,112 @@ def evaluate_test(batched_model, test_images, test_labels, num_classes, n_tasks,
 # Training loop
 # ---------------------------------------------------------------------------
 
+def _compute_tag_metrics(train_state, n_tasks):
+    """Compute tagged vs untagged utility metrics for mixed_generation logging."""
+    tracker = train_state.structure_tracker
+    utility = np.array(tracker.unit_stats.utility)    # (n_seeds, L, U)
+    unit_mask = np.array(train_state.model.unit_mask)  # (n_seeds, L, U)
+    column_tag = np.array(tracker.column_tag)          # (n_seeds, L, U)
+
+    active = unit_mask.astype(bool)
+    tagged = active & (column_tag == 1)     # column-constrained generated
+    free = active & (column_tag == 2)       # free generated
+    initial = active & (column_tag == 0)    # from initialization
+
+    metrics = {}
+    for name, mask in [('tagged', tagged), ('free', free), ('initial', initial)]:
+        vals = utility[mask]
+        if vals.size > 0:
+            metrics[f'{name}/mean_utility'] = float(vals.mean())
+            metrics[f'{name}/median_utility'] = float(np.median(vals))
+            metrics[f'{name}/count'] = float(mask.sum() / unit_mask.shape[0])  # avg per seed
+        else:
+            metrics[f'{name}/mean_utility'] = 0.0
+            metrics[f'{name}/median_utility'] = 0.0
+            metrics[f'{name}/count'] = 0.0
+
+    # Pruning threshold estimate
+    accumulator = np.array(tracker.unit_stats.accumulator)  # (n_seeds,)
+    output_dim = train_state.model.output_dim
+    thresholds = []
+    for s in range(utility.shape[0]):
+        active_util = utility[s][active[s]]
+        if active_util.size == 0:
+            thresholds.append(0.0)
+            continue
+        n_to_prune = int(accumulator[s] / (1 + output_dim))
+        n_to_prune = min(n_to_prune, active_util.size)
+        if n_to_prune <= 0:
+            thresholds.append(float(active_util.min()))
+        else:
+            sorted_util = np.sort(active_util)
+            thresholds.append(float(sorted_util[n_to_prune]))
+    metrics['prune_threshold'] = float(np.mean(thresholds))
+
+    return metrics
+
+
+def _snapshot_from_state(state):
+    """Extract per-unit snapshot arrays from a TrainState (inside JIT)."""
+    tracker = state.structure_tracker
+    tag = (tracker.column_tag
+           if hasattr(tracker, 'column_tag')
+           else jnp.zeros_like(state.model.unit_mask))
+    return (
+        tracker.unit_stats.utility,   # (max_layers, max_units)
+        state.model.unit_mask,        # (max_layers, max_units)
+        tracker.unit_stats.age,       # (max_layers, max_units)
+        tag,                          # (max_layers, max_units)
+    )
+
+
+def _subsample_snapshots(snap_tuple, step_base, log_freq, subsample):
+    """Subsample snapshot arrays while preserving lifecycle events.
+
+    Detects both unit_mask transitions (0→1, 1→0) and age resets (age drops
+    to 0 while mask stays 1), which indicate prune+regenerate in the same step.
+
+    Returns (subsampled_tuple, step_indices).
+    """
+    # snap_tuple: tuple of 4 numpy arrays, each (n_seeds, log_freq, L, U)
+    unit_mask_full = snap_tuple[1]  # (n_seeds, T, L, U)
+    age_full = snap_tuple[2]        # (n_seeds, T, L, U)
+    n_steps = unit_mask_full.shape[1]
+
+    # Detect mask transitions
+    mask_diff = np.diff(unit_mask_full, axis=1)
+    mask_events = np.any(mask_diff != 0, axis=(0, 2, 3))  # (T-1,)
+
+    # Detect age resets while staying active (prune+regen same step)
+    active_both = (unit_mask_full[:, :-1] == 1) & (unit_mask_full[:, 1:] == 1)
+    age_reset = active_both & (age_full[:, 1:] == 0) & (age_full[:, :-1] > 0)
+    age_events = np.any(age_reset, axis=(0, 2, 3))  # (T-1,)
+
+    event_steps = mask_events | age_events
+
+    # Keep subsampled steps + steps adjacent to lifecycle events
+    keep = np.zeros(n_steps, dtype=bool)
+    keep[::subsample] = True
+    event_indices = np.where(event_steps)[0]
+    for ei in event_indices:
+        keep[ei] = True
+        if ei + 1 < n_steps:
+            keep[ei + 1] = True
+
+    subsampled = tuple(a[:, keep] for a in snap_tuple)
+    step_indices = step_base + np.where(keep)[0]
+    return subsampled, step_indices
+
+
 def run_experiment(cfg, train_state, streams, num_classes, n_tasks, test_data=None):
     log_freq = cfg.train.log_freq
     num_scans = cfg.train.total_steps // log_freq
     prune_frequency = cfg.structure_tracker.get('prune_frequency', log_freq)
     eval_freq = cfg.train.get('eval_freq', 0)
+    variant = cfg.get('variant', 'column_guided')
+    structure_enabled = cfg.structure_tracker.get('enabled', True)
+    collect_snapshots = (variant == 'mixed_generation')
+    snapshot_subsample = cfg.get('snapshot_subsample', 10)
 
     assert log_freq % prune_frequency == 0, (
         f'log_freq ({log_freq}) must be divisible by prune_frequency ({prune_frequency})'
@@ -1274,32 +1920,88 @@ def run_experiment(cfg, train_state, streams, num_classes, n_tasks, test_data=No
         return train_step(state, data, do_restructure=False,
                           num_classes=num_classes, n_tasks=n_tasks)
 
-    def _inner_step(state, data_block):
-        normal_data = (data_block[0][:-1], data_block[1][:-1])
-        state, normal_metrics = jax.lax.scan(_normal_step, state, normal_data, unroll=SCAN_UNROLL)
-        state, restructure_metrics = train_step(
-            state, (data_block[0][-1], data_block[1][-1]),
-            do_restructure=True, num_classes=num_classes, n_tasks=n_tasks,
-        )
-        stacked = jax.tree.map(
-            lambda a, b: jnp.concatenate([a, b[None]]),
-            normal_metrics, restructure_metrics,
-        )
-        return state, stacked
+    def _normal_step_with_snapshot(state, data):
+        state, metrics = train_step(state, data, do_restructure=False,
+                                    num_classes=num_classes, n_tasks=n_tasks)
+        return state, (metrics, _snapshot_from_state(state))
 
-    def scan_steps(state, data):
-        images, labels = data
-        images = images.reshape(n_inner_blocks, prune_frequency, *images.shape[1:])
-        labels = labels.reshape(n_inner_blocks, prune_frequency, *labels.shape[1:])
-        state, metrics = jax.lax.scan(_inner_step, state, (images, labels))
-        metrics = jax.tree.map(lambda x: x.reshape(-1, *x.shape[2:]), metrics)
-        return state, metrics
+    if structure_enabled:
+        if collect_snapshots:
+            # Scan with restructure + per-step snapshots
+            def _inner_step(state, data_block):
+                normal_data = (data_block[0][:-1], data_block[1][:-1])
+                state, (normal_metrics, normal_snaps) = jax.lax.scan(
+                    _normal_step_with_snapshot, state, normal_data,
+                    unroll=SCAN_UNROLL)
+                state, restructure_metrics = train_step(
+                    state, (data_block[0][-1], data_block[1][-1]),
+                    do_restructure=True, num_classes=num_classes, n_tasks=n_tasks,
+                )
+                last_snap = _snapshot_from_state(state)
+                stacked_metrics = jax.tree.map(
+                    lambda a, b: jnp.concatenate([a, b[None]]),
+                    normal_metrics, restructure_metrics,
+                )
+                stacked_snaps = tuple(
+                    jnp.concatenate([ns, ls[None]], axis=0)
+                    for ns, ls in zip(normal_snaps, last_snap)
+                )
+                return state, (stacked_metrics, stacked_snaps)
+
+            def scan_steps(state, data):
+                images, labels = data
+                images = images.reshape(
+                    n_inner_blocks, prune_frequency, *images.shape[1:])
+                labels = labels.reshape(
+                    n_inner_blocks, prune_frequency, *labels.shape[1:])
+                state, (metrics, snaps) = jax.lax.scan(
+                    _inner_step, state, (images, labels))
+                metrics = jax.tree.map(
+                    lambda x: x.reshape(-1, *x.shape[2:]), metrics)
+                snaps = tuple(
+                    s.reshape(-1, *s.shape[2:]) for s in snaps)
+                return state, (metrics, snaps)
+        else:
+            # Standard scan with restructure, no snapshots
+            def _inner_step(state, data_block):
+                normal_data = (data_block[0][:-1], data_block[1][:-1])
+                state, normal_metrics = jax.lax.scan(
+                    _normal_step, state, normal_data, unroll=SCAN_UNROLL)
+                state, restructure_metrics = train_step(
+                    state, (data_block[0][-1], data_block[1][-1]),
+                    do_restructure=True, num_classes=num_classes, n_tasks=n_tasks,
+                )
+                stacked = jax.tree.map(
+                    lambda a, b: jnp.concatenate([a, b[None]]),
+                    normal_metrics, restructure_metrics,
+                )
+                return state, stacked
+
+            def scan_steps(state, data):
+                images, labels = data
+                images = images.reshape(
+                    n_inner_blocks, prune_frequency, *images.shape[1:])
+                labels = labels.reshape(
+                    n_inner_blocks, prune_frequency, *labels.shape[1:])
+                state, metrics = jax.lax.scan(
+                    _inner_step, state, (images, labels))
+                metrics = jax.tree.map(
+                    lambda x: x.reshape(-1, *x.shape[2:]), metrics)
+                return state, metrics
+    else:
+        # No restructure — simple scan (utility_comparison variant)
+        def scan_steps(state, data):
+            images, labels = data
+            state, metrics = jax.lax.scan(
+                _normal_step, state, (images, labels), unroll=SCAN_UNROLL)
+            return state, metrics
 
     vmapped_scan = jax.jit(jax.vmap(scan_steps))
 
     all_losses, all_accuracies = [], []
     all_per_seed_losses, all_per_seed_accuracies = [], []
     all_test_losses, all_test_accuracies = [], []
+    all_snapshots = []  # list of (snap_tuple, step_indices)
 
     logging_active = cfg.get('mlflow', False) or cfg.get('wandb', False)
     log_executor = ThreadPoolExecutor(max_workers=1)
@@ -1312,7 +2014,18 @@ def run_experiment(cfg, train_state, streams, num_classes, n_tasks, test_data=No
         images = jnp.array(np.stack([b[0] for b in batch]))
         labels = jnp.array(np.stack([b[1] for b in batch]))
 
-        train_state, metrics = vmapped_scan(train_state, (images, labels))
+        scan_result = vmapped_scan(train_state, (images, labels))
+
+        if collect_snapshots:
+            train_state, (metrics, snapshots_jax) = scan_result
+            # Transfer snapshots to numpy and subsample
+            snap_np = tuple(np.array(v) for v in snapshots_jax)
+            step_base = scan_idx * log_freq
+            snap_sub, step_indices = _subsample_snapshots(
+                snap_np, step_base, log_freq, snapshot_subsample)
+            all_snapshots.append((snap_sub, step_indices))
+        else:
+            train_state, metrics = scan_result
 
         per_seed_loss = metrics.loss.mean(axis=1)
         per_seed_acc = metrics.correct.mean(axis=1)
@@ -1332,6 +2045,11 @@ def run_experiment(cfg, train_state, streams, num_classes, n_tasks, test_data=No
             for l in range(n_layers):
                 structure_metrics[f'layer_{l}/pruned'] = float(pruned[:, l].mean())
                 structure_metrics[f'layer_{l}/generated'] = float(generated[:, l].mean())
+
+        # Tagged vs untagged scalar metrics (mixed_generation)
+        if collect_snapshots:
+            structure_metrics.update(
+                _compute_tag_metrics(train_state, n_tasks))
 
         test_metrics_dict = {}
         if eval_freq > 0 and step % eval_freq == 0 and test_data is not None:
@@ -1382,7 +2100,195 @@ def run_experiment(cfg, train_state, streams, num_classes, n_tasks, test_data=No
 
     return (train_state, all_losses, all_accuracies,
             all_per_seed_losses, all_per_seed_accuracies,
-            all_test_losses, all_test_accuracies)
+            all_test_losses, all_test_accuracies,
+            all_snapshots)
+
+
+# ---------------------------------------------------------------------------
+# End-of-training logging
+# ---------------------------------------------------------------------------
+
+def log_utility_distributions(train_state, streams, cfg, n_tasks):
+    """Compute and log utility distribution plots as plotly artifacts."""
+    import plotly.graph_objects as go
+    import mlflow
+
+    # Forward pass to get buffer activations
+    batch = [stream.sample_batch(1) for stream in streams]
+    images = jnp.array(np.stack([b[0] for b in batch]))  # (n_seeds, 1, bs, input_dim)
+    images = images[:, 0]  # (n_seeds, bs, input_dim)
+
+    @jax.jit
+    @jax.vmap
+    def _get_utility(model, imgs):
+        _, param_inputs = jax.vmap(model)(imgs)
+        return normalized_contribution_utility(model, param_inputs)
+
+    utility = np.array(_get_utility(train_state.model, images))  # (n_seeds, L, U)
+    unit_mask = np.array(train_state.model.unit_mask)             # (n_seeds, L, U)
+
+    variant = cfg.get('variant', 'column_guided')
+    has_tags = hasattr(train_state.structure_tracker, 'column_tag')
+    if has_tags:
+        column_tag = np.array(train_state.structure_tracker.column_tag)
+
+    n_seeds = utility.shape[0]
+    n_layers = utility.shape[1]
+
+    for s in range(n_seeds):
+        for l in range(n_layers):
+            active = unit_mask[s, l].astype(bool)
+            if not active.any():
+                continue
+
+            fig = go.Figure()
+            # Compute shared bin edges from all active units
+            all_vals = utility[s, l][active]
+            n_bins = 100
+            bin_lo, bin_hi = float(all_vals.min()), float(all_vals.max())
+            bin_size = max((bin_hi - bin_lo) / n_bins, 1e-8)
+
+            if has_tags:
+                tag_groups = [
+                    (0, 'Initial', 'gray'),
+                    (1, 'Column-constrained', 'blue'),
+                    (2, 'Free', 'red'),
+                ]
+                for tag_val, tag_name, tag_color in tag_groups:
+                    mask = active & (column_tag[s, l] == tag_val)
+                    if mask.any():
+                        fig.add_trace(go.Histogram(
+                            x=utility[s, l][mask], name=tag_name,
+                            marker_color=tag_color, opacity=0.6,
+                            xbins=dict(start=bin_lo, end=bin_hi, size=bin_size)))
+                fig.update_layout(barmode='overlay')
+            else:
+                fig.add_trace(go.Histogram(
+                    x=all_vals, name='All units',
+                    marker_color='steelblue',
+                    xbins=dict(start=bin_lo, end=bin_hi, size=bin_size)))
+
+            fig.update_layout(
+                title=f'Utility Distribution — Seed {cfg.seed[s]}, Layer {l}',
+                xaxis_title='Normalized Contribution Utility',
+                yaxis_title='Count',
+            )
+            mlflow.log_figure(
+                fig, artifact_file=f'seed_{s}/utility_dist_layer_{l}.html')
+
+    # Log scalar summary metrics
+    for l in range(n_layers):
+        active_utils = []
+        for s in range(n_seeds):
+            active = unit_mask[s, l].astype(bool)
+            if active.any():
+                active_utils.append(utility[s, l][active])
+        if active_utils:
+            all_utils = np.concatenate(active_utils)
+            log_metrics({
+                f'final/layer_{l}/mean_utility': float(all_utils.mean()),
+                f'final/layer_{l}/median_utility': float(np.median(all_utils)),
+                f'final/layer_{l}/sum_utility': float(all_utils.sum() / n_seeds),
+            }, cfg)
+
+
+def _save_snapshots(all_snapshots, cfg):
+    """Concatenate and save snapshot data as mlflow artifact."""
+    import mlflow
+    import tempfile
+
+    names = ['utility', 'unit_mask', 'age', 'column_tag']
+    full_data = {}
+    for i, name in enumerate(names):
+        full_data[name] = np.concatenate(
+            [s[0][i] for s in all_snapshots], axis=1)
+    full_data['step_indices'] = np.concatenate(
+        [s[1] for s in all_snapshots])
+
+    with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as f:
+        np.savez_compressed(f.name, **full_data)
+        mlflow.log_artifact(f.name, artifact_path='snapshots')
+    os.unlink(f.name)
+    print(f'Saved unit snapshots: {full_data["utility"].shape[1]} timesteps, '
+          f'{full_data["utility"].shape[0]} seeds')
+
+    # Generate utility distribution GIF from snapshot data
+    _save_utility_distribution_gif(full_data, cfg)
+
+
+def _save_utility_distribution_gif(full_data, cfg, n_frames=60, seed_idx=0):
+    """Create a GIF showing utility distribution evolution over training."""
+    import mlflow
+    import tempfile
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+
+    utility = full_data['utility'][seed_idx]       # (T, L, U)
+    unit_mask = full_data['unit_mask'][seed_idx]    # (T, L, U)
+    column_tag = full_data['column_tag'][seed_idx]  # (T, L, U)
+    step_indices = full_data['step_indices']        # (T,)
+
+    T, n_layers, max_units = utility.shape
+    has_tags = column_tag.max() > 0
+
+    # Sample n_frames evenly spaced timesteps
+    frame_indices = np.linspace(0, T - 1, n_frames, dtype=int)
+
+    # Compute shared x-axis range from all timesteps
+    all_active_utils = utility[unit_mask.astype(bool)]
+    if all_active_utils.size == 0:
+        return
+    x_lo = float(np.percentile(all_active_utils, 0.5))
+    x_hi = float(np.percentile(all_active_utils, 99.5))
+    n_bins = 80
+    bin_edges = np.linspace(x_lo, x_hi, n_bins + 1)
+
+    tag_config = [
+        (0, 'Initial', 'gray', 0.5),
+        (1, 'Column-constr.', '#1e64dc', 0.7),
+        (2, 'Free', '#dc321e', 0.7),
+    ] if has_tags else [
+        (-1, 'All units', 'steelblue', 0.8),
+    ]
+
+    for l in range(n_layers):
+        fig, ax = plt.subplots(figsize=(8, 4))
+        title_text = ax.set_title('', fontsize=11)
+
+        def animate(frame_num, layer=l):
+            ax.clear()
+            t = frame_indices[frame_num]
+            step = int(step_indices[t])
+            active = unit_mask[t, layer].astype(bool)
+
+            if has_tags:
+                for tag_val, tag_name, color, alpha in tag_config:
+                    mask = active & (column_tag[t, layer] == tag_val)
+                    vals = utility[t, layer][mask]
+                    if vals.size > 0:
+                        ax.hist(vals, bins=bin_edges, color=color, alpha=alpha,
+                                label=f'{tag_name} ({vals.size})')
+            else:
+                vals = utility[t, layer][active]
+                if vals.size > 0:
+                    ax.hist(vals, bins=bin_edges, color='steelblue', alpha=0.8,
+                            label=f'All ({vals.size})')
+
+            ax.set_xlim(x_lo, x_hi)
+            ax.set_xlabel('Normalized Contribution Utility')
+            ax.set_ylabel('Count')
+            ax.set_title(f'Layer {layer} — Step {step}')
+            ax.legend(loc='upper right', fontsize=8)
+
+        anim = FuncAnimation(fig, animate, frames=n_frames, interval=150)
+        with tempfile.NamedTemporaryFile(suffix='.gif', delete=False) as f:
+            anim.save(f.name, writer='pillow', dpi=100)
+            mlflow.log_artifact(f.name, artifact_path='gifs')
+            print(f'Saved utility distribution GIF: layer {l}')
+        os.unlink(f.name)
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -1419,7 +2325,8 @@ def main(cfg: DictConfig) -> None:
 
     (train_state, all_losses, all_accuracies,
      all_per_seed_losses, all_per_seed_accuracies,
-     all_test_losses, all_test_accuracies) = run_experiment(
+     all_test_losses, all_test_accuracies,
+     all_snapshots) = run_experiment(
         cfg, train_state, streams, num_classes, n_tasks, test_data=test_data,
     )
 
@@ -1455,6 +2362,15 @@ def main(cfg: DictConfig) -> None:
             'asymptotic_accuracy': per_seed_accs[-n_tail:].mean(axis=0).tolist(),
             'num_params': [n_params] * len(cfg.seed),
         }, cfg)
+
+    # End-of-training utility distribution logging
+    variant = cfg.get('variant', 'column_guided')
+    if variant in ('utility_comparison', 'mixed_generation'):
+        log_utility_distributions(train_state, streams, cfg, n_tasks)
+
+    # Save snapshot data for mixed_generation
+    if all_snapshots and cfg.get('mlflow', False):
+        _save_snapshots(all_snapshots, cfg)
 
     finish_child_runs(cfg)
     finish_experiment(cfg)

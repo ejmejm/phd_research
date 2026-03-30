@@ -1,0 +1,7 @@
+defaults:
+  - stationary
+  - _self_
+
+variant: mixed_generation
+project: column-guided-utility-deep-dive
+snapshot_subsample: 10   # keep every Nth training step in snapshot data (+ lifecycle events)
