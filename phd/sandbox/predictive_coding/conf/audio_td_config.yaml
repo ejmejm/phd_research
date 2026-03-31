@@ -10,9 +10,11 @@ algorithm: ipc    # 'ipc' or 'bp'
 
 data:
   data_dir: ~/local_projects/audio_prediction_benchmark/output
+  observation_trace: false     # use EMA of observations as network input
+  obs_trace_decay: 0.95        # decay rate for observation trace
 
 env:
-  gamma_td: 0.99              # TD discount factor (high for sparse rewards)
+  gamma_td: 0.98              # TD discount factor (high for sparse rewards)
 
 model:
   num_layers: 3               # 2 weight layers, 1 hidden: (1, 128, 2500)
@@ -23,17 +25,17 @@ model:
 ipc:
   T: 1                        # inference steps per observation
   alpha: 1e-4                 # weight learning rate (scales TD error * trace)
-  gamma: 0.5                  # inference learning rate (value node step size)
+  gamma: 0.1                  # inference learning rate (value node step size)
   td_lambda: 0.9              # eligibility trace decay
 
 # BP baseline settings (only used when algorithm=bp)
 optimizer:
-  learning_rate: 1e-4
+  learning_rate: 6e-5
   td_lambda: 0.9
 
 train:
   total_steps: -1             # -1 = use all data (~92k steps)
-  log_freq: 1000
+  log_freq: 10000
 
 seed: null
 log_individual_seeds: false

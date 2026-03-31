@@ -37,12 +37,15 @@ from phd.research_utils.logging import (
     init_child_runs,
     log_metrics,
     log_child_metrics,
+    log_figures,
     finish_child_runs,
     finish_experiment,
 )
-from phd.sandbox.predictive_coding.audio_data import load_audio_data, compute_true_returns
+from phd.sandbox.predictive_coding.audio_data import (
+    load_audio_data, compute_true_returns, compute_observation_trace,
+)
 from phd.sandbox.predictive_coding.models import (
-    PCNetwork, init_pc_network, ipc_step_grads, ACTIVATION_DERIV_MAP,
+    PCNetwork, init_pc_network, pc_forward_pass, ipc_step_grads, ACTIVATION_DERIV_MAP,
 )
 
 
@@ -78,6 +81,7 @@ class PCTrainState(eqx.Module):
     traces: list                # per-layer eligibility traces (same shapes as weights)
     v_old: jax.Array            # scalar: V from previous step
     grad_v_old: list            # per-layer nabla_V from previous step
+    obs_trace: jax.Array        # (INPUT_DIM,) observation feature trace
     step: jax.Array
     rng: PRNGKeyArray
 
@@ -131,17 +135,19 @@ def _compute_grad_v(network, value_nodes, s_t):
     return grads
 
 
-def td_ipc_lambda_step(state, observation, *, T, gamma_inf, alpha, gamma_td, td_lambda):
+def td_ipc_lambda_step(state, observation, *, T, gamma_inf, alpha, gamma_td,
+                        td_lambda, use_obs_trace, obs_trace_decay):
     """One TD(lambda) step for streaming iPC.
 
     Sequential algorithm:
         (a) Update trace with stored nabla_V from previous step
-        (b) Clamp s_t, run T inference steps (value nodes only)
-        (c) Read V_t from settled state
-        (d) TD error: delta = r_{t-1} + gamma * V_t - V_old
-        (e) Update weights: theta += alpha * delta * trace
-        (f) Compute nabla_V_t from settled state
-        (g) Store V_old, nabla_V_old
+        (b) Update observation trace, choose network input
+        (c) Clamp s_input, run T inference steps (value nodes only)
+        (d) Read V_t from settled state
+        (e) TD error: delta = r_{t-1} + gamma * V_t - V_old
+        (f) Update weights: theta += alpha * delta * trace
+        (g) Compute nabla_V_t from settled state
+        (h) Store V_old, nabla_V_old, obs_trace
     """
     s_t, r_prev, g_t = observation  # g_t = true return G_t for state s_t
 
@@ -154,21 +160,28 @@ def td_ipc_lambda_step(state, observation, *, T, gamma_inf, alpha, gamma_td, td_
         for e, g in zip(state.traces, state.grad_v_old)
     ]
 
-    # (b) Clamp s_t, run T inference steps (value nodes only)
+    # (b) Update observation trace and choose network input
+    new_obs_trace = obs_trace_decay * state.obs_trace + s_t
+    if use_obs_trace:
+        s_input = new_obs_trace * (1.0 - obs_trace_decay)  # normalize to ~[0, 1]
+    else:
+        s_input = s_t
+
+    # (c) Clamp s_input, run T inference steps (value nodes only)
     # Clamp v_old at layer 0 so value nodes settle toward the new input
     y_clamp = jnp.array([state.v_old])
     for _t in range(T):
         value_nodes, _weight_grads, info = ipc_step_grads(
-            network, value_nodes, s_t, y_clamp, gamma_inf,
+            network, value_nodes, s_input, y_clamp, gamma_inf,
         )
 
-    # (c) Read V_t from settled state
+    # (d) Read V_t from settled state
     v_t = _read_value_prediction(network, value_nodes)
 
-    # (d) TD error
+    # (e) TD error
     delta = r_prev + gamma_td * v_t - state.v_old
 
-    # (e) Update weights: theta += alpha * delta * trace
+    # (f) Update weights: theta += alpha * delta * trace
     new_weights = [
         w + alpha * delta * e
         for w, e in zip(network.weights, new_traces)
@@ -180,8 +193,8 @@ def td_ipc_lambda_step(state, observation, *, T, gamma_inf, alpha, gamma_td, td_
         weights=new_weights,
     )
 
-    # (f) Compute nabla_V_t from settled state (uses updated weights)
-    grad_v_new = _compute_grad_v(new_network, value_nodes, s_t)
+    # (g) Compute nabla_V_t from settled state (uses updated weights)
+    grad_v_new = _compute_grad_v(new_network, value_nodes, s_input)
 
     # Metrics
     metrics = TDiPCStepMetrics(
@@ -197,6 +210,7 @@ def td_ipc_lambda_step(state, observation, *, T, gamma_inf, alpha, gamma_td, td_
         traces=new_traces,
         v_old=v_t,
         grad_v_old=grad_v_new,
+        obs_trace=new_obs_trace,
         step=state.step + 1,
         rng=state.rng,
     )
@@ -212,6 +226,7 @@ class BPTrainState(eqx.Module):
     trace: MLP          # eligibility trace (same structure as model, zero-init)
     v_old: jax.Array
     grad_v_old: MLP     # stored nabla_V from previous step
+    obs_trace: jax.Array  # (INPUT_DIM,) observation feature trace
     step: jax.Array
     rng: PRNGKeyArray
 
@@ -227,7 +242,8 @@ def _bp_compute_grad_v(model, s):
     return eqx.filter_grad(lambda m: _bp_predict(m, s))(model)
 
 
-def td_bp_lambda_step(state, observation, *, alpha, gamma_td, td_lambda):
+def td_bp_lambda_step(state, observation, *, alpha, gamma_td, td_lambda,
+                       use_obs_trace, obs_trace_decay):
     """One TD(lambda) step for BP baseline."""
     s_t, r_prev, g_t = observation
 
@@ -237,20 +253,27 @@ def td_bp_lambda_step(state, observation, *, alpha, gamma_td, td_lambda):
         state.trace, state.grad_v_old,
     )
 
-    # (b) Forward pass
-    v_t = _bp_predict(state.model, s_t)
+    # (b) Update observation trace and choose network input
+    new_obs_trace = obs_trace_decay * state.obs_trace + s_t
+    if use_obs_trace:
+        s_input = new_obs_trace * (1.0 - obs_trace_decay)  # normalize to ~[0, 1]
+    else:
+        s_input = s_t
 
-    # (c) TD error
+    # (c) Forward pass
+    v_t = _bp_predict(state.model, s_input)
+
+    # (d) TD error
     delta = r_prev + gamma_td * v_t - state.v_old
 
-    # (d) Update weights: theta += alpha * delta * trace
+    # (e) Update weights: theta += alpha * delta * trace
     new_model = jax.tree.map(
         lambda w, e: w + alpha * delta * e,
         state.model, new_trace,
     )
 
-    # (e) Compute nabla_V_t (uses updated model)
-    grad_v_new = _bp_compute_grad_v(new_model, s_t)
+    # (f) Compute nabla_V_t (uses updated model)
+    grad_v_new = _bp_compute_grad_v(new_model, s_input)
 
     metrics = TDBPStepMetrics(
         td_error_sq=jnp.square(delta),
@@ -263,6 +286,7 @@ def td_bp_lambda_step(state, observation, *, alpha, gamma_td, td_lambda):
         trace=new_trace,
         v_old=v_t,
         grad_v_old=grad_v_new,
+        obs_trace=new_obs_trace,
         step=state.step + 1,
         rng=state.rng,
     )
@@ -273,21 +297,27 @@ def td_bp_lambda_step(state, observation, *, alpha, gamma_td, td_lambda):
 # Experiment setup
 # ---------------------------------------------------------------------------
 
-def _init_ipc_step0(network, value_nodes, s_0, gamma_inf, T):
+def _init_ipc_step0(network, value_nodes, s_0, gamma_inf, T,
+                     use_obs_trace, obs_trace_decay):
     """Process s_0: run inference and compute initial V_0 and nabla_V_0."""
-    f = ACTIVATION_MAP[network.activation_name]
+    # Initialize observation trace with s_0
+    obs_trace = s_0.copy()
+    if use_obs_trace:
+        s_input = obs_trace * (1.0 - obs_trace_decay)
+    else:
+        s_input = s_0
 
     # Run inference with a zero target (arbitrary, just to settle nodes)
     y_clamp = jnp.zeros(OUTPUT_DIM)
     for _t in range(T):
         value_nodes, _, _ = ipc_step_grads(
-            network, value_nodes, s_0, y_clamp, gamma_inf,
+            network, value_nodes, s_input, y_clamp, gamma_inf,
         )
 
     v_0 = _read_value_prediction(network, value_nodes)
-    grad_v_0 = _compute_grad_v(network, value_nodes, s_0)
+    grad_v_0 = _compute_grad_v(network, value_nodes, s_input)
 
-    return value_nodes, v_0, grad_v_0
+    return value_nodes, v_0, grad_v_0, obs_trace
 
 
 def prepare_ipc_experiment(cfg, s_0_per_seed):
@@ -309,6 +339,8 @@ def prepare_ipc_experiment(cfg, s_0_per_seed):
 
     T = cfg.ipc.T
     gamma_inf = cfg.ipc.gamma
+    use_obs_trace = cfg.data.get('observation_trace', False)
+    obs_trace_decay = cfg.data.get('obs_trace_decay', 0.95)
 
     train_states = []
     for i, seed in enumerate(seeds):
@@ -325,8 +357,9 @@ def prepare_ipc_experiment(cfg, s_0_per_seed):
 
         # Process s_0 to initialize V_0 and nabla_V_0
         s_0 = jnp.array(s_0_per_seed, dtype=jnp.float32)
-        value_nodes, v_0, grad_v_0 = _init_ipc_step0(
+        value_nodes, v_0, grad_v_0, obs_trace = _init_ipc_step0(
             network, value_nodes, s_0, gamma_inf, T,
+            use_obs_trace, obs_trace_decay,
         )
 
         # Initialize traces to zeros (same shapes as weights)
@@ -338,6 +371,7 @@ def prepare_ipc_experiment(cfg, s_0_per_seed):
             traces=traces,
             v_old=v_0,
             grad_v_old=grad_v_0,
+            obs_trace=obs_trace,
             step=jnp.array(0),
             rng=rng_from_string(rng, 'train'),
         ))
@@ -352,6 +386,8 @@ def prepare_ipc_experiment(cfg, s_0_per_seed):
 def prepare_bp_experiment(cfg, s_0):
     """Create batched BPTrainState for all seeds."""
     seeds = cfg.seed
+    use_obs_trace = cfg.data.get('observation_trace', False)
+    obs_trace_decay = cfg.data.get('obs_trace_decay', 0.95)
     train_states = []
 
     for seed in seeds:
@@ -372,14 +408,17 @@ def prepare_bp_experiment(cfg, s_0):
 
         # Process s_0
         s_0_jax = jnp.array(s_0, dtype=jnp.float32)
-        v_0 = _bp_predict(model, s_0_jax)
-        grad_v_0 = _bp_compute_grad_v(model, s_0_jax)
+        obs_trace = s_0_jax.copy()
+        s_input = obs_trace * (1.0 - obs_trace_decay) if use_obs_trace else s_0_jax
+        v_0 = _bp_predict(model, s_input)
+        grad_v_0 = _bp_compute_grad_v(model, s_input)
 
         train_states.append(BPTrainState(
             model=model,
             trace=trace,
             v_old=v_0,
             grad_v_old=grad_v_0,
+            obs_trace=obs_trace,
             step=jnp.array(0),
             rng=rng_from_string(rng, 'train'),
         ))
@@ -413,12 +452,15 @@ def run_ipc_experiment(cfg, train_state, observations, rewards, true_returns):
     alpha = cfg.ipc.alpha
     gamma_td = cfg.env.gamma_td
     td_lambda = cfg.ipc.td_lambda
+    use_obs_trace = bool(cfg.data.get('observation_trace', False))
+    obs_trace_decay = float(cfg.data.get('obs_trace_decay', 0.95))
 
     def _step(state, observation):
         return td_ipc_lambda_step(
             state, observation,
             T=T, gamma_inf=gamma_inf, alpha=alpha,
             gamma_td=gamma_td, td_lambda=td_lambda,
+            use_obs_trace=use_obs_trace, obs_trace_decay=obs_trace_decay,
         )
 
     def scan_steps(state, data):
@@ -428,6 +470,10 @@ def run_ipc_experiment(cfg, train_state, observations, rewards, true_returns):
 
     all_td_errors = []
     all_msve = []
+    first_preds = None
+    last_preds = None
+    first_range = None
+    last_range = None
     pbar = tqdm(total=total_steps, desc='iPC TD(λ)')
 
     log_executor = ThreadPoolExecutor(max_workers=1)
@@ -444,6 +490,15 @@ def run_ipc_experiment(cfg, train_state, observations, rewards, true_returns):
         g_t = jnp.array(true_returns[(positions + 1) % n_data], dtype=jnp.float32)
 
         train_state, metrics = vmapped_scan(train_state, (s_t, r_prev, g_t))
+
+        # Save online predictions from first and last chunks (seed 0)
+        obs_start = int((positions[0] + 1) % n_data)
+        obs_end = int((positions[-1] + 1) % n_data) + 1
+        if scan_idx == 0:
+            first_preds = np.array(metrics.v_prediction[0])  # (log_freq,)
+            first_range = (obs_start, obs_end)
+        last_preds = np.array(metrics.v_prediction[0])
+        last_range = (obs_start, obs_end)
 
         # Aggregate metrics
         per_seed_td_error = metrics.td_error_sq.mean(axis=1)  # (n_seeds,)
@@ -490,7 +545,7 @@ def run_ipc_experiment(cfg, train_state, observations, rewards, true_returns):
     log_executor.shutdown(wait=False)
     pbar.close()
 
-    return train_state, all_td_errors, all_msve
+    return train_state, all_td_errors, all_msve, (first_preds, last_preds, first_range, last_range)
 
 
 def run_bp_experiment(cfg, train_state, observations, rewards, true_returns):
@@ -508,11 +563,14 @@ def run_bp_experiment(cfg, train_state, observations, rewards, true_returns):
     alpha = cfg.optimizer.learning_rate
     gamma_td = cfg.env.gamma_td
     td_lambda = cfg.optimizer.td_lambda
+    use_obs_trace = bool(cfg.data.get('observation_trace', False))
+    obs_trace_decay = float(cfg.data.get('obs_trace_decay', 0.95))
 
     def _step(state, observation):
         return td_bp_lambda_step(
             state, observation,
             alpha=alpha, gamma_td=gamma_td, td_lambda=td_lambda,
+            use_obs_trace=use_obs_trace, obs_trace_decay=obs_trace_decay,
         )
 
     def scan_steps(state, data):
@@ -522,6 +580,10 @@ def run_bp_experiment(cfg, train_state, observations, rewards, true_returns):
 
     all_td_errors = []
     all_msve = []
+    first_preds = None
+    last_preds = None
+    first_range = None
+    last_range = None
     pbar = tqdm(total=total_steps, desc='BP TD(λ)')
 
     log_executor = ThreadPoolExecutor(max_workers=1)
@@ -537,6 +599,15 @@ def run_bp_experiment(cfg, train_state, observations, rewards, true_returns):
         g_t = jnp.array(true_returns[(positions + 1) % n_data], dtype=jnp.float32)
 
         train_state, metrics = vmapped_scan(train_state, (s_t, r_prev, g_t))
+
+        # Save online predictions from first and last chunks (seed 0)
+        obs_start = int((positions[0] + 1) % n_data)
+        obs_end = int((positions[-1] + 1) % n_data) + 1
+        if scan_idx == 0:
+            first_preds = np.array(metrics.v_prediction[0])
+            first_range = (obs_start, obs_end)
+        last_preds = np.array(metrics.v_prediction[0])
+        last_range = (obs_start, obs_end)
 
         per_seed_td_error = metrics.td_error_sq.mean(axis=1)
         per_seed_msve = metrics.msve.mean(axis=1)
@@ -579,7 +650,147 @@ def run_bp_experiment(cfg, train_state, observations, rewards, true_returns):
     log_executor.shutdown(wait=False)
     pbar.close()
 
-    return train_state, all_td_errors, all_msve
+    return train_state, all_td_errors, all_msve, (first_preds, last_preds, first_range, last_range)
+
+
+# ---------------------------------------------------------------------------
+# Visualization
+# ---------------------------------------------------------------------------
+
+def _predict_ipc(network, observations_jax):
+    """Compute V(s) for observations using PC forward pass (single seed)."""
+    f = ACTIVATION_MAP[network.activation_name]
+
+    def predict_one(s):
+        fwd_nodes = pc_forward_pass(network, s)
+        return (network.weights[0] @ f(fwd_nodes[0]))[0]
+
+    return jax.vmap(predict_one)(observations_jax)
+
+
+def _predict_bp(model, observations_jax):
+    """Compute V(s) for observations using BP forward pass (single seed)."""
+    def predict_one(s):
+        v, _ = model(s)
+        return v[0]
+
+    return jax.vmap(predict_one)(observations_jax)
+
+
+def plot_value_predictions(audio, metadata, rewards, true_returns, predictions,
+                           step_range, step_size=640, sample_rate=16384):
+    """Create a 2-subplot figure: waveform with reward markers + value predictions.
+
+    Args:
+        audio: Raw audio array (1D float64).
+        metadata: Benchmark metadata dict with 'events' list.
+        rewards: (n_steps,) reward array.
+        true_returns: (n_steps,) true discounted returns.
+        predictions: (n_steps_in_range,) predicted values for the step range.
+        step_range: (start, end) step indices.
+        step_size: Samples per timestep.
+        sample_rate: Audio sample rate.
+
+    Returns:
+        matplotlib Figure.
+    """
+    import matplotlib.pyplot as plt
+
+    start, end = step_range
+    n_steps = end - start
+
+    # Time axis in seconds
+    times = np.arange(start, end) * step_size / sample_rate
+    time_start = times[0]
+    time_end = times[-1]
+
+    fig, (ax_wave, ax_val) = plt.subplots(2, 1, figsize=(14, 7), sharex=True,
+                                           gridspec_kw={'height_ratios': [1, 1.2]})
+
+    # --- Top: Waveform with reward markers ---
+    audio_start = start * step_size
+    audio_end = min(end * step_size, len(audio))
+    audio_times = np.arange(audio_start, audio_end) / sample_rate
+    ax_wave.plot(audio_times, audio[audio_start:audio_end],
+                 linewidth=0.3, color='steelblue')
+
+    # Reward markers from metadata events
+    reward_colors = {1.0: 'green', -1.0: 'red'}
+    reward_labels = {1.0: '+1 reward', -1.0: '-1 reward'}
+    labeled = set()
+    for event in metadata.get('events', []):
+        r = event['reward']
+        if r == 0.0:
+            continue
+        rt = event['reward_time']
+        if time_start <= rt <= time_end:
+            color = reward_colors.get(r, 'gray')
+            label = reward_labels.get(r) if r not in labeled else None
+            ax_wave.axvline(rt, color=color, alpha=0.7, linewidth=1.0,
+                            linestyle='--', label=label)
+            labeled.add(r)
+
+    ax_wave.set_ylabel('Amplitude')
+    ax_wave.set_title(f'Audio Waveform (steps {start}-{end})')
+    if labeled:
+        ax_wave.legend(loc='upper right', fontsize=8)
+    ax_wave.set_xlim(time_start, time_end)
+
+    # --- Bottom: True return vs predicted return ---
+    ax_val.plot(times, true_returns[start:end], label='True return $G_t$',
+                color='black', linewidth=0.8, alpha=0.8)
+    ax_val.plot(times, predictions, label='Predicted $\\hat{V}(s_t)$',
+                color='tab:blue', linewidth=0.8, alpha=0.8)
+    ax_val.set_xlabel('Time (s)')
+    ax_val.set_ylabel('Value')
+    ax_val.set_title('True vs Predicted Return')
+    ax_val.legend(loc='upper right', fontsize=8)
+    ax_val.axhline(0, color='gray', linewidth=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
+def generate_visualizations(cfg, rewards, true_returns, metadata,
+                            first_preds, last_preds, first_range, last_range):
+    """Generate and log start/end value prediction figures.
+
+    Uses online predictions recorded DURING training (not re-predicted
+    with the final model), so the "start" figure shows how the model
+    predicted while it was still learning.
+
+    Args:
+        first_preds: (n_steps,) predictions from the first scan chunk (seed 0).
+        last_preds: (n_steps,) predictions from the last scan chunk (seed 0).
+        first_range: (start, end) step indices for the first chunk.
+        last_range: (start, end) step indices for the last chunk.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import soundfile as sf
+
+    data_dir = os.path.expanduser(cfg.data.data_dir)
+    audio, sample_rate = sf.read(os.path.join(data_dir, 'audio.wav'), dtype='float64')
+    step_size = metadata.get('step_size', 640) if metadata else 640
+
+    fig_start = plot_value_predictions(
+        audio, metadata, rewards, true_returns, first_preds,
+        step_range=first_range, step_size=step_size, sample_rate=sample_rate,
+    )
+    fig_end = plot_value_predictions(
+        audio, metadata, rewards, true_returns, last_preds,
+        step_range=last_range, step_size=step_size, sample_rate=sample_rate,
+    )
+
+    log_figures({
+        'value_predictions_start': fig_start,
+        'value_predictions_end': fig_end,
+    }, cfg)
+
+    plt.close(fig_start)
+    plt.close(fig_end)
+    print('Logged value prediction visualizations.')
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +816,15 @@ def main(cfg: DictConfig) -> None:
     # Load and preprocess audio data
     observations, rewards, metadata = load_audio_data(cfg.data.data_dir)
 
+    # Optionally apply observation trace (EMA) for memory
+    if cfg.data.get('observation_trace', False):
+        decay = cfg.data.get('obs_trace_decay', 0.95)
+        print(f'Computing observation trace (decay={decay})...')
+        observations = compute_observation_trace(observations, decay)
+        print(f'Observation trace: shape={observations.shape}, dtype={observations.dtype}')
+
+    input_dim = observations.shape[1]
+
     # Compute true returns for MSVE evaluation
     gamma_td = cfg.env.gamma_td
     print(f'Computing true returns (gamma={gamma_td})...')
@@ -619,12 +839,12 @@ def main(cfg: DictConfig) -> None:
 
     if algorithm == 'bp':
         train_state, n_params = prepare_bp_experiment(cfg, s_0)
-        train_state, all_td_errors, all_msve = run_bp_experiment(
+        train_state, all_td_errors, all_msve, vis_data = run_bp_experiment(
             cfg, train_state, observations, rewards, true_returns,
         )
     else:
         train_state, n_params = prepare_ipc_experiment(cfg, s_0)
-        train_state, all_td_errors, all_msve = run_ipc_experiment(
+        train_state, all_td_errors, all_msve, vis_data = run_ipc_experiment(
             cfg, train_state, observations, rewards, true_returns,
         )
 
@@ -642,6 +862,17 @@ def main(cfg: DictConfig) -> None:
         print(f'{k}: {v:.6f}' if isinstance(v, float) else f'{k}: {v}')
 
     log_metrics(summary, cfg)
+
+    # Generate and log visualizations
+    logging_active = (cfg.get('mlflow', False) or cfg.get('wandb', False)
+                      or cfg.get('comet_ml', False))
+    first_preds, last_preds, first_range, last_range = vis_data
+    if logging_active and first_preds is not None:
+        generate_visualizations(
+            cfg, rewards, true_returns, metadata,
+            first_preds, last_preds, first_range, last_range,
+        )
+
     finish_child_runs(cfg)
     finish_experiment(cfg)
 

@@ -57,6 +57,31 @@ def load_audio_data(data_dir):
     return observations, rewards, metadata
 
 
+def compute_observation_trace(observations, decay):
+    """Compute exponential moving average of observations.
+
+    trace[t] = decay * trace[t-1] + (1 - decay) * obs[t]
+
+    This gives the network input a memory of recent observations,
+    allowing memoryless models to distinguish e.g. silence-after-guitar
+    from silence-after-piano.
+
+    Args:
+        observations: (n_steps, obs_dim) uint8 or float32 array.
+        decay: EMA decay rate in [0, 1). Higher = longer memory.
+
+    Returns:
+        traces: (n_steps, obs_dim) float32 array.
+    """
+    obs = observations.astype(np.float32)
+    n, d = obs.shape
+    traces = np.zeros((n, d), dtype=np.float32)
+    traces[0] = obs[0]
+    for t in range(1, n):
+        traces[t] = decay * traces[t - 1] + (1.0 - decay) * obs[t]
+    return traces
+
+
 def compute_true_returns(rewards, gamma):
     """Compute exact discounted returns via backward recursion.
 
