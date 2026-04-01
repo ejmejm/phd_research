@@ -81,6 +81,7 @@ class PCTrainState(eqx.Module):
     traces: list                # per-layer eligibility traces (same shapes as weights)
     v_old: jax.Array            # scalar: V from previous step
     grad_v_old: list            # per-layer nabla_V from previous step
+    backward_signals: list      # persistent b[l] vectors for pipelined nabla_V
     obs_trace: jax.Array        # (INPUT_DIM,) observation feature trace
     step: jax.Array
     rng: PRNGKeyArray
@@ -93,46 +94,268 @@ def _read_value_prediction(network, value_nodes):
 
 
 def _compute_grad_v(network, value_nodes, s_t):
-    """Compute nabla_theta V from settled value nodes (2-layer closed form).
+    """Compute nabla_theta V from settled value nodes via backward signal.
 
-    Layer 0: nabla_{theta^0} V = f(x^1)^T  (shape matches weights[0])
-    Layer 1: nabla_{theta^1} V = [f'(x^1) * theta^0^T] @ f(s_t)^T
+    Propagates a unit signal backward from the output layer:
+      b[1] = f'(x[1]) * theta[0]^T
+      b[l] = f'(x[l]) * (theta[l-1]^T @ b[l-1])   for l = 2..L-1
+
+    Then: nabla_{theta[l]} V = outer(b[l+1], f(x[l+1]))
+    with convention b[0] = 1 so nabla_{theta[0]} V = f(x[1])^T.
     """
     f = ACTIVATION_MAP[network.activation_name]
     f_prime = ACTIVATION_DERIV_MAP[network.activation_name]
-
     L = network.num_layers
-    fx1 = f(value_nodes[0])  # f(x^(1))
-    fs = f(s_t)              # f(s_t) = f(x^(L))
+
+    # Build x[l+1] activations for each weight layer: f(x[1]), f(x[2]), ..., f(x[L])
+    # value_nodes[i] = x[i+1], so x[l+1] = value_nodes[l] for l < L-1, x[L] = s_t
+    def get_f_presynaptic(l):
+        """f(x[l+1]) — the presynaptic activation for weight layer l."""
+        if l < L - 1:
+            return f(value_nodes[l])
+        else:
+            return f(s_t)
 
     grads = []
 
-    # Layer 0: nabla_{theta^0} V = outer(1, f(x^1)) = f(x^1) reshaped
-    # weights[0] shape: (1, d1), so grad shape: (1, d1)
-    grads.append(fx1.reshape(1, -1))
+    # Layer 0: nabla_{theta[0]} V = f(x[1])^T (b[0] = 1)
+    grads.append(get_f_presynaptic(0).reshape(1, -1))
 
-    # Layers 1..L-1: backprop through settled value nodes
-    # For 2-layer (L=2): nabla_{theta^1} V = [f'(x^1) * theta^0^T] outer f(s)
-    # General: propagate backward signal through value node chain
-    #   b^(1) = f'(x^1) * (theta^0)^T  (shape d1,)
-    #   nabla_{theta^1} V = outer(b^(1), f(x^2))
-    # For deeper networks, continue the chain.
+    if L < 2:
+        return grads
+
+    # Backward signal: b[1] = f'(x[1]) * theta[0]^T
     backward_signal = f_prime(value_nodes[0]) * network.weights[0].T.reshape(-1)
 
-    if L >= 2:
-        # Layer 1 gradient
-        grads.append(jnp.outer(backward_signal, fs))
+    # Layer 1: nabla_{theta[1]} V = outer(b[1], f(x[2]))
+    grads.append(jnp.outer(backward_signal, get_f_presynaptic(1)))
 
-    # For layers 2..L-1 (deeper networks)
+    # Layers 2..L-1
     for l in range(2, L):
         backward_signal = (
             f_prime(value_nodes[l - 1])
             * (network.weights[l - 1].T @ backward_signal)
         )
-        f_above = f(value_nodes[l]) if l < L - 1 else fs
-        grads.append(jnp.outer(backward_signal, f_above))
+        grads.append(jnp.outer(backward_signal, get_f_presynaptic(l)))
 
     return grads
+
+
+def td_ipc_simultaneous_step(state, observation, *, T, gamma_inf, alpha, gamma_td,
+                              td_lambda, use_obs_trace, obs_trace_decay):
+    """One TD(lambda) step for streaming iPC with simultaneous updates.
+
+    The TD error delta serves as the output error (epsilon[0] := delta),
+    providing a bottom-up signal to value nodes — analogous to the
+    supervised error in standard iPC.
+
+    With T=1, all updates are truly simultaneous. With T>1, value nodes
+    settle for T rounds (letting the delta signal penetrate deeper layers)
+    before the trace and weight updates. Delta is computed once from the
+    initial state and held fixed during settling.
+
+    Layer convention:
+      value_nodes[i] = x[i+1]  (0-indexed list -> 1-indexed layers)
+      weights[l] shape (dim[l], dim[l+1]), predicts x[l] from f(x[l+1])
+      Layer 0 = output (V), Layer L = input (s_t)
+    """
+    s_t, r_prev, g_t = observation
+
+    network = state.network
+    value_nodes = state.value_nodes
+    f = ACTIVATION_MAP[network.activation_name]
+    f_prime = ACTIVATION_DERIV_MAP[network.activation_name]
+    L = network.num_layers
+
+    # --- Observation trace ---
+    new_obs_trace = obs_trace_decay * state.obs_trace + s_t
+    s_input = new_obs_trace * (1.0 - obs_trace_decay) if use_obs_trace else s_t
+
+    # --- Compute V_t and delta from current state (once, before settling) ---
+    v_t = (network.weights[0] @ f(value_nodes[0]))[0]
+    delta = r_prev + gamma_td * v_t - state.v_old
+
+    # --- Settle value nodes for T steps with eps[0] = delta ---
+    for _t in range(T):
+        # Recompute hidden errors from current value nodes
+        errors = []
+        for l in range(1, L):
+            x_above = value_nodes[l] if l < L - 1 else s_input
+            mu_l = network.weights[l] @ f(x_above)
+            errors.append(value_nodes[l - 1] - mu_l)
+
+        # Update value nodes
+        new_value_nodes = []
+        for i in range(len(value_nodes)):
+            x_l = value_nodes[i]
+            top_down = -errors[i] if i < len(errors) else jnp.zeros_like(x_l)
+            eps_below = jnp.array([delta]) if i == 0 else errors[i - 1]
+            bottom_up = f_prime(x_l) * (network.weights[i].T @ eps_below)
+            new_value_nodes.append(x_l + gamma_inf * (top_down + bottom_up))
+        value_nodes = new_value_nodes
+
+    # Energy metric (from final errors)
+    total_energy = jnp.square(delta) + sum(jnp.sum(e ** 2) for e in errors)
+
+    # --- Trace and weight updates (once, after settling) ---
+
+    # Eligibility traces
+    new_traces = [
+        gamma_td * td_lambda * e + g
+        for e, g in zip(state.traces, state.grad_v_old)
+    ]
+
+    # Weights: theta += alpha * delta * trace
+    new_weights = [
+        w + alpha * delta * e
+        for w, e in zip(network.weights, new_traces)
+    ]
+    new_network = PCNetwork(
+        layer_dims=network.layer_dims,
+        num_layers=network.num_layers,
+        activation_name=network.activation_name,
+        weights=new_weights,
+    )
+
+    # nabla_V for next step (from pre-update state)
+    grad_v_new = _compute_grad_v(network, state.value_nodes, s_input)
+
+    metrics = TDiPCStepMetrics(
+        td_error_sq=jnp.square(delta),
+        msve=jnp.square(v_t - g_t),
+        total_energy=total_energy,
+        v_prediction=v_t,
+    )
+
+    new_state = PCTrainState(
+        network=new_network,
+        value_nodes=new_value_nodes,
+        traces=new_traces,
+        v_old=v_t,
+        grad_v_old=grad_v_new,
+        backward_signals=state.backward_signals,
+        obs_trace=new_obs_trace,
+        step=state.step + 1,
+        rng=state.rng,
+    )
+    return new_state, metrics
+
+
+def td_ipc_pipelined_step(state, observation, *, gamma_inf, alpha, gamma_td,
+                           td_lambda, use_obs_trace, obs_trace_decay):
+    """One pipelined TD(lambda) step for streaming iPC.
+
+    Fully local: each layer only communicates with its immediate neighbors.
+    No inner loops, no full-depth backprop.
+
+    The backward signal b[l] for nabla_V is persistent state that advances
+    one layer per timestep:
+      b[1] = f'(x[1]) * theta[0]^T              (fresh each step)
+      b[l] = f'(x[l]) * theta[l-1]^T @ b_old[l-1]  (uses stored b from previous step)
+
+    This means nabla_V at layer l is l-1 timesteps stale — exact for layer 0,
+    one step stale for layer 1, etc. Under continuity this is a minor approximation.
+    """
+    s_t, r_prev, g_t = observation
+
+    network = state.network
+    value_nodes = state.value_nodes
+    f = ACTIVATION_MAP[network.activation_name]
+    f_prime = ACTIVATION_DERIV_MAP[network.activation_name]
+    L = network.num_layers
+
+    # --- Observation trace ---
+    new_obs_trace = obs_trace_decay * state.obs_trace + s_t
+    s_input = new_obs_trace * (1.0 - obs_trace_decay) if use_obs_trace else s_t
+
+    # --- Forward pass: predictions, errors, V_t, delta ---
+    v_t = (network.weights[0] @ f(value_nodes[0]))[0]
+    delta = r_prev + gamma_td * v_t - state.v_old
+
+    errors = []
+    for l in range(1, L):
+        x_above = value_nodes[l] if l < L - 1 else s_input
+        mu_l = network.weights[l] @ f(x_above)
+        errors.append(value_nodes[l - 1] - mu_l)
+
+    total_energy = jnp.square(delta) + sum(jnp.sum(e ** 2) for e in errors)
+
+    # --- Value node update (one step, eps[0] = delta) ---
+    new_value_nodes = []
+    for i in range(len(value_nodes)):
+        x_l = value_nodes[i]
+        top_down = -errors[i] if i < len(errors) else jnp.zeros_like(x_l)
+        eps_below = jnp.array([delta]) if i == 0 else errors[i - 1]
+        bottom_up = f_prime(x_l) * (network.weights[i].T @ eps_below)
+        new_value_nodes.append(x_l + gamma_inf * (top_down + bottom_up))
+
+    # --- Eligibility trace update ---
+    new_traces = [
+        gamma_td * td_lambda * e + g
+        for e, g in zip(state.traces, state.grad_v_old)
+    ]
+
+    # --- Weight update ---
+    new_weights = [
+        w + alpha * delta * e
+        for w, e in zip(network.weights, new_traces)
+    ]
+    new_network = PCNetwork(
+        layer_dims=network.layer_dims,
+        num_layers=network.num_layers,
+        activation_name=network.activation_name,
+        weights=new_weights,
+    )
+
+    # --- Pipelined backward signal for nabla_V ---
+    # b[1] is always fresh (only needs layer 0 info)
+    # b[l] for l >= 2 uses stored b[l-1] from previous timestep
+    old_b = state.backward_signals
+    new_b = []
+    grad_v_new = []
+
+    # Layer 0: nabla_{theta[0]} V = f(x[1])^T (no backward signal needed)
+    grad_v_new.append(f(value_nodes[0]).reshape(1, -1))
+
+    if L >= 2:
+        # b[1] = f'(x[1]) * theta[0]^T — always fresh
+        b_1 = f_prime(value_nodes[0]) * network.weights[0].T.reshape(-1)
+        new_b.append(b_1)
+
+        def get_f_presynaptic(l):
+            if l < L - 1:
+                return f(value_nodes[l])
+            else:
+                return f(s_input)
+
+        # nabla_{theta[1]} V = outer(b[1], f(x[2]))
+        grad_v_new.append(jnp.outer(b_1, get_f_presynaptic(1)))
+
+        # Layers 2..L-1: pipeline using stored b from previous step
+        for l in range(2, L):
+            b_l = f_prime(value_nodes[l - 1]) * (network.weights[l - 1].T @ old_b[l - 2])
+            new_b.append(b_l)
+            grad_v_new.append(jnp.outer(b_l, get_f_presynaptic(l)))
+
+    metrics = TDiPCStepMetrics(
+        td_error_sq=jnp.square(delta),
+        msve=jnp.square(v_t - g_t),
+        total_energy=total_energy,
+        v_prediction=v_t,
+    )
+
+    new_state = PCTrainState(
+        network=new_network,
+        value_nodes=new_value_nodes,
+        traces=new_traces,
+        v_old=v_t,
+        grad_v_old=grad_v_new,
+        backward_signals=new_b,
+        obs_trace=new_obs_trace,
+        step=state.step + 1,
+        rng=state.rng,
+    )
+    return new_state, metrics
 
 
 def td_ipc_lambda_step(state, observation, *, T, gamma_inf, alpha, gamma_td,
@@ -210,6 +433,7 @@ def td_ipc_lambda_step(state, observation, *, T, gamma_inf, alpha, gamma_td,
         traces=new_traces,
         v_old=v_t,
         grad_v_old=grad_v_new,
+        backward_signals=state.backward_signals,
         obs_trace=new_obs_trace,
         step=state.step + 1,
         rng=state.rng,
@@ -317,7 +541,19 @@ def _init_ipc_step0(network, value_nodes, s_0, gamma_inf, T,
     v_0 = _read_value_prediction(network, value_nodes)
     grad_v_0 = _compute_grad_v(network, value_nodes, s_input)
 
-    return value_nodes, v_0, grad_v_0, obs_trace
+    # Initialize backward signals for pipelined nabla_V
+    f = ACTIVATION_MAP[network.activation_name]
+    f_prime = ACTIVATION_DERIV_MAP[network.activation_name]
+    L = network.num_layers
+    backward_signals = []
+    if L >= 2:
+        b = f_prime(value_nodes[0]) * network.weights[0].T.reshape(-1)
+        backward_signals.append(b)
+        for l in range(2, L):
+            b = f_prime(value_nodes[l - 1]) * (network.weights[l - 1].T @ b)
+            backward_signals.append(b)
+
+    return value_nodes, v_0, grad_v_0, obs_trace, backward_signals
 
 
 def prepare_ipc_experiment(cfg, s_0_per_seed):
@@ -357,7 +593,7 @@ def prepare_ipc_experiment(cfg, s_0_per_seed):
 
         # Process s_0 to initialize V_0 and nabla_V_0
         s_0 = jnp.array(s_0_per_seed, dtype=jnp.float32)
-        value_nodes, v_0, grad_v_0, obs_trace = _init_ipc_step0(
+        value_nodes, v_0, grad_v_0, obs_trace, backward_signals = _init_ipc_step0(
             network, value_nodes, s_0, gamma_inf, T,
             use_obs_trace, obs_trace_decay,
         )
@@ -371,6 +607,7 @@ def prepare_ipc_experiment(cfg, s_0_per_seed):
             traces=traces,
             v_old=v_0,
             grad_v_old=grad_v_0,
+            backward_signals=backward_signals,
             obs_trace=obs_trace,
             step=jnp.array(0),
             rng=rng_from_string(rng, 'train'),
@@ -454,14 +691,32 @@ def run_ipc_experiment(cfg, train_state, observations, rewards, true_returns):
     td_lambda = cfg.ipc.td_lambda
     use_obs_trace = bool(cfg.data.get('observation_trace', False))
     obs_trace_decay = float(cfg.data.get('obs_trace_decay', 0.95))
+    algorithm = cfg.get('algorithm', 'ipc')
 
-    def _step(state, observation):
-        return td_ipc_lambda_step(
-            state, observation,
-            T=T, gamma_inf=gamma_inf, alpha=alpha,
-            gamma_td=gamma_td, td_lambda=td_lambda,
-            use_obs_trace=use_obs_trace, obs_trace_decay=obs_trace_decay,
-        )
+    if algorithm == 'ipc_pipelined':
+        def _step(state, observation):
+            return td_ipc_pipelined_step(
+                state, observation,
+                gamma_inf=gamma_inf, alpha=alpha,
+                gamma_td=gamma_td, td_lambda=td_lambda,
+                use_obs_trace=use_obs_trace, obs_trace_decay=obs_trace_decay,
+            )
+    elif algorithm == 'ipc_simultaneous':
+        def _step(state, observation):
+            return td_ipc_simultaneous_step(
+                state, observation,
+                T=T, gamma_inf=gamma_inf, alpha=alpha,
+                gamma_td=gamma_td, td_lambda=td_lambda,
+                use_obs_trace=use_obs_trace, obs_trace_decay=obs_trace_decay,
+            )
+    else:
+        def _step(state, observation):
+            return td_ipc_lambda_step(
+                state, observation,
+                T=T, gamma_inf=gamma_inf, alpha=alpha,
+                gamma_td=gamma_td, td_lambda=td_lambda,
+                use_obs_trace=use_obs_trace, obs_trace_decay=obs_trace_decay,
+            )
 
     def scan_steps(state, data):
         return jax.lax.scan(_step, state, data, unroll=SCAN_UNROLL)
@@ -741,6 +996,17 @@ def plot_value_predictions(audio, metadata, rewards, true_returns, predictions,
                 color='black', linewidth=0.8, alpha=0.8)
     ax_val.plot(times, predictions, label='Predicted $\\hat{V}(s_t)$',
                 color='tab:blue', linewidth=0.8, alpha=0.8)
+
+    # Reward markers (same as top plot)
+    for event in metadata.get('events', []):
+        r = event['reward']
+        if r == 0.0:
+            continue
+        rt = event['reward_time']
+        if time_start <= rt <= time_end:
+            color = reward_colors.get(r, 'gray')
+            ax_val.axvline(rt, color=color, alpha=0.5, linewidth=0.8, linestyle='--')
+
     ax_val.set_xlabel('Time (s)')
     ax_val.set_ylabel('Value')
     ax_val.set_title('True vs Predicted Return')
@@ -842,11 +1108,13 @@ def main(cfg: DictConfig) -> None:
         train_state, all_td_errors, all_msve, vis_data = run_bp_experiment(
             cfg, train_state, observations, rewards, true_returns,
         )
-    else:
+    elif algorithm in ('ipc', 'ipc_simultaneous', 'ipc_pipelined'):
         train_state, n_params = prepare_ipc_experiment(cfg, s_0)
         train_state, all_td_errors, all_msve, vis_data = run_ipc_experiment(
             cfg, train_state, observations, rewards, true_returns,
         )
+    else:
+        raise ValueError(f'Unknown algorithm: {algorithm}')
 
     # Summary metrics
     n_tail = max(1, len(all_td_errors) // 10)
