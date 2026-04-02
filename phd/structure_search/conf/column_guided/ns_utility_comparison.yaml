@@ -1,0 +1,12 @@
+defaults:
+  - stationary
+  - _self_
+
+variant: utility_comparison
+project: column-ns-utility-analysis
+
+dataset:
+  permute_period: 2000
+
+structure_tracker:
+  enabled: false

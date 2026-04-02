@@ -1,236 +1,215 @@
 # Column-Guided Structure Search
 
-## Motivation
+## Overview
 
-Dynamic network experiments with greedy structure search (prune + generate) have
-failed to match the block-sparse MLP baseline at equal parameter budget. There are
-two competing explanations:
+This directory contains experiments investigating whether a dynamic sparse
+network can learn to discover task-aligned structure (independent per-task
+subnetworks) through greedy pruning and generation on a parallel multi-MNIST
+task with 5 independent classification subtasks.
 
-1. **Search quality**: The utility function and generation strategy are too noisy
-   to reliably discover the optimal block-sparse connectivity.
-2. **Loss of plasticity**: Even if the right structure were found, continual pruning
-   and regeneration may degrade the network's ability to learn.
+The experiments progress through a series of questions, each building on the
+findings of the previous one.
 
-These two failure modes are entangled in any realistic structure search run. This
-experiment isolates (2) by using a guided structure search that is **guaranteed to
-converge to independent subnetworks**, removing search quality as a confound.
+---
 
-If the guided network matches block-sparse performance → plasticity is fine and the
-search algorithm is the bottleneck.
+## Phase 1: Can guided structure search match block-sparse performance?
 
-If the guided network still underperforms → loss of plasticity is itself the problem.
+**Motivation.** Greedy structure search (prune low-utility units, generate random
+replacements) has failed to match a hand-designed block-sparse baseline.  Two
+possible explanations: (1) the search algorithm can't find good structure, or
+(2) continual pruning/regeneration causes loss of plasticity.
 
-## Run
+**Approach.** Use a "column-guided" search that is *guaranteed* to converge to
+independent subnetworks (one per task), removing search quality as a confound.
+If guided search matches block-sparse → plasticity is fine and the search
+algorithm is the bottleneck.
 
-From `phd/structure_search/`:
+**Config:** `stationary` (the baseline)
 
 ```bash
-python experiments/column_guided_search.py --config-dir conf/column_guided --config-name stationary
+python experiments/column_guided_search.py --config-name stationary
 ```
 
-## Network Initialization
+**Result.** Guided search reaches ~95.6% test accuracy, matching block-sparse.
+Plasticity is not the problem — the search algorithm is.
 
-`init_random_dynamic_network` creates the initial network with `hidden_dim = 520`
-active units per layer (out of a buffer of `max_units = 1040`).
+### Incremental relaxation
 
-**Column layout.** Units are placed sequentially into slots 0–519 per layer. With
-`col_size = max_units // n_tasks = 208`:
+To isolate which component of the guided search matters, three configs
+progressively remove the column guidance:
 
-- Col 0: slots 0–207 (208 active)
-- Col 1: slots 208–415 (208 active)
-- Col 2: slots 416–519 (104 active), 520–623 inactive
-- Col 3 & 4: entirely inactive
-
-**Incoming connections.** For each layer `l`, each of the 520 active units draws
-`max_connections_per_unit = 64` sources randomly from the pool of all inputs + all
-active units in layers 0..l-1 (no column restriction). Weights are LeCun uniform
-scaled by `1/√n_conns`.
-
-**Output connections** (`connect_all_to_output = False`): only the last hidden layer
-(layer 1) is wired to all `output_dim = 50` outputs. Weights are LeCun uniform.
-
-**`_sparsify_outputs`** (called immediately after). Replaces the dense all-to-50
-output wiring with `max_fan_out // 2 = 32` randomly selected outputs per last-layer
-unit. Selection is uniform random with no column restriction — so each unit starts
-with ~22 cross-column output connections.
-
-**Utility EMA init.** All units start with `unit_stats.utility = 0`, `age = 0`.
-
-## New Unit Creation
-
-Triggered every `prune_frequency = 200` steps when active connections are below
-`connection_budget = 50,000`. Each prune cycle runs `column_generate` followed by
-`column_assign_outgoing`.
-
-### Slot selection
-
-All `max_layers × max_units = 2080` slots are shuffled via uniform noise + argsort;
-inactive slots float to the front. The first `max_new_units_per_step = 256`
-candidates are taken. Each candidate has a `(layer, unit_position)` and an implied
-column `col = unit_position // col_size`.
-
-### Incoming connections (`column_generate`)
-
-For each candidate at `(layer, col)`, the available source pool is:
-
-- Input pixels in `[col × input_col_size, (col+1) × input_col_size)` — exactly that
-  task's MNIST image (784 pixels)
-- Active hidden units in layers `< layer`, same column
-
-Up to `max_conns // 2 = 32` sources are drawn uniformly from this pool. Weights are
-uniform in `[-1/√n_conns, 1/√n_conns]`. Candidates with no available same-column
-sources are skipped. A cumulative budget check culls the list: cost per unit is
-`n_incoming + max_out` connections.
-
-Structural fields written: `input_indices`, `weights`, `unit_mask = 1`,
-`activation_indices = 0`. EMA utility is set to `init_utility` (median of active
-units); age is set to 0.
-
-### Outgoing connections (`column_assign_outgoing`)
-
-Called immediately after structural fields are set, with the already-updated
-`unit_mask`. For each generated unit, a downstream pool is built:
-
-- **Output targets:** the `out_col_size = 10` output neurons for that task/column
-- **Hidden targets:** active units in later layers, same column, with a free
-  `input_indices` slot
-
-The pool is shuffled and up to `max_out = 32` targets are selected. A target is
-only connected if it is actually in the available pool — this prevents filling spare
-slots with cross-column targets when fewer than 32 within-column targets exist (e.g.
-layer-1 units, which have 0 downstream hidden units, get at most 10 output
-connections). For an output target, `output_mask[k, source_bp] = 1` and
-`output_weights[k, source_bp] = 0`. For a hidden target, `source_bp` is scattered
-into the first empty slot of that unit's `input_indices` with weight = 0.
-
-**Net result:** a new unit has up to 32 within-column incoming connections with
-random weights, and up to 32 within-column outgoing connections (output or
-pushed-hidden) initialized to zero and grown by the optimizer.
-
-## Column Assignment and Utility
-
-The column of each unit/source is determined entirely by position:
-
-| Source type | Column formula |
-|-------------|---------------|
-| Input pixel at index `p` | `p // (input_dim // n_tasks)` |
-| Hidden unit at layer-buffer slot `u` | `u // (max_units // n_tasks)` |
-| Output neuron at index `k` | `k // (output_dim // n_tasks)` |
-
-`column_utility` assigns utility as follows:
-
-- Count all incoming connections (`input_indices >= 0`) whose source column differs
-  from the unit's column, plus all output connections (`output_mask = 1`) to
-  out-of-column output neurons. Call this `cross_count`.
-- If `cross_count > 0`: `utility = -cross_count` (always prune before any
-  within-column unit).
-- If `cross_count == 0`: `utility = contribution_utility` = `mean|activation| ×
-  Σ|outgoing weights|`.
-
-Over successive prune/generate cycles the network converges to fully independent
-subnetworks — one per task.
-
-## Incremental Relaxation Experiments
-
-Three additional configs relax the column guidance incrementally to isolate
-which component (utility function vs generation restriction) drives performance:
-
-| Config | Utility | Generation | Result |
-|--------|---------|-----------|--------|
-| `stationary` (baseline) | `column_utility` | `column_generate` | ~95.6% |
+| Config | Utility fn | Generation fn | Test Acc |
+|--------|-----------|--------------|----------|
+| `stationary` | `column_utility` | `column_generate` | ~95.6% |
 | `relaxed_outputs` | `column_utility` | `column_generate_relaxed` | ~95.6% |
 | `normal_utility` | `normalized_contribution_utility` | `column_generate_relaxed` | ~89.4% |
 | `no_column` | `normalized_contribution_utility` | `free_generate` | ~89.4% |
 
-**Conclusion**: The column-based utility function (not the generation restriction)
-is the dominant factor.  Without it, performance drops regardless of how units
-are generated.
+**Conclusion.** The column-based utility function (not the generation strategy)
+is the dominant factor.  Without it, performance drops to ~89% regardless of
+how units are generated.
 
-## Experiment: Utility Comparison (`utility_comparison`)
+---
 
-**Question**: Is the average/sum utility of units in a column-constrained network
-higher than in a random network?
+## Phase 2: Can a general utility function discover column structure?
 
-Two runs with the same architecture, both with **no pruning or generation** — just
-training and utility tracking via `normalized_contribution_utility`:
+The column-based utility function explicitly penalizes cross-column connections.
+The question is whether a *general-purpose* utility function (normalized
+contribution utility) would naturally favor within-column units, which would
+mean greedy pruning could discover the right structure without being told what
+it is.
 
-- **Run A** (`init_mode=random`): Normal random init (cross-column connections).
-- **Run B** (`init_mode=column`): All connections within-column; units evenly
-  distributed across columns (104 per column per layer).
+### Experiment: Utility Comparison (`utility_comparison`)
 
-At end of training, plotly histograms of per-unit utility distributions are logged
-as mlflow artifacts (one per seed per layer), plus scalar summary metrics.
+**Question.** Is the average utility of units in a column-constrained network
+higher than in a network with random cross-column connections?
+
+Two runs, both with no pruning or generation — just training and utility
+tracking:
+
+- `init_mode=random`: Normal random init (cross-column connections)
+- `init_mode=column`: All connections within-column; 104 units per column per
+  layer (evenly distributed)
 
 ```bash
-# Run A
 python experiments/column_guided_search.py --config-name utility_comparison init_mode=random
-# Run B
 python experiments/column_guided_search.py --config-name utility_comparison init_mode=column
 ```
 
-## Experiment: Mixed Generation (`mixed_generation`)
+**Result (30k steps).** Column-init reaches 91.8% vs 87.0% for random-init,
+confirming that within-column structure helps.  However, this does not tell us
+whether the utility function *favors* within-column units — just that the
+network performs better with that structure.
 
-**Questions**:
-1. If units are generated with and without column constraints, do the
-   within-column units develop higher utility?
-2. How frequently do within-column units survive pruning vs free units?
+### Experiment: Mixed Generation (`mixed_generation`)
 
-Uses `normalized_contribution_utility` (no column bias in utility).  Half of
-generated units use `column_generate` (column-constrained incoming + outgoing)
-and are tagged `column_tag=1`.  The other half use `free_generate_protected`
-(unrestricted incoming, outgoing restricted from targeting tagged units in other
-columns).  This prevents free units from contaminating tagged units with
-cross-column connections.
+**Question.** If we generate both within-column and cross-column units side by
+side, will normalized contribution utility preferentially keep within-column
+units?
 
-Per-unit snapshots (utility, mask, age, tag) are captured at every training step
-inside JIT and subsampled outside for storage.  The full snapshot data is saved
-as `unit_snapshots.npz` mlflow artifact.
+Half of generated units use `column_generate` (tagged `column_tag=1`), the
+other half use `free_generate_protected` (tagged `column_tag=2`).  Initial
+units from the random init are tagged `column_tag=0`.  Free units are prevented
+from pushing cross-column outgoing connections to tagged units, so column
+units stay purely within-column.
 
 ```bash
 python experiments/column_guided_search.py --config-name mixed_generation
 ```
 
-### Analysis
+Per-unit snapshots are captured every training step and saved as
+`unit_snapshots.npz`.  Analysis:
 
 ```bash
-python experiments/plot_mixed_generation.py --run-id <RUN_ID> --fraction 0.1
+python experiments/plot_mixed_generation.py --run-id <RUN_ID>
 ```
 
-Produces per-layer and global interactive plotly plots of feature utility
-trajectories (blue = column-constrained, red = free), with mean/median/threshold
-overlays.  Also prints summary statistics (survival rates, mean lifetime,
-utility comparisons) to answer Q2 and Q3.
+**Result (30k steps, stationary).** Neither column nor free generated units are
+adopted.  Both have ~4% survival rate vs 54% for initial units.  The problem is
+**blocking**: initial units establish high utility early and prevent any new
+unit — regardless of connectivity — from competing.
 
-### Key finding: blocking
+---
 
-In the stationary setting, initial units establish high utility early and block
-newly generated units from being adopted — both column-constrained and free
-generated units have ~4% survival rate vs 54% for initial units.  Normalized
-contribution utility does not inherently favor within-column units; the blocking
-effect dominates.
+## Phase 3: Non-stationarity as a solution to blocking
 
-## Experiment: Non-stationary Mixed Generation (`mixed_generation_ns_sweep`)
+**Key insight.** In the stationary setting, initial units monopolize utility and
+block new units from being adopted.  But when the task changes (label
+permutations), error spikes, existing units' utility drops, and newly generated
+features get a chance to prove themselves.  If within-column features are
+genuinely better structured, they should be preferentially adopted during these
+transition windows.
 
-**Hypothesis**: Non-stationarity (periodic label permutations) partially solves
-the blocking problem.  When the task changes, error spikes and existing units'
-utility drops, creating an opening for new units to establish themselves.  If
-column-constrained units are genuinely better structured, they should be
-preferentially adopted during these transition periods.
+### Experiment: Non-stationary sweep (`mixed_generation_ns_sweep`)
 
-**Result**: This works — under non-stationarity, new features are adopted at
-each change point, and column-constrained features are adopted overwhelmingly
-more than free features.
-
-The sweep varies `permute_period` to control how frequently tasks change.
-The `permute_stop` parameter (default 0 = never stop) freezes permutations
-after a specified training step, allowing the network to converge to a final
-stationary performance level with whatever structure it has learned.
+Sweep over `permute_period` (how often a random task's labels are permuted) to
+test whether non-stationarity unblocks feature adoption.
 
 ```bash
-# Single run with non-stationarity that stops at step 100k
-python experiments/column_guided_search.py --config-name mixed_generation \
-    dataset.permute_period=5000 dataset.permute_stop=100000
-
-# Full sweep over permute periods
 mlflow-sweeper conf/column_guided/mixed_generation_ns_sweep.yaml
 ```
+
+**Result.** Higher non-stationarity → more new features adopted.  The surviving
+new features are overwhelmingly column-constrained.  This confirms that:
+1. Non-stationarity solves the blocking problem
+2. When blocking is removed, within-column features *are* preferentially kept
+3. The utility function can discover structure — it just needs churn to overcome
+   the incumbency advantage of established features
+
+### What's next: does this actually help performance?
+
+The NS sweep showed that non-stationarity enables structural learning, but the
+question remains: does the learned structure actually improve performance
+compared to random connectivity?
+
+**Hypothesis.** On the non-stationary problem, a network that adopts
+within-column structure via mixed generation should outperform a network with
+fixed random connectivity (which serves as a lower baseline).  A network
+initialized with within-column connectivity serves as the upper baseline.
+
+The `permute_stop` parameter allows freezing the task after a period of
+non-stationarity, so the network converges to a final stationary accuracy with
+whatever structure it has learned.
+
+### Experiment: NS Utility Comparison (`ns_utility_comparison`)
+
+Upper and lower baselines for non-stationary performance — same as the
+stationary utility comparison but with `permute_period=2000`:
+
+```bash
+# Lower baseline: random init, no structure search
+python experiments/column_guided_search.py --config-name ns_utility_comparison init_mode=random
+
+# Upper baseline: column init, no structure search
+python experiments/column_guided_search.py --config-name ns_utility_comparison init_mode=column
+```
+
+### Experiment: NS Mixed Generation (`ns_mixed_generation`)
+
+Mixed generation with non-stationarity — does the network learn structure that
+closes the gap between the random and column baselines?
+
+```bash
+python experiments/column_guided_search.py --config-name ns_mixed_generation
+```
+
+---
+
+## Reference: Network Architecture
+
+`init_random_dynamic_network` creates the initial network with `hidden_dim=520`
+active units per layer (out of `max_units=1040`), `max_connections_per_unit=64`,
+`max_fan_out=64`, 2 hidden layers.
+
+**Column layout.** `col_size = max_units // n_tasks = 208`.  With 520 initial
+units in slots 0-519: Col 0 gets 208, Col 1 gets 208, Col 2 gets 104,
+Cols 3-4 are empty.  When `init_mode=column`, units are distributed evenly
+(104 per column).
+
+**Column assignment** is purely positional:
+- Input pixel `p` → column `p // (input_dim // n_tasks)`
+- Hidden unit slot `u` → column `u // (max_units // n_tasks)`
+- Output neuron `k` → column `k // (output_dim // n_tasks)`
+
+**`column_utility`** (used in guided search): if a unit has any cross-column
+connections, `utility = -cross_count` (pruned first); otherwise
+`utility = contribution_utility`.
+
+**`normalized_contribution_utility`** (used in mixed generation): `mean|act| ×
+sum|outgoing_weights| / max(n_outgoing, 1)`.  No column bias.
+
+**Structure modification** happens every `prune_frequency=200` steps.  The prune
+accumulator grows by `prune_rate × active_connections` each step and carries
+over unused budget across cycles.  Generation fills up to
+`connection_budget=50,000` total connections.
+
+## Reference: Config Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `variant` | `column_guided` | Which utility/generation functions to use |
+| `init_mode` | `random` | `random` or `column` (within-column init) |
+| `dataset.permute_period` | `0` | Steps between label permutations (0=stationary) |
+| `dataset.permute_stop` | `0` | Stop permuting after this step (0=never) |
+| `structure_tracker.enabled` | `true` | Set `false` to disable pruning/generation |
+| `snapshot_subsample` | `10` | Keep every Nth step in snapshot data |
