@@ -89,6 +89,7 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
             config, resolve=True, throw_on_missing=True)
         flat_config = flatten_dict(raw_dict_config)
         mlflow.log_params(flat_config)
+        mlflow.set_tag('mlflow.note.content', f'```\n{" ".join(sys.argv)}\n```')
     
     if config and config.get('wandb', False):
         import wandb

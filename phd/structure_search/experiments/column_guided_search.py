@@ -1533,6 +1533,7 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
             images=base_images, labels=base_labels,
             n_tasks=n_tasks, batch_size=cfg.train.batch_size,
             seed=seed, permute_period=cfg.dataset.get('permute_period', 0),
+            permute_stop=cfg.dataset.get('permute_stop', 0),
             test_images=test_images_raw, test_labels=test_labels_raw,
         ))
 
@@ -1570,17 +1571,19 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
         elif variant == 'utility_comparison':
             utility_fn = normalized_contribution_utility
             generate_fn = partial(column_generate, n_tasks=n_tasks)  # unused
-            if cfg.get('init_mode', 'random') == 'column':
-                model = _column_init(
-                    model, n_tasks=n_tasks,
-                    key=rng_from_string(rng, 'column_init'),
-                )
         elif variant == 'mixed_generation':
             utility_fn = normalized_contribution_utility
             generate_fn = partial(mixed_generate, n_tasks=n_tasks)
         else:  # 'column_guided' (original)
             utility_fn = partial(column_utility, n_tasks=n_tasks)
             generate_fn = partial(column_generate, n_tasks=n_tasks)
+
+        # Column-constrained initialization (works with any variant)
+        if cfg.get('init_mode', 'random') == 'column':
+            model = _column_init(
+                model, n_tasks=n_tasks,
+                key=rng_from_string(rng, 'column_init'),
+            )
 
         tracker_cls = (MixedConnectivityManager
                        if variant == 'mixed_generation'

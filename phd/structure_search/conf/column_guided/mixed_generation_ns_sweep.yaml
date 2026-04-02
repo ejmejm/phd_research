@@ -1,0 +1,19 @@
+experiment: column-guided-utility-deep-dive
+sweep_name: column_guided_mixed_generation_ns_sweep
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/column_guided_search.py --config-name mixed_generation
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+  dataset.permute_period: [1, 100, 1000, 5000, 10000, 50000]

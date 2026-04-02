@@ -475,6 +475,8 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    plots = []  # (filename, fig) pairs
+
     # Per-layer plots
     for l in range(n_layers):
         fig = plot_layer(
@@ -483,9 +485,8 @@ def main():
             max_steps=args.max_steps, fractions=args.fractions,
             title=f'Feature Utility Trajectories — Layer {l}',
         )
-        path = os.path.join(args.output_dir, f'layer_{l}_trajectories.html')
-        fig.write_html(path)
-        print(f'Saved {path}')
+        filename = f'layer_{l}_trajectories.html'
+        plots.append((filename, fig))
 
     # Global plot
     fig = plot_layer(
@@ -494,9 +495,20 @@ def main():
         max_steps=args.max_steps, fractions=args.fractions,
         title='Feature Utility Trajectories — All Layers',
     )
-    path = os.path.join(args.output_dir, 'global_trajectories.html')
-    fig.write_html(path)
-    print(f'Saved {path}')
+    plots.append(('global_trajectories.html', fig))
+
+    # Save locally
+    for filename, fig in plots:
+        path = os.path.join(args.output_dir, filename)
+        fig.write_html(path)
+        print(f'Saved {path}')
+
+    # Log as mlflow artifacts on the source run
+    client = mlflow.tracking.MlflowClient()
+    for filename, fig in plots:
+        path = os.path.join(args.output_dir, filename)
+        client.log_artifact(args.run_id, path, artifact_path='analysis_plots')
+    print(f'Logged {len(plots)} plots as mlflow artifacts on run {args.run_id}')
 
     # Summary stats
     print_summary_stats(lifetimes, data, seed)

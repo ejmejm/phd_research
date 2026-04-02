@@ -91,6 +91,7 @@ class ParallelMNISTStream:
         batch_size: int,
         seed: int,
         permute_period: int = 0,
+        permute_stop: int = 0,
         test_images: Optional[np.ndarray] = None,
         test_labels: Optional[np.ndarray] = None,
     ):
@@ -101,6 +102,7 @@ class ParallelMNISTStream:
         self.batch_size = batch_size
         self.n_samples = images.shape[0]
         self.permute_period = permute_period
+        self.permute_stop = permute_stop  # stop permuting after this step (0 = never stop)
         self.rng = np.random.default_rng(seed)
 
         self.test_images = test_images  # (N_test, 784) or None
@@ -121,13 +123,21 @@ class ParallelMNISTStream:
         start = self.step_counter
         end = start + n_steps
 
+        # No permutations after permute_stop
+        if self.permute_stop > 0 and start >= self.permute_stop:
+            self.step_counter = end
+            return
+
         # Find the first permutation event at or after start
         if start == 0:
             first_event = self.permute_period
         else:
             first_event = ((start - 1) // self.permute_period + 1) * self.permute_period
 
-        for event_step in range(first_event, end, self.permute_period):
+        # Cap event range at permute_stop
+        event_end = min(end, self.permute_stop) if self.permute_stop > 0 else end
+
+        for event_step in range(first_event, event_end, self.permute_period):
             task_idx = self.rng.integers(0, self.n_tasks)
             self.label_permutations[task_idx] = self.rng.permutation(10)
 

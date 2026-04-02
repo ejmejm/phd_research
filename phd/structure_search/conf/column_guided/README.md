@@ -200,3 +200,37 @@ Produces per-layer and global interactive plotly plots of feature utility
 trajectories (blue = column-constrained, red = free), with mean/median/threshold
 overlays.  Also prints summary statistics (survival rates, mean lifetime,
 utility comparisons) to answer Q2 and Q3.
+
+### Key finding: blocking
+
+In the stationary setting, initial units establish high utility early and block
+newly generated units from being adopted — both column-constrained and free
+generated units have ~4% survival rate vs 54% for initial units.  Normalized
+contribution utility does not inherently favor within-column units; the blocking
+effect dominates.
+
+## Experiment: Non-stationary Mixed Generation (`mixed_generation_ns_sweep`)
+
+**Hypothesis**: Non-stationarity (periodic label permutations) partially solves
+the blocking problem.  When the task changes, error spikes and existing units'
+utility drops, creating an opening for new units to establish themselves.  If
+column-constrained units are genuinely better structured, they should be
+preferentially adopted during these transition periods.
+
+**Result**: This works — under non-stationarity, new features are adopted at
+each change point, and column-constrained features are adopted overwhelmingly
+more than free features.
+
+The sweep varies `permute_period` to control how frequently tasks change.
+The `permute_stop` parameter (default 0 = never stop) freezes permutations
+after a specified training step, allowing the network to converge to a final
+stationary performance level with whatever structure it has learned.
+
+```bash
+# Single run with non-stationarity that stops at step 100k
+python experiments/column_guided_search.py --config-name mixed_generation \
+    dataset.permute_period=5000 dataset.permute_stop=100000
+
+# Full sweep over permute periods
+mlflow-sweeper conf/column_guided/mixed_generation_ns_sweep.yaml
+```
