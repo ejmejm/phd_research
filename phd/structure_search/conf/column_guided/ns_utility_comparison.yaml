@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 variant: utility_comparison
-project: column-ns-utility-analysis
+project: column-guided-utility-deep-dive-ns
 
 dataset:
   permute_period: 2000

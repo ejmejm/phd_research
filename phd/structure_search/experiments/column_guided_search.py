@@ -2335,16 +2335,19 @@ def main(cfg: DictConfig) -> None:
     )
 
     average_loss = float(np.mean(all_losses))
+    average_accuracy = float(np.mean(all_accuracies))
     n_tail = max(1, len(all_losses) // 10)
     asymptotic_loss = float(np.mean(all_losses[-n_tail:]))
     asymptotic_accuracy = float(np.mean(all_accuracies[-n_tail:]))
 
     print(f'Average loss:       {average_loss:.4f}')
+    print(f'Average accuracy:   {average_accuracy:.4f}')
     print(f'Asymptotic loss:    {asymptotic_loss:.4f}')
     print(f'Asymptotic accuracy:{asymptotic_accuracy:.4f}')
 
     summary = {
         'average_loss': average_loss,
+        'average_accuracy': average_accuracy,
         'asymptotic_loss': asymptotic_loss,
         'asymptotic_accuracy': asymptotic_accuracy,
         'num_params': n_params,
@@ -2362,6 +2365,7 @@ def main(cfg: DictConfig) -> None:
         per_seed_accs = np.stack(all_per_seed_accuracies)
         log_child_metrics({
             'average_loss': per_seed_losses.mean(axis=0).tolist(),
+            'average_accuracy': per_seed_accs.mean(axis=0).tolist(),
             'asymptotic_loss': per_seed_losses[-n_tail:].mean(axis=0).tolist(),
             'asymptotic_accuracy': per_seed_accs[-n_tail:].mean(axis=0).tolist(),
             'num_params': [n_params] * len(cfg.seed),

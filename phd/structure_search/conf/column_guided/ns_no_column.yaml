@@ -2,9 +2,8 @@ defaults:
   - stationary
   - _self_
 
-variant: mixed_generation
+variant: no_column
 project: column-guided-utility-deep-dive-ns
-snapshot_subsample: 10
 
 dataset:
   permute_period: 2000
