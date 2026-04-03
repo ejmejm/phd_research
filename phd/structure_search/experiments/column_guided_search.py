@@ -51,9 +51,10 @@ from phd.research_utils.logging import (
     finish_child_runs, finish_experiment,
 )
 from phd.structure_search.connectivity_manager import (
-    ConnectivityManager, UnitStats, contribution_utility, median_utility_init,
+    ConnectivityManager, ConnectionConnectivityManager, ConnectionStats,
+    UnitStats, contribution_utility, median_utility_init,
     _unit_buf_positions, _prune_mask_to_buf_mask, _reset_optimizer_state,
-    assign_sparse_outgoing,
+    _reset_optimizer_state_connections, assign_sparse_outgoing,
 )
 from phd.structure_search.data import load_dataset, ParallelMNISTStream
 from phd.jax_core.models import lecun_uniform
@@ -1353,6 +1354,147 @@ class MixedConnectivityManager(ConnectivityManager):
         return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
 
 
+class ConnectionMixedConnectivityManager(ConnectionConnectivityManager):
+    """ConnectionConnectivityManager with per-unit column tagging.
+
+    Prunes individual connections (connection-level), but tracks column_tag
+    for mixed_generate and passes it through the generate cycle, mirroring
+    MixedConnectivityManager's tag logic.
+    """
+    column_tag: Array  # (max_layers, max_units_per_layer), int32
+
+    def __init__(self, model, **kwargs):
+        super().__init__(model=model, **kwargs)
+        self.column_tag = jnp.zeros(
+            (model.max_layers, model.max_units_per_layer), dtype=jnp.int32)
+
+    def modify_structure(self, model, optimizer, *, rng):
+        rng, prune_rng, gen_rng = jax.random.split(rng, 3)
+        max_layers = model.max_layers
+        max_units = model.max_units_per_layer
+
+        # ===== Phase 1: Global connection pruning =====
+        hidden_prune_3d, output_prune_2d, n_pruned = (
+            self._make_connection_prune_masks(model, rng=prune_rng))
+
+        new_weights = jnp.where(hidden_prune_3d, 0.0, model.weights)
+        new_input_indices = jnp.where(
+            hidden_prune_3d, -1, model.input_indices).astype(jnp.int32)
+        new_output_weights = jnp.where(output_prune_2d, 0.0, model.output_weights)
+        new_output_mask = jnp.where(
+            output_prune_2d, 0, model.output_mask).astype(jnp.int32)
+
+        new_hidden_utility = jnp.where(
+            hidden_prune_3d, 0.0, self.connection_stats.hidden_utility)
+        new_output_utility = jnp.where(
+            output_prune_2d, 0.0, self.connection_stats.output_utility)
+
+        # ===== Phase 2: Dead unit detection (0 outgoing) =====
+        buf_positions = _unit_buf_positions(model)
+
+        active_mask = (new_input_indices >= 0)
+        flat_idx = jnp.where(active_mask, new_input_indices, 0).reshape(-1)
+        flat_active = active_mask.reshape(-1).astype(jnp.int32)
+        h2h_counts = jnp.zeros(model.buffer_size, dtype=jnp.int32)
+        h2h_counts = h2h_counts.at[flat_idx].add(flat_active)
+        h2o_counts = new_output_mask.sum(axis=0)
+
+        total_outgoing = h2h_counts + h2o_counts
+        unit_outgoing = total_outgoing[buf_positions]
+        dead_mask = (model.unit_mask == 1) & (unit_outgoing == 0)
+
+        dead_3d = dead_mask[:, :, None]
+        new_unit_mask = jnp.where(dead_mask, 0, model.unit_mask).astype(jnp.int32)
+        new_weights = jnp.where(dead_3d, 0.0, new_weights)
+        new_input_indices = jnp.where(dead_3d, -1, new_input_indices).astype(jnp.int32)
+
+        dead_buf_mask = _prune_mask_to_buf_mask(
+            dead_mask, buf_positions, model.buffer_size)
+        new_output_mask = new_output_mask * (1 - dead_buf_mask[None, :].astype(jnp.int32))
+        new_output_weights = new_output_weights * (1 - dead_buf_mask[None, :].astype(jnp.float32))
+
+        new_hidden_utility = jnp.where(dead_3d, 0.0, new_hidden_utility)
+        new_output_utility = new_output_utility * (
+            1 - dead_buf_mask[None, :].astype(jnp.float32))
+
+        # Reset column_tag for dead units
+        new_column_tag = jnp.where(
+            dead_mask, 0, self.column_tag).astype(jnp.int32)
+
+        model = eqx.tree_at(
+            lambda m: (m.unit_mask, m.weights, m.input_indices,
+                       m.output_mask, m.output_weights),
+            model,
+            (new_unit_mask, new_weights, new_input_indices,
+             new_output_mask, new_output_weights),
+        )
+
+        # ===== Phase 3: Generate new units =====
+        active_conns_after = (
+            jnp.sum(model.input_indices >= 0) + jnp.sum(model.output_mask)
+        ).astype(jnp.float32)
+        gen_budget = jnp.maximum(0.0, self.connection_budget - active_conns_after)
+
+        unit_shape = (max_layers, max_units)
+        temp_unit_stats = UnitStats(
+            age=jnp.zeros(unit_shape, dtype=jnp.int32),
+            utility=jnp.zeros(unit_shape, dtype=jnp.float32),
+            accumulator=jnp.array(0.0),
+        )
+
+        model, _temp_stats, _, gen_mask_2d, gen_info = self.generate_fn(
+            model, temp_unit_stats, gen_budget,
+            self.max_new_units_per_step,
+            jnp.array(0.0),
+            gen_rng,
+            output_connect_strategy=self.output_connect_strategy,
+            column_tag=new_column_tag,
+        )
+
+        # Extract updated column_tag from gen_info (last element)
+        updated_tag = gen_info[-1]
+
+        # ===== Phase 4: Finalize =====
+        if self.output_connect_strategy == 'random_sparse':
+            rng, sparse_rng = jax.random.split(rng)
+            model = assign_sparse_outgoing(
+                model, gen_info[:-1], self.max_new_units_per_step, sparse_rng,
+                output_weight_init=self.output_weight_init,
+            )
+
+        model = build_outgoing_indices(model)
+
+        optimizer = _reset_optimizer_state_connections(
+            optimizer, model,
+            hidden_prune_3d, output_prune_2d,
+            dead_mask, gen_mask_2d,
+        )
+
+        new_acc = jnp.maximum(
+            0.0, self.connection_stats.accumulator - n_pruned.astype(jnp.float32))
+
+        new_stats = ConnectionStats(
+            hidden_utility=new_hidden_utility,
+            output_utility=new_output_utility,
+            accumulator=new_acc,
+        )
+
+        affected = dead_mask | gen_mask_2d
+        new_unit_utility = jnp.where(affected, 0.0, self.unit_stats.utility)
+        new_unit_age = jnp.where(affected, 0, self.unit_stats.age).astype(jnp.int32)
+        new_unit_stats = UnitStats(
+            age=new_unit_age, utility=new_unit_utility, accumulator=new_acc)
+
+        pruned_per_layer = dead_mask.sum(axis=1).astype(jnp.int32)
+        generated_per_layer = gen_mask_2d.sum(axis=1).astype(jnp.int32)
+
+        new_manager = tree_replace(
+            self, connection_stats=new_stats, unit_stats=new_unit_stats,
+            rng=rng, column_tag=updated_tag,
+        )
+        return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
+
+
 # ---------------------------------------------------------------------------
 # Column-constrained initialization
 # ---------------------------------------------------------------------------
@@ -1585,23 +1727,40 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
                 key=rng_from_string(rng, 'column_init'),
             )
 
-        tracker_cls = (MixedConnectivityManager
-                       if variant == 'mixed_generation'
-                       else ConnectivityManager)
-        tracker = tracker_cls(
-            model=model,
-            prune_rate=cfg.structure_tracker.prune_rate,
-            connection_budget=cfg.structure_tracker.connection_budget,
-            decay_rate=cfg.structure_tracker.decay_rate,
-            maturity_threshold=cfg.structure_tracker.maturity_threshold,
-            max_new_units_per_step=cfg.structure_tracker.get('max_new_units_per_step', 512),
-            output_connect_strategy='all',  # generate_fn handles outputs internally
-            output_weight_init='zero',
-            utility_fn=utility_fn,
-            generate_fn=generate_fn,
-            utility_init_fn=median_utility_init,
-            rng=rng_from_string(rng, 'tracker'),
-        )
+        tracker_mode = cfg.structure_tracker.get('mode', 'unit')
+        if tracker_mode == 'connection':
+            conn_cls = (ConnectionMixedConnectivityManager
+                        if variant == 'mixed_generation'
+                        else ConnectionConnectivityManager)
+            tracker = conn_cls(
+                model=model,
+                prune_rate=cfg.structure_tracker.prune_rate,
+                connection_budget=cfg.structure_tracker.connection_budget,
+                decay_rate=cfg.structure_tracker.decay_rate,
+                max_new_units_per_step=cfg.structure_tracker.get('max_new_units_per_step', 512),
+                output_connect_strategy='all',
+                output_weight_init='zero',
+                generate_fn=generate_fn,
+                rng=rng_from_string(rng, 'tracker'),
+            )
+        else:
+            tracker_cls = (MixedConnectivityManager
+                           if variant == 'mixed_generation'
+                           else ConnectivityManager)
+            tracker = tracker_cls(
+                model=model,
+                prune_rate=cfg.structure_tracker.prune_rate,
+                connection_budget=cfg.structure_tracker.connection_budget,
+                decay_rate=cfg.structure_tracker.decay_rate,
+                maturity_threshold=cfg.structure_tracker.maturity_threshold,
+                max_new_units_per_step=cfg.structure_tracker.get('max_new_units_per_step', 512),
+                output_connect_strategy='all',
+                output_weight_init='zero',
+                utility_fn=utility_fn,
+                generate_fn=generate_fn,
+                utility_init_fn=median_utility_init,
+                rng=rng_from_string(rng, 'tracker'),
+            )
 
         train_states.append(TrainState(
             model=model, optimizer=optimizer, structure_tracker=tracker,

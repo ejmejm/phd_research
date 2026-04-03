@@ -1180,6 +1180,7 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
     prune_rate: float
     connection_budget: float
     connection_stats: ConnectionStats
+    unit_stats: UnitStats  # derived per-unit view for logging compatibility
     rng: PRNGKeyArray
 
     def __init__(
@@ -1211,6 +1212,12 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
         self.connection_stats = ConnectionStats(
             hidden_utility=jnp.zeros(hidden_shape, dtype=jnp.float32),
             output_utility=jnp.zeros(output_shape, dtype=jnp.float32),
+            accumulator=jnp.array(0.0),
+        )
+        unit_shape = (model.max_layers, model.max_units_per_layer)
+        self.unit_stats = UnitStats(
+            age=jnp.zeros(unit_shape, dtype=jnp.int32),
+            utility=jnp.zeros(unit_shape, dtype=jnp.float32),
             accumulator=jnp.array(0.0),
         )
 
@@ -1262,7 +1269,16 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
             output_utility=new_output,
             accumulator=new_acc,
         )
-        return tree_replace(self, connection_stats=new_stats)
+
+        # Derive per-unit utility (sum of incoming connection utilities)
+        new_unit_utility = new_hidden.sum(axis=-1) * model.unit_mask.astype(jnp.float32)
+        new_unit_age = (self.unit_stats.age + 1) * model.unit_mask
+        new_unit_stats = UnitStats(
+            age=new_unit_age,
+            utility=new_unit_utility,
+            accumulator=new_acc,
+        )
+        return tree_replace(self, connection_stats=new_stats, unit_stats=new_unit_stats)
 
     def modify_structure(
         self,
@@ -1406,11 +1422,23 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
             accumulator=new_acc,
         )
 
+        # Update derived unit_stats: reset dead/generated units
+        affected = dead_mask | gen_mask_2d
+        new_unit_utility = jnp.where(affected, 0.0, self.unit_stats.utility)
+        new_unit_age = jnp.where(affected, 0, self.unit_stats.age).astype(jnp.int32)
+        new_unit_stats = UnitStats(
+            age=new_unit_age,
+            utility=new_unit_utility,
+            accumulator=new_acc,
+        )
+
         # Per-layer counts (dead units = "pruned", generated units)
         pruned_per_layer = dead_mask.sum(axis=1).astype(jnp.int32)
         generated_per_layer = gen_mask_2d.sum(axis=1).astype(jnp.int32)
 
-        new_manager = tree_replace(self, connection_stats=new_stats, rng=rng)
+        new_manager = tree_replace(
+            self, connection_stats=new_stats, unit_stats=new_unit_stats, rng=rng,
+        )
         return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
 
     def _make_connection_prune_masks(
