@@ -131,4 +131,37 @@ def compute_structure_metrics(train_state) -> dict:
                     avg_utils.append(0.0)
             metrics[f'layer_{l}/avg_utility'] = float(np.mean(avg_utils))
 
+    elif hasattr(tracker, 'connection_stats'):
+        hidden_util = np.array(tracker.connection_stats.hidden_utility)
+        output_util = np.array(tracker.connection_stats.output_utility)
+        if hidden_util.ndim == 3:
+            hidden_util = hidden_util[None]
+            output_util = output_util[None]
+
+        all_median_conn_utils = []
+        for s in range(n_seeds):
+            h_active = (input_indices[s] >= 0)
+            o_active = (output_mask[s] == 1)
+            all_active_utils = np.concatenate([
+                hidden_util[s][h_active],
+                output_util[s][o_active],
+            ])
+            if len(all_active_utils) > 0:
+                all_median_conn_utils.append(float(np.median(all_active_utils)))
+            else:
+                all_median_conn_utils.append(0.0)
+        metrics['median_connection_utility'] = float(np.mean(all_median_conn_utils))
+
+        # Per-layer average connection utility (hidden connections only)
+        for l in range(n_layers):
+            avg_conn_utils = []
+            for s in range(n_seeds):
+                h_active_l = (input_indices[s, l] >= 0)
+                active_utils = hidden_util[s, l][h_active_l]
+                if len(active_utils) > 0:
+                    avg_conn_utils.append(float(active_utils.mean()))
+                else:
+                    avg_conn_utils.append(0.0)
+            metrics[f'layer_{l}/avg_connection_utility'] = float(np.mean(avg_conn_utils))
+
     return metrics

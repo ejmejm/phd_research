@@ -38,7 +38,9 @@ from phd.structure_search.block_sparse_mlp import (
 )
 from phd.structure_search.data import load_dataset, DataStream, ParallelMNISTStream
 from phd.structure_search.connectivity_manager import (
-    ConnectivityManager, full_input_generate,
+    ConnectivityManagerBase, ConnectivityManager,
+    ConnectionConnectivityManager,
+    full_input_generate,
     contribution_utility, upgd_utility, si_utility, loo_utility,
 )
 from phd.structure_search.dynamic_network import (
@@ -86,7 +88,7 @@ class DummyStructureTracker(eqx.Module):
 class TrainState(eqx.Module):
     model: Union[MLP, DynamicNetwork, BlockSparseMLP]
     optimizer: EqxOptimizer
-    structure_tracker: Union[DummyStructureTracker, ConnectivityManager]
+    structure_tracker: Union[DummyStructureTracker, ConnectivityManagerBase]
     step: jax.Array
     rng: PRNGKeyArray
 
@@ -239,30 +241,48 @@ def prepare_experiment(
         if model_type == 'dynamic' and cfg.structure_tracker.get('enabled', False):
             generate_strategy = cfg.structure_tracker.get('generate_strategy', 'random')
             generate_fn = full_input_generate if generate_strategy == 'full_input' else None
-            utility_fn_map = {
-                'contribution': contribution_utility,
-                'upgd': upgd_utility,
-                'si': si_utility,
-                'loo': loo_utility,
-            }
-            utility_fn = utility_fn_map.get(
-                cfg.structure_tracker.get('utility_fn', 'contribution'))
-            tracker = ConnectivityManager(
-                model=model,
-                prune_rate=cfg.structure_tracker.prune_rate,
-                connection_budget=cfg.structure_tracker.connection_budget,
-                decay_rate=cfg.structure_tracker.decay_rate,
-                maturity_threshold=cfg.structure_tracker.maturity_threshold,
-                max_new_units_per_step=cfg.structure_tracker.get(
-                    'max_new_units_per_step', 512),
-                output_connect_strategy=cfg.structure_tracker.get(
-                    'output_connect_strategy', 'all'),
-                output_weight_init=cfg.structure_tracker.get(
-                    'output_weight_init', 'zero'),
-                utility_fn=utility_fn,
-                generate_fn=generate_fn,
-                rng=rng_from_string(rng, 'tracker'),
-            )
+            tracker_mode = cfg.structure_tracker.get('mode', 'unit')
+
+            if tracker_mode == 'connection':
+                tracker = ConnectionConnectivityManager(
+                    model=model,
+                    prune_rate=cfg.structure_tracker.prune_rate,
+                    connection_budget=cfg.structure_tracker.connection_budget,
+                    decay_rate=cfg.structure_tracker.decay_rate,
+                    max_new_units_per_step=cfg.structure_tracker.get(
+                        'max_new_units_per_step', 512),
+                    output_connect_strategy=cfg.structure_tracker.get(
+                        'output_connect_strategy', 'all'),
+                    output_weight_init=cfg.structure_tracker.get(
+                        'output_weight_init', 'zero'),
+                    generate_fn=generate_fn,
+                    rng=rng_from_string(rng, 'tracker'),
+                )
+            else:
+                utility_fn_map = {
+                    'contribution': contribution_utility,
+                    'upgd': upgd_utility,
+                    'si': si_utility,
+                    'loo': loo_utility,
+                }
+                utility_fn = utility_fn_map.get(
+                    cfg.structure_tracker.get('utility_fn', 'contribution'))
+                tracker = ConnectivityManager(
+                    model=model,
+                    prune_rate=cfg.structure_tracker.prune_rate,
+                    connection_budget=cfg.structure_tracker.connection_budget,
+                    decay_rate=cfg.structure_tracker.decay_rate,
+                    maturity_threshold=cfg.structure_tracker.maturity_threshold,
+                    max_new_units_per_step=cfg.structure_tracker.get(
+                        'max_new_units_per_step', 512),
+                    output_connect_strategy=cfg.structure_tracker.get(
+                        'output_connect_strategy', 'all'),
+                    output_weight_init=cfg.structure_tracker.get(
+                        'output_weight_init', 'zero'),
+                    utility_fn=utility_fn,
+                    generate_fn=generate_fn,
+                    rng=rng_from_string(rng, 'tracker'),
+                )
         else:
             tracker = DummyStructureTracker(rng=rng_from_string(rng, 'tracker'))
 
@@ -391,7 +411,7 @@ def train_step(
     n_model_layers = new_model.max_layers if hasattr(new_model, 'max_layers') else 0
     pruned_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
     generated_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
-    if do_restructure and isinstance(new_tracker, ConnectivityManager):
+    if do_restructure and isinstance(new_tracker, ConnectivityManagerBase):
         rng, restructure_rng = jax.random.split(train_state.rng)
         new_tracker, new_model, new_optimizer, pruned_per_layer, generated_per_layer = (
             new_tracker.modify_structure(new_model, new_optimizer, rng=restructure_rng))

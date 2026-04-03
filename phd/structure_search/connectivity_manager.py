@@ -1,8 +1,14 @@
-"""Connectivity manager for DynamicNetwork structure search.
+"""Connectivity managers for DynamicNetwork structure search.
 
-Tracks per-unit utility and periodically prunes low-utility units,
-generating new randomly-connected units. Uses a connection budget
-invariant: active_connections + budget = constant.
+Two pruning modes:
+- **Unit-level** (`ConnectivityManager`): tracks per-unit utility
+  (|h| * sum(|w|)), prunes entire low-utility units, generates new ones.
+- **Connection-level** (`ConnectionConnectivityManager`): tracks per-connection
+  utility (|h| * |w|), prunes individual connections, removes units only when
+  they have 0 outgoing connections.
+
+Both share a common interface (`ConnectivityManagerBase`) and use a connection
+budget invariant: active_connections + budget = constant.
 
 Strategy functions (utility_fn, generate_fn, utility_init_fn) are
 stored as static fields and can be swapped at construction time.
@@ -24,6 +30,26 @@ from phd.structure_search.dynamic_network import (
 
 EPSILON = 1e-4  # tie-breaking perturbation; must exceed float32 ULP at typical utility magnitudes (~10-50)
 MAX_FLOAT = jnp.finfo(jnp.float32).max
+
+
+# ---------------------------------------------------------------------------
+# Base interface
+# ---------------------------------------------------------------------------
+
+class ConnectivityManagerBase(eqx.Module):
+    """Interface for connectivity managers.
+
+    Subclasses must implement ``update_stats`` (called every step) and
+    ``modify_structure`` (called at restructure steps).
+    """
+    rng: PRNGKeyArray
+
+    def update_stats(self, model, buffer, grads=None, updates=None,
+                     targets=None, predictions=None):
+        raise NotImplementedError
+
+    def modify_structure(self, model, optimizer, *, rng):
+        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +802,7 @@ class UnitStats(eqx.Module):
     accumulator: Float[Array, '']
 
 
-class ConnectivityManager(eqx.Module):
+class ConnectivityManager(ConnectivityManagerBase):
     """Manages unit-level utility tracking and structural pruning/generation
     for DynamicNetwork.
 
@@ -1107,6 +1133,379 @@ def _reset_optimizer_state(
             new_fields.append(new_val)
         else:
             # Scalar or other non-parameter state (e.g. learning rate) — keep as-is
+            new_fields.append(val)
+
+    new_core = core_state.__class__(*new_fields)
+    new_state = (new_core, *optimizer.state[1:]) if is_chained else new_core
+    return tree_replace(optimizer, state=new_state)
+
+
+# ---------------------------------------------------------------------------
+# Connection-level pruning
+# ---------------------------------------------------------------------------
+
+class ConnectionStats(eqx.Module):
+    """Per-connection tracking statistics.
+
+    Attributes:
+        hidden_utility: EMA of per-connection utility for hidden weights.
+            Shape: (max_layers, max_units_per_layer, max_connections_per_unit).
+        output_utility: EMA of per-connection utility for output weights.
+            Shape: (output_dim, buffer_size).
+        accumulator: Prune accumulator (scalar). Grows by
+            prune_rate * active_connections each step.
+    """
+    hidden_utility: Float[Array, 'max_layers max_units_per_layer max_connections_per_unit']
+    output_utility: Float[Array, 'output_dim buffer_size']
+    accumulator: Float[Array, '']
+
+
+class ConnectionConnectivityManager(ConnectivityManagerBase):
+    """Manages connection-level utility tracking and pruning for DynamicNetwork.
+
+    Tracks per-connection utility (|h_source| * |w|) and prunes individual
+    connections globally. Units are removed only when they have 0 outgoing
+    connections. Generation still creates whole units via the pluggable
+    ``generate_fn``.
+    """
+
+    # Static config
+    decay_rate: float = eqx.field(static=True)
+    max_new_units_per_step: int = eqx.field(static=True)
+    output_connect_strategy: str = eqx.field(static=True)
+    output_weight_init: str = eqx.field(static=True)
+    generate_fn: Callable = eqx.field(static=True)
+
+    # Dynamic state
+    prune_rate: float
+    connection_budget: float
+    connection_stats: ConnectionStats
+    rng: PRNGKeyArray
+
+    def __init__(
+        self,
+        model: DynamicNetwork,
+        prune_rate: float = 1e-4,
+        connection_budget: float = 1000.0,
+        decay_rate: float = 0.99,
+        max_new_units_per_step: int = 512,
+        output_connect_strategy: str = 'all',
+        output_weight_init: str = 'zero',
+        generate_fn: Optional[Callable] = None,
+        *,
+        rng: PRNGKeyArray,
+    ):
+        self.decay_rate = decay_rate
+        self.max_new_units_per_step = max_new_units_per_step
+        self.output_connect_strategy = output_connect_strategy
+        self.output_weight_init = output_weight_init
+        self.prune_rate = prune_rate
+        self.connection_budget = connection_budget
+        self.rng = rng
+
+        self.generate_fn = generate_fn if generate_fn is not None else random_generate
+
+        hidden_shape = (model.max_layers, model.max_units_per_layer,
+                        model.max_connections_per_unit)
+        output_shape = (model.output_dim, model.buffer_size)
+        self.connection_stats = ConnectionStats(
+            hidden_utility=jnp.zeros(hidden_shape, dtype=jnp.float32),
+            output_utility=jnp.zeros(output_shape, dtype=jnp.float32),
+            accumulator=jnp.array(0.0),
+        )
+
+    def update_stats(
+        self,
+        model: DynamicNetwork,
+        buffer: Float[Array, 'batch_size buffer_size'],
+        grads=None,
+        updates=None,
+        targets=None,
+        predictions=None,
+    ) -> 'ConnectionConnectivityManager':
+        """Update per-connection utility estimates and accumulate prune budget."""
+        # Mean absolute activation per buffer position
+        mean_abs_act = jnp.abs(buffer).mean(axis=0)  # (buffer_size,)
+
+        # --- Hidden connection utility: |h_source| * |w| ---
+        safe_idx = jnp.maximum(model.input_indices, 0)
+        source_act = mean_abs_act[safe_idx]  # (L, U, C)
+        conn_mask = (model.input_indices >= 0).astype(jnp.float32)
+        step_hidden = source_act * jnp.abs(model.weights) * conn_mask
+
+        # --- Output connection utility: |h_source| * |w| ---
+        step_output = (
+            mean_abs_act[None, :]
+            * jnp.abs(model.output_weights)
+            * model.output_mask.astype(jnp.float32)
+        )
+
+        # EMA update
+        new_hidden = (
+            (1 - self.decay_rate) * step_hidden
+            + self.decay_rate * self.connection_stats.hidden_utility
+        ) * conn_mask
+        new_output = (
+            (1 - self.decay_rate) * step_output
+            + self.decay_rate * self.connection_stats.output_utility
+        ) * model.output_mask.astype(jnp.float32)
+
+        # Prune accumulator
+        active_conns = (
+            jnp.sum(model.input_indices >= 0)
+            + jnp.sum(model.output_mask)
+        ).astype(jnp.float32)
+        new_acc = self.connection_stats.accumulator + self.prune_rate * active_conns
+
+        new_stats = ConnectionStats(
+            hidden_utility=new_hidden,
+            output_utility=new_output,
+            accumulator=new_acc,
+        )
+        return tree_replace(self, connection_stats=new_stats)
+
+    def modify_structure(
+        self,
+        model: DynamicNetwork,
+        optimizer: EqxOptimizer,
+        *,
+        rng: PRNGKeyArray,
+    ) -> Tuple['ConnectionConnectivityManager', DynamicNetwork, EqxOptimizer,
+               Int[Array, 'max_layers'], Int[Array, 'max_layers']]:
+        """Prune lowest-utility connections, clean up dead units, generate new units.
+
+        Returns:
+            (tracker, model, optimizer, pruned_per_layer, generated_per_layer)
+            where pruned_per_layer counts dead units cleaned up per layer.
+        """
+        rng, prune_rng, gen_rng = jax.random.split(rng, 3)
+        max_layers = model.max_layers
+        max_units = model.max_units_per_layer
+
+        # ===== Phase 1: Global connection pruning =====
+        hidden_prune_3d, output_prune_2d, n_pruned = self._make_connection_prune_masks(
+            model, rng=prune_rng,
+        )
+
+        # Apply pruning to model
+        new_weights = jnp.where(hidden_prune_3d, 0.0, model.weights)
+        new_input_indices = jnp.where(
+            hidden_prune_3d, -1, model.input_indices,
+        ).astype(jnp.int32)
+        new_output_weights = jnp.where(output_prune_2d, 0.0, model.output_weights)
+        new_output_mask = jnp.where(
+            output_prune_2d, 0, model.output_mask,
+        ).astype(jnp.int32)
+
+        # Zero pruned connection stats
+        new_hidden_utility = jnp.where(
+            hidden_prune_3d, 0.0, self.connection_stats.hidden_utility,
+        )
+        new_output_utility = jnp.where(
+            output_prune_2d, 0.0, self.connection_stats.output_utility,
+        )
+
+        # ===== Phase 2: Dead unit detection (0 outgoing connections) =====
+        buf_positions = _unit_buf_positions(model)  # (L, U)
+
+        # Count hidden-to-hidden outgoing per buffer position via scatter-add
+        active_mask = (new_input_indices >= 0)
+        flat_idx = jnp.where(active_mask, new_input_indices, 0).reshape(-1)
+        flat_active = active_mask.reshape(-1).astype(jnp.int32)
+        h2h_counts = jnp.zeros(model.buffer_size, dtype=jnp.int32)
+        h2h_counts = h2h_counts.at[flat_idx].add(flat_active)
+
+        # Count hidden-to-output outgoing per buffer position
+        h2o_counts = new_output_mask.sum(axis=0)  # (buffer_size,)
+
+        total_outgoing = h2h_counts + h2o_counts
+        unit_outgoing = total_outgoing[buf_positions]  # (L, U)
+        dead_mask = (model.unit_mask == 1) & (unit_outgoing == 0)
+
+        # Clean up dead units
+        dead_3d = dead_mask[:, :, None]
+        new_unit_mask = jnp.where(dead_mask, 0, model.unit_mask).astype(jnp.int32)
+        new_weights = jnp.where(dead_3d, 0.0, new_weights)
+        new_input_indices = jnp.where(dead_3d, -1, new_input_indices).astype(jnp.int32)
+
+        dead_buf_mask = _prune_mask_to_buf_mask(
+            dead_mask, buf_positions, model.buffer_size,
+        )
+        new_output_mask = (
+            new_output_mask * (1 - dead_buf_mask[None, :].astype(jnp.int32))
+        )
+        new_output_weights = (
+            new_output_weights * (1 - dead_buf_mask[None, :].astype(jnp.float32))
+        )
+
+        # Zero stats for dead units
+        new_hidden_utility = jnp.where(dead_3d, 0.0, new_hidden_utility)
+        new_output_utility = (
+            new_output_utility * (1 - dead_buf_mask[None, :].astype(jnp.float32))
+        )
+
+        model = eqx.tree_at(
+            lambda m: (
+                m.unit_mask, m.weights, m.input_indices,
+                m.output_mask, m.output_weights,
+            ),
+            model,
+            (
+                new_unit_mask, new_weights, new_input_indices,
+                new_output_mask, new_output_weights,
+            ),
+        )
+
+        # ===== Phase 3: Generate new units =====
+        active_conns_after = (
+            jnp.sum(model.input_indices >= 0) + jnp.sum(model.output_mask)
+        ).astype(jnp.float32)
+        gen_budget = jnp.maximum(0.0, self.connection_budget - active_conns_after)
+
+        # Construct temp UnitStats for generate_fn compatibility
+        unit_shape = (max_layers, max_units)
+        temp_unit_stats = UnitStats(
+            age=jnp.zeros(unit_shape, dtype=jnp.int32),
+            utility=jnp.zeros(unit_shape, dtype=jnp.float32),
+            accumulator=jnp.array(0.0),
+        )
+
+        model, _temp_stats, _, gen_mask_2d, gen_info = self.generate_fn(
+            model, temp_unit_stats, gen_budget,
+            self.max_new_units_per_step,
+            jnp.array(0.0),  # init_utility — irrelevant for connection tracking
+            gen_rng,
+            output_connect_strategy=self.output_connect_strategy,
+        )
+
+        # ===== Phase 4: Finalize =====
+        if self.output_connect_strategy == 'random_sparse':
+            rng, sparse_rng = jax.random.split(rng)
+            model = assign_sparse_outgoing(
+                model, gen_info, self.max_new_units_per_step, sparse_rng,
+                output_weight_init=self.output_weight_init,
+            )
+
+        model = build_outgoing_indices(model)
+
+        # Reset optimizer state
+        optimizer = _reset_optimizer_state_connections(
+            optimizer, model,
+            hidden_prune_3d, output_prune_2d,
+            dead_mask, gen_mask_2d,
+        )
+
+        # Update accumulator
+        new_acc = jnp.maximum(
+            0.0, self.connection_stats.accumulator - n_pruned.astype(jnp.float32),
+        )
+
+        new_stats = ConnectionStats(
+            hidden_utility=new_hidden_utility,
+            output_utility=new_output_utility,
+            accumulator=new_acc,
+        )
+
+        # Per-layer counts (dead units = "pruned", generated units)
+        pruned_per_layer = dead_mask.sum(axis=1).astype(jnp.int32)
+        generated_per_layer = gen_mask_2d.sum(axis=1).astype(jnp.int32)
+
+        new_manager = tree_replace(self, connection_stats=new_stats, rng=rng)
+        return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
+
+    def _make_connection_prune_masks(
+        self,
+        model: DynamicNetwork,
+        *,
+        rng: PRNGKeyArray,
+    ) -> Tuple[Bool[Array, 'max_layers max_units_per_layer max_connections_per_unit'],
+               Bool[Array, 'output_dim buffer_size'],
+               Int[Array, '']]:
+        """Determine which connections to prune based on global utility ranking.
+
+        Returns:
+            (hidden_prune_3d, output_prune_2d, n_pruned)
+        """
+        budget = self.connection_stats.accumulator
+
+        # Flatten utilities
+        hidden_active = (model.input_indices >= 0).reshape(-1)
+        output_active = model.output_mask.reshape(-1).astype(jnp.bool_)
+        n_hidden_flat = hidden_active.size
+
+        hidden_flat = self.connection_stats.hidden_utility.reshape(-1)
+        output_flat = self.connection_stats.output_utility.reshape(-1)
+        all_utility = jnp.concatenate([hidden_flat, output_flat])
+        all_active = jnp.concatenate([hidden_active, output_active])
+
+        n_active = jnp.sum(all_active)
+        n_to_prune = jnp.floor(budget).astype(jnp.int32)
+        n_to_prune = jnp.minimum(n_to_prune, n_active)
+        n_to_prune = jnp.maximum(n_to_prune, 0)
+
+        # Tie-breaking noise
+        perturbed = all_utility + jax.random.uniform(
+            rng, all_utility.shape, minval=-EPSILON, maxval=EPSILON,
+        )
+        filtered = jnp.where(all_active, perturbed, jnp.inf)
+
+        # Find threshold
+        ranking = jnp.argsort(filtered)
+        threshold = filtered[ranking[n_to_prune]]
+        threshold = jnp.minimum(threshold, MAX_FLOAT)
+
+        prune_flat = (filtered < threshold) & all_active
+
+        # Split back into hidden and output masks
+        hidden_prune_3d = prune_flat[:n_hidden_flat].reshape(model.weights.shape)
+        output_prune_2d = prune_flat[n_hidden_flat:].reshape(model.output_weights.shape)
+
+        return hidden_prune_3d, output_prune_2d, n_to_prune
+
+
+def _reset_optimizer_state_connections(
+    optimizer: EqxOptimizer,
+    model: DynamicNetwork,
+    hidden_prune_3d: Bool[Array, 'max_layers max_units_per_layer max_connections_per_unit'],
+    output_prune_2d: Bool[Array, 'output_dim buffer_size'],
+    dead_mask: Bool[Array, 'max_layers max_units_per_layer'],
+    gen_mask_2d: Bool[Array, 'max_layers max_units_per_layer'],
+) -> EqxOptimizer:
+    """Reset optimizer state for pruned connections and affected units.
+
+    Combines connection-level prune masks with unit-level dead/generated masks
+    to produce a single reset mask for each parameter array.
+    """
+    buf_positions = _unit_buf_positions(model)
+
+    # Combine unit-level masks for dead + generated units
+    unit_affected = dead_mask | gen_mask_2d
+    unit_affected_buf = _prune_mask_to_buf_mask(
+        unit_affected, buf_positions, model.buffer_size,
+    )
+
+    # 3D hidden mask: pruned connections OR all connections of affected units
+    weights_mask = hidden_prune_3d | unit_affected[:, :, None]
+    # 2D output mask: pruned output connections OR all outputs of affected units
+    output_mask = output_prune_2d | unit_affected_buf[None, :]
+
+    core_state = optimizer.state
+    is_chained = type(core_state) is tuple
+    if is_chained:
+        core_state = core_state[0]
+
+    new_fields = []
+    for i, val in enumerate(core_state):
+        if val is None:
+            new_fields.append(val)
+        elif hasattr(val, 'weights') and hasattr(val, 'output_weights'):
+            new_w = jnp.where(weights_mask, jnp.zeros_like(val.weights), val.weights)
+            new_ow = jnp.where(output_mask, jnp.zeros_like(val.output_weights), val.output_weights)
+            new_val = eqx.tree_at(
+                lambda v: (v.weights, v.output_weights), val, (new_w, new_ow),
+            )
+            new_fields.append(new_val)
+        else:
             new_fields.append(val)
 
     new_core = core_state.__class__(*new_fields)

@@ -45,6 +45,7 @@ optimizer:
 # Structure tracker (ConnectivityManager for dynamic networks)
 structure_tracker:
   enabled: false
+  mode: unit                  # 'unit' (per-unit pruning) or 'connection' (per-connection pruning)
   prune_rate: 1e-4           # fraction of connection_budget to accumulate per step
   connection_budget: 1000.0  # total connection budget for pruning/generation
   decay_rate: 0.99           # EMA decay for utility tracking
