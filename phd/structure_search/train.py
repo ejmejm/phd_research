@@ -42,6 +42,7 @@ from phd.structure_search.connectivity_manager import (
     ConnectionConnectivityManager,
     full_input_generate,
     contribution_utility, upgd_utility, si_utility, loo_utility,
+    contribution_connection_utility, propagated_connection_utility,
 )
 from phd.structure_search.dynamic_network import (
     DynamicNetwork, sync_outgoing_weights, build_outgoing_indices,
@@ -244,6 +245,12 @@ def prepare_experiment(
             tracker_mode = cfg.structure_tracker.get('mode', 'unit')
 
             if tracker_mode == 'connection':
+                conn_util_fn_map = {
+                    'contribution': contribution_connection_utility,
+                    'propagated': propagated_connection_utility,
+                }
+                conn_util_fn = conn_util_fn_map.get(
+                    cfg.structure_tracker.get('connection_utility_fn', 'contribution'))
                 tracker = ConnectionConnectivityManager(
                     model=model,
                     prune_rate=cfg.structure_tracker.prune_rate,
@@ -256,6 +263,7 @@ def prepare_experiment(
                     output_weight_init=cfg.structure_tracker.get(
                         'output_weight_init', 'zero'),
                     generate_fn=generate_fn,
+                    connection_utility_fn=conn_util_fn,
                     rng=rng_from_string(rng, 'tracker'),
                 )
             else:

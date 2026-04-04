@@ -37,6 +37,7 @@ train:
 structure_tracker:
   enabled: true
   mode: unit
+  connection_utility_fn: contribution  # 'contribution' or 'propagated' (only for mode=connection)
   connection_budget: 50_000
   decay_rate: 0.999
   maturity_threshold: 1

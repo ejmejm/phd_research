@@ -53,6 +53,7 @@ from phd.research_utils.logging import (
 from phd.structure_search.connectivity_manager import (
     ConnectivityManager, ConnectionConnectivityManager, ConnectionStats,
     UnitStats, contribution_utility, median_utility_init,
+    contribution_connection_utility, propagated_connection_utility,
     _unit_buf_positions, _prune_mask_to_buf_mask, _reset_optimizer_state,
     _reset_optimizer_state_connections, assign_sparse_outgoing,
 )
@@ -1729,6 +1730,12 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
 
         tracker_mode = cfg.structure_tracker.get('mode', 'unit')
         if tracker_mode == 'connection':
+            conn_util_fn_map = {
+                'contribution': contribution_connection_utility,
+                'propagated': propagated_connection_utility,
+            }
+            conn_util_fn = conn_util_fn_map.get(
+                cfg.structure_tracker.get('connection_utility_fn', 'contribution'))
             conn_cls = (ConnectionMixedConnectivityManager
                         if variant == 'mixed_generation'
                         else ConnectionConnectivityManager)
@@ -1741,6 +1748,7 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
                 output_connect_strategy='all',
                 output_weight_init='zero',
                 generate_fn=generate_fn,
+                connection_utility_fn=conn_util_fn,
                 rng=rng_from_string(rng, 'tracker'),
             )
         else:

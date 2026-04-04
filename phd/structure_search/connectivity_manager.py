@@ -1160,13 +1160,141 @@ class ConnectionStats(eqx.Module):
     accumulator: Float[Array, '']
 
 
+# ---------------------------------------------------------------------------
+# Connection-level utility functions
+# ---------------------------------------------------------------------------
+
+def contribution_connection_utility(
+    model: DynamicNetwork,
+    buffer: Float[Array, 'batch_size buffer_size'],
+    grads=None,
+    updates=None,
+    targets=None,
+    predictions=None,
+) -> Tuple[Float[Array, 'max_layers max_units_per_layer max_connections_per_unit'],
+           Float[Array, 'output_dim buffer_size']]:
+    """Per-connection contribution utility: |h_source| * |w|.
+
+    Returns:
+        (hidden_utility, output_utility) — step utilities (not EMA).
+    """
+    mean_abs_act = jnp.abs(buffer).mean(axis=0)  # (buffer_size,)
+
+    safe_idx = jnp.maximum(model.input_indices, 0)
+    source_act = mean_abs_act[safe_idx]  # (L, U, C)
+    conn_mask = (model.input_indices >= 0).astype(jnp.float32)
+    hidden_util = source_act * jnp.abs(model.weights) * conn_mask
+
+    output_util = (
+        mean_abs_act[None, :]
+        * jnp.abs(model.output_weights)
+        * model.output_mask.astype(jnp.float32)
+    )
+    return hidden_util, output_util
+
+
+def propagated_connection_utility(
+    model: DynamicNetwork,
+    buffer: Float[Array, 'batch_size buffer_size'],
+    grads=None,
+    updates=None,
+    targets=None,
+    predictions=None,
+) -> Tuple[Float[Array, 'max_layers max_units_per_layer max_connections_per_unit'],
+           Float[Array, 'output_dim buffer_size']]:
+    """Shifted-signed LOO utility at outputs, propagated via scaled contribution.
+
+    Output connections: |e + c| - |e|, shifted non-negative per output dim,
+    scaled so each output dim's utilities sum to error_reduced.
+
+    Hidden connections: contribution utility (|x_source| * |w|) scaled per
+    unit so that incoming utilities sum to the unit's total outgoing utility.
+    Propagated backward layer by layer.
+
+    Returns:
+        (hidden_utility, output_utility) — step utilities (not EMA).
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    input_dim = model.input_dim
+    buffer_size = model.buffer_size
+
+    # ===== Output layer =====
+    error = targets - predictions  # (batch, output_dim)
+    ow_masked = model.output_weights * model.output_mask.astype(jnp.float32)
+
+    # Contribution of each buffer position to each output dim
+    c = ow_masked[None, :, :] * buffer[:, None, :]  # (batch, O, B)
+
+    # LOO: |e + c| - |e|
+    U_raw_out = jnp.abs(error[:, :, None] + c) - jnp.abs(error)[:, :, None]
+    U_raw_out = U_raw_out.mean(axis=0)  # (O, B)
+
+    # Shift per output dim: subtract minimum across active buffer positions
+    out_active = model.output_mask.astype(jnp.bool_)
+    U_for_min = jnp.where(out_active, U_raw_out, jnp.inf)
+    U_min_out = jnp.min(U_for_min, axis=1, keepdims=True)  # (O, 1)
+    has_any = jnp.any(out_active, axis=1, keepdims=True)
+    U_min_out = jnp.where(has_any, U_min_out, 0.0)
+    U_shifted_out = (U_raw_out - U_min_out) * model.output_mask.astype(jnp.float32)
+
+    # Scale per output dim: sum = error_reduced
+    error_reduced = (jnp.abs(targets) - jnp.abs(error)).mean(axis=0)  # (O,)
+    U_sum_out = U_shifted_out.sum(axis=1)  # (O,)
+    scale_out = jnp.where(jnp.abs(U_sum_out) > 1e-10, error_reduced / U_sum_out, 1.0)
+    output_utility = U_shifted_out * scale_out[:, None]
+    output_utility = output_utility * model.output_mask.astype(jnp.float32)
+
+    # Per-buffer-position outgoing utility (seed for backward propagation)
+    outgoing_util = output_utility.sum(axis=0)  # (buffer_size,)
+
+    # ===== Hidden layers (backward): contribution utility scaled to parent =====
+    mean_abs_act = jnp.abs(buffer).mean(axis=0)  # (buffer_size,)
+    hidden_utility = jnp.zeros((max_layers, max_units, max_conns))
+
+    for l in range(max_layers - 1, -1, -1):
+        offset = input_dim + l * max_units
+
+        idx = model.input_indices[l]  # (U, C)
+        conn_mask = (idx >= 0).astype(jnp.float32)
+        safe_idx = jnp.maximum(idx, 0)
+        unit_active = model.unit_mask[l].astype(jnp.float32)  # (U,)
+
+        # Raw contribution utility: |x_source| * |w|
+        source_act = mean_abs_act[safe_idx]  # (U, C)
+        U_raw = source_act * jnp.abs(model.weights[l]) * conn_mask  # (U, C)
+
+        # Scale per unit: sum across connections = parent outgoing utility
+        parent_util = outgoing_util[offset:offset + max_units]  # (U,)
+        U_sum = U_raw.sum(axis=-1)  # (U,)
+        scale = jnp.where(
+            jnp.abs(U_sum) > 1e-10, parent_util / U_sum, 1.0
+        )  # (U,)
+        U_in = U_raw * scale[:, None] * conn_mask * unit_active[:, None]
+
+        hidden_utility = hidden_utility.at[l].set(U_in)
+
+        # Propagate: scatter-add to source buffer positions
+        flat_idx = safe_idx.reshape(-1)
+        flat_utils = (U_in * conn_mask).reshape(-1)
+        outgoing_util = outgoing_util.at[flat_idx].add(flat_utils)
+
+    return hidden_utility, output_utility
+
+
 class ConnectionConnectivityManager(ConnectivityManagerBase):
     """Manages connection-level utility tracking and pruning for DynamicNetwork.
 
-    Tracks per-connection utility (|h_source| * |w|) and prunes individual
-    connections globally. Units are removed only when they have 0 outgoing
-    connections. Generation still creates whole units via the pluggable
-    ``generate_fn``.
+    Tracks per-connection utility and prunes individual connections globally.
+    Units are removed only when they have 0 outgoing connections. Generation
+    still creates whole units via the pluggable ``generate_fn``.
+
+    The ``connection_utility_fn`` controls how per-connection utility is
+    computed each step:
+    - ``contribution_connection_utility``: |h_source| * |w| (default, cheap)
+    - ``propagated_connection_utility``: shifted-signed LOO propagated from
+      output layer backward (more expensive, assumes ReLU)
     """
 
     # Static config
@@ -1175,6 +1303,7 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
     output_connect_strategy: str = eqx.field(static=True)
     output_weight_init: str = eqx.field(static=True)
     generate_fn: Callable = eqx.field(static=True)
+    connection_utility_fn: Callable = eqx.field(static=True)
 
     # Dynamic state
     prune_rate: float
@@ -1193,6 +1322,7 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
         output_connect_strategy: str = 'all',
         output_weight_init: str = 'zero',
         generate_fn: Optional[Callable] = None,
+        connection_utility_fn: Optional[Callable] = None,
         *,
         rng: PRNGKeyArray,
     ):
@@ -1205,6 +1335,10 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
         self.rng = rng
 
         self.generate_fn = generate_fn if generate_fn is not None else random_generate
+        self.connection_utility_fn = (
+            connection_utility_fn if connection_utility_fn is not None
+            else contribution_connection_utility
+        )
 
         hidden_shape = (model.max_layers, model.max_units_per_layer,
                         model.max_connections_per_unit)
@@ -1231,21 +1365,12 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
         predictions=None,
     ) -> 'ConnectionConnectivityManager':
         """Update per-connection utility estimates and accumulate prune budget."""
-        # Mean absolute activation per buffer position
-        mean_abs_act = jnp.abs(buffer).mean(axis=0)  # (buffer_size,)
-
-        # --- Hidden connection utility: |h_source| * |w| ---
-        safe_idx = jnp.maximum(model.input_indices, 0)
-        source_act = mean_abs_act[safe_idx]  # (L, U, C)
-        conn_mask = (model.input_indices >= 0).astype(jnp.float32)
-        step_hidden = source_act * jnp.abs(model.weights) * conn_mask
-
-        # --- Output connection utility: |h_source| * |w| ---
-        step_output = (
-            mean_abs_act[None, :]
-            * jnp.abs(model.output_weights)
-            * model.output_mask.astype(jnp.float32)
+        step_hidden, step_output = self.connection_utility_fn(
+            model, buffer, grads=grads, updates=updates,
+            targets=targets, predictions=predictions,
         )
+
+        conn_mask = (model.input_indices >= 0).astype(jnp.float32)
 
         # EMA update
         new_hidden = (
