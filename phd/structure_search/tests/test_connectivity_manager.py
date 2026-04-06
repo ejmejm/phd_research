@@ -171,7 +171,7 @@ def test_modify_structure_runs():
         cm = cm.update_stats(net, buffer)
 
     # Now modify structure
-    cm2, net2, opt2, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
+    cm2, net2, opt2, _, _, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
 
     # Basic validity checks
     assert net2.unit_mask.shape == net.unit_mask.shape
@@ -216,7 +216,7 @@ def test_connection_budget_invariant():
 
     # Run several modify_structure cycles
     for i in range(5):
-        cm, net, optimizer, _, _ = cm.modify_structure(
+        cm, net, optimizer, _, _, _, _ = cm.modify_structure(
             net, optimizer, rng=jax.random.key(10 + i),
         )
         net = sync_outgoing_weights(net)
@@ -255,7 +255,7 @@ def test_generated_units_have_valid_layer_connections():
     for i in range(200):
         cm = cm.update_stats(net, buffer)
 
-    cm2, net2, opt2, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
+    cm2, net2, opt2, _, _, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
 
     input_dim = net2.input_dim
     max_units = net2.max_units_per_layer
@@ -298,7 +298,7 @@ def test_output_connections_for_generated_units():
     for i in range(200):
         cm = cm.update_stats(net, buffer)
 
-    cm2, net2, opt2, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
+    cm2, net2, opt2, _, _, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
 
     # Check all active units have output connections
     buf_positions = _unit_buf_positions(net2)
@@ -402,7 +402,7 @@ def test_sparse_outgoing_connections():
     for i in range(200):
         cm = cm.update_stats(net, buffer)
 
-    cm2, net2, opt2, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
+    cm2, net2, opt2, _, _, _, _ = cm.modify_structure(net, optimizer, rng=jax.random.key(2))
 
     # Check that newly generated units have sparse (not all) output connections
     buf_positions = _unit_buf_positions(net2)

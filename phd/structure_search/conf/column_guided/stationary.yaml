@@ -42,8 +42,9 @@ structure_tracker:
   maturity_threshold: 1
   prune_frequency: 200
   prune_rate: 0.0001
-  max_new_units_per_step: 256
+  max_new_units_per_step: 256  # Per restructure step
 
+log_task_affinity: false  # log per-unit input/output task entropy and cross-task fraction
 init_mode: random   # 'random' (default) or 'column' (within-column connections only)
 seed: 1
 project: column-guided-parallel-mnist

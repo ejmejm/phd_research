@@ -414,14 +414,14 @@ def count_active_connections(network: DynamicNetwork) -> int:
     Includes both hidden-layer connections (input_indices >= 0) and
     output-layer connections (output_mask == 1).
     """
-    hidden = int(jnp.sum(network.input_indices >= 0))
-    output = int(jnp.sum(network.output_mask))
+    hidden = jnp.sum(network.input_indices >= 0)
+    output = jnp.sum(network.output_mask)
     return hidden + output
 
 
 def count_active_units(network: DynamicNetwork) -> int:
     """Count the total number of active hidden units."""
-    return int(jnp.sum(network.unit_mask))
+    return jnp.sum(network.unit_mask)
 
 
 def init_random_dynamic_network(

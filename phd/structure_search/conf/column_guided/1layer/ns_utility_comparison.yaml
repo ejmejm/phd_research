@@ -8,7 +8,7 @@ project: column-guided-utility-deep-dive-ns
 
 model:
   n_layers: 1
-  hidden_dim: 175
+  hidden_dim: 200
   max_units_per_layer: 3000
 
 dataset:

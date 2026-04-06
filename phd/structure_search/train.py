@@ -413,7 +413,7 @@ def train_step(
     generated_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
     if do_restructure and isinstance(new_tracker, ConnectivityManagerBase):
         rng, restructure_rng = jax.random.split(train_state.rng)
-        new_tracker, new_model, new_optimizer, pruned_per_layer, generated_per_layer = (
+        new_tracker, new_model, new_optimizer, pruned_per_layer, generated_per_layer, _, _ = (
             new_tracker.modify_structure(new_model, new_optimizer, rng=restructure_rng))
 
     new_state = tree_replace(

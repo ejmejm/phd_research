@@ -368,9 +368,17 @@ def random_generate(
         all_costs = all_input_costs + output_dim
 
     # --- 6d: Determine which units fit in budget ---
-    costs_if_valid = jnp.where(cand_valid, all_costs.astype(jnp.float32), 0.0)
-    cumulative_cost = jnp.cumsum(costs_if_valid)
-    gen_mask = cand_valid & (cumulative_cost <= budget)
+    # Use max possible cost (half_conns + output) so units are only generated
+    # when there's enough budget for their full maximum connection count.
+    half_conns = jnp.maximum(max_conns // 2, 1)
+    if output_connect_strategy == 'random_sparse':
+        max_cost_per_unit = half_conns + max(1, max_fan_out // 2)
+    else:
+        max_cost_per_unit = half_conns + output_dim
+    max_costs_if_valid = jnp.where(
+        cand_valid, jnp.float32(max_cost_per_unit), 0.0)
+    cumulative_max_cost = jnp.cumsum(max_costs_if_valid)
+    gen_mask = cand_valid & (cumulative_max_cost <= budget)
 
     # --- 6e: Apply input connections via scatter ---
     old_indices = model.input_indices[cand_layers, cand_units]
@@ -1024,7 +1032,8 @@ class ConnectivityManager(ConnectivityManagerBase):
         generated_per_layer = gen_mask_2d.sum(axis=1).astype(jnp.int32)
 
         new_manager = tree_replace(self, unit_stats=unit_stats, rng=rng)
-        return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
+        return (new_manager, model, optimizer, pruned_per_layer, generated_per_layer,
+                jnp.array(0, dtype=jnp.int32), jnp.array(0, dtype=jnp.int32))
 
     def _make_prune_mask(
         self,
@@ -1287,16 +1296,21 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
         *,
         rng: PRNGKeyArray,
     ) -> Tuple['ConnectionConnectivityManager', DynamicNetwork, EqxOptimizer,
-               Int[Array, 'max_layers'], Int[Array, 'max_layers']]:
+               Int[Array, 'max_layers'], Int[Array, 'max_layers'],
+               Int[Array, ''], Int[Array, '']]:
         """Prune lowest-utility connections, clean up dead units, generate new units.
 
         Returns:
-            (tracker, model, optimizer, pruned_per_layer, generated_per_layer)
-            where pruned_per_layer counts dead units cleaned up per layer.
+            (tracker, model, optimizer, pruned_per_layer, generated_per_layer,
+             pruned_connections, generated_connections)
         """
         rng, prune_rng, gen_rng = jax.random.split(rng, 3)
         max_layers = model.max_layers
         max_units = model.max_units_per_layer
+
+        conns_before = (
+            jnp.sum(model.input_indices >= 0) + jnp.sum(model.output_mask)
+        ).astype(jnp.int32)
 
         # ===== Phase 1: Global connection pruning =====
         hidden_prune_3d, output_prune_2d, n_pruned = self._make_connection_prune_masks(
@@ -1373,10 +1387,10 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
         )
 
         # ===== Phase 3: Generate new units =====
-        active_conns_after = (
+        active_conns_after_prune = (
             jnp.sum(model.input_indices >= 0) + jnp.sum(model.output_mask)
         ).astype(jnp.float32)
-        gen_budget = jnp.maximum(0.0, self.connection_budget - active_conns_after)
+        gen_budget = jnp.maximum(0.0, self.connection_budget - active_conns_after_prune)
 
         # Construct temp UnitStats for generate_fn compatibility
         unit_shape = (max_layers, max_units)
@@ -1436,10 +1450,18 @@ class ConnectionConnectivityManager(ConnectivityManagerBase):
         pruned_per_layer = dead_mask.sum(axis=1).astype(jnp.int32)
         generated_per_layer = gen_mask_2d.sum(axis=1).astype(jnp.int32)
 
+        # Connection counts
+        conns_after = (
+            jnp.sum(model.input_indices >= 0) + jnp.sum(model.output_mask)
+        ).astype(jnp.int32)
+        pruned_conns = conns_before - active_conns_after_prune.astype(jnp.int32)
+        generated_conns = conns_after - active_conns_after_prune.astype(jnp.int32)
+
         new_manager = tree_replace(
             self, connection_stats=new_stats, unit_stats=new_unit_stats, rng=rng,
         )
-        return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
+        return (new_manager, model, optimizer, pruned_per_layer, generated_per_layer,
+                pruned_conns, generated_conns)
 
     def _make_connection_prune_masks(
         self,

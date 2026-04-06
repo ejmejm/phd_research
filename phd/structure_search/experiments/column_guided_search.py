@@ -1351,7 +1351,8 @@ class MixedConnectivityManager(ConnectivityManager):
 
         new_manager = tree_replace(
             self, unit_stats=unit_stats, rng=rng, column_tag=updated_tag)
-        return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
+        return (new_manager, model, optimizer, pruned_per_layer, generated_per_layer,
+                jnp.array(0, dtype=jnp.int32), jnp.array(0, dtype=jnp.int32))
 
 
 class ConnectionMixedConnectivityManager(ConnectionConnectivityManager):
@@ -1372,6 +1373,10 @@ class ConnectionMixedConnectivityManager(ConnectionConnectivityManager):
         rng, prune_rng, gen_rng = jax.random.split(rng, 3)
         max_layers = model.max_layers
         max_units = model.max_units_per_layer
+
+        conns_before = (
+            jnp.sum(model.input_indices >= 0) + jnp.sum(model.output_mask)
+        ).astype(jnp.int32)
 
         # ===== Phase 1: Global connection pruning =====
         hidden_prune_3d, output_prune_2d, n_pruned = (
@@ -1430,10 +1435,10 @@ class ConnectionMixedConnectivityManager(ConnectionConnectivityManager):
         )
 
         # ===== Phase 3: Generate new units =====
-        active_conns_after = (
+        active_conns_after_prune = (
             jnp.sum(model.input_indices >= 0) + jnp.sum(model.output_mask)
         ).astype(jnp.float32)
-        gen_budget = jnp.maximum(0.0, self.connection_budget - active_conns_after)
+        gen_budget = jnp.maximum(0.0, self.connection_budget - active_conns_after_prune)
 
         unit_shape = (max_layers, max_units)
         temp_unit_stats = UnitStats(
@@ -1488,11 +1493,18 @@ class ConnectionMixedConnectivityManager(ConnectionConnectivityManager):
         pruned_per_layer = dead_mask.sum(axis=1).astype(jnp.int32)
         generated_per_layer = gen_mask_2d.sum(axis=1).astype(jnp.int32)
 
+        conns_after = (
+            jnp.sum(model.input_indices >= 0) + jnp.sum(model.output_mask)
+        ).astype(jnp.int32)
+        pruned_conns = conns_before - active_conns_after_prune.astype(jnp.int32)
+        generated_conns = conns_after - active_conns_after_prune.astype(jnp.int32)
+
         new_manager = tree_replace(
             self, connection_stats=new_stats, unit_stats=new_unit_stats,
             rng=rng, column_tag=updated_tag,
         )
-        return new_manager, model, optimizer, pruned_per_layer, generated_per_layer
+        return (new_manager, model, optimizer, pruned_per_layer, generated_per_layer,
+                pruned_conns, generated_conns)
 
 
 # ---------------------------------------------------------------------------
@@ -1824,9 +1836,12 @@ def train_step(
     n_model_layers = new_model.max_layers
     pruned_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
     generated_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
+    pruned_conns = jnp.array(0, dtype=jnp.int32)
+    generated_conns = jnp.array(0, dtype=jnp.int32)
     if do_restructure:
         rng, restructure_rng = jax.random.split(train_state.rng)
-        new_tracker, new_model, new_optimizer, pruned_per_layer, generated_per_layer = (
+        (new_tracker, new_model, new_optimizer, pruned_per_layer, generated_per_layer,
+         pruned_conns, generated_conns) = (
             new_tracker.modify_structure(new_model, new_optimizer, rng=restructure_rng)
         )
 
@@ -1841,6 +1856,8 @@ def train_step(
         loss=loss, correct=correct,
         pruned_per_layer=pruned_per_layer,
         generated_per_layer=generated_per_layer,
+        pruned_connections=pruned_conns,
+        generated_connections=generated_conns,
     )
 
 
@@ -1920,6 +1937,111 @@ def compute_column_metrics(train_state, n_tasks: int) -> dict:
             cross_per_seed.append(float(total_cross.mean()))
 
         metrics[f'layer_{l}/avg_cross_col_conns'] = float(np.mean(cross_per_seed))
+
+    return metrics
+
+
+def compute_task_affinity_metrics(train_state, n_tasks: int) -> dict:
+    """Per-unit task affinity metrics based on actual connectivity, not column slot.
+
+    For each active hidden unit, computes:
+    - Input task distribution: fraction of incoming connections from each task's inputs.
+    - Output task distribution: fraction of output connections to each task's outputs.
+    - Normalized entropy of each distribution (0 = all one task, 1 = uniform).
+    - Cross-task output fraction: output connections to non-dominant input task.
+
+    Returns:
+        layer_{l}/input_entropy: mean normalized entropy of input task distribution
+        layer_{l}/output_entropy: mean normalized entropy of output task distribution
+        layer_{l}/cross_task_output_frac: mean fraction of outputs to non-dominant task
+    """
+    model = train_state.model
+    unit_mask = np.array(model.unit_mask)
+    input_indices = np.array(model.input_indices)
+    output_mask = np.array(model.output_mask)
+
+    multi_seed = unit_mask.ndim == 3
+    if not multi_seed:
+        unit_mask = unit_mask[None]
+        input_indices = input_indices[None]
+        output_mask = output_mask[None]
+
+    n_seeds = unit_mask.shape[0]
+    n_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    input_dim = model.input_dim
+    output_dim = model.output_dim
+
+    input_task_size = input_dim // n_tasks
+    output_task_size = output_dim // n_tasks
+    log_n_tasks = np.log(n_tasks) if n_tasks > 1 else 1.0
+
+    metrics = {}
+    for l in range(n_layers):
+        in_entropies, out_entropies, cross_fracs = [], [], []
+        for s in range(n_seeds):
+            active = unit_mask[s, l].astype(bool)
+            if not active.any():
+                in_entropies.append(0.0)
+                out_entropies.append(0.0)
+                cross_fracs.append(0.0)
+                continue
+
+            # --- Input task distribution per unit ---
+            idx = input_indices[s, l]  # (max_units, max_conns)
+            active_conn = idx >= 0
+            # Only count input-sourced connections (not hidden-to-hidden)
+            is_input_src = active_conn & (idx < input_dim)
+            safe_idx = np.maximum(idx, 0)
+            src_task = safe_idx // input_task_size  # task index per connection
+            src_task = np.clip(src_task, 0, n_tasks - 1)
+
+            # Count connections per task per unit: (max_units, n_tasks)
+            in_counts = np.zeros((max_units, n_tasks))
+            for t in range(n_tasks):
+                in_counts[:, t] = (is_input_src & (src_task == t)).sum(axis=1)
+
+            in_total = in_counts.sum(axis=1, keepdims=True)  # (max_units, 1)
+            in_dist = np.where(in_total > 0, in_counts / np.maximum(in_total, 1), 0.0)
+
+            # Normalized entropy: -sum(p * log(p)) / log(n_tasks)
+            safe_dist = np.where(in_dist > 0, in_dist, 1.0)  # avoid log(0)
+            in_ent = -np.sum(in_dist * np.log(safe_dist), axis=1) / log_n_tasks
+            in_entropies.append(float(in_ent[active].mean()))
+
+            # Dominant input task per unit
+            dominant_task = np.argmax(in_counts, axis=1)  # (max_units,)
+
+            # --- Output task distribution per unit ---
+            buf_offset = input_dim + l * max_units
+            buf_positions = np.arange(buf_offset, buf_offset + max_units)
+            out_at_units = output_mask[s][:, buf_positions].astype(bool)  # (output_dim, max_units)
+
+            out_counts = np.zeros((max_units, n_tasks))
+            for t in range(n_tasks):
+                t_start = t * output_task_size
+                t_end = (t + 1) * output_task_size
+                out_counts[:, t] = out_at_units[t_start:t_end].sum(axis=0)
+
+            out_total = out_counts.sum(axis=1, keepdims=True)
+            out_dist = np.where(out_total > 0, out_counts / np.maximum(out_total, 1), 0.0)
+
+            safe_out = np.where(out_dist > 0, out_dist, 1.0)
+            out_ent = -np.sum(out_dist * np.log(safe_out), axis=1) / log_n_tasks
+            out_entropies.append(float(out_ent[active].mean()))
+
+            # Cross-task output fraction: outputs NOT going to dominant input task
+            dominant_out = out_counts[np.arange(max_units), dominant_task]
+            cross_out = np.where(
+                out_total.squeeze() > 0,
+                1.0 - dominant_out / np.maximum(out_total.squeeze(), 1),
+                0.0,
+            )
+            cross_fracs.append(float(cross_out[active].mean()))
+
+        metrics[f'layer_{l}/input_entropy'] = float(np.mean(in_entropies))
+        metrics[f'layer_{l}/output_entropy'] = float(np.mean(out_entropies))
+        metrics[f'layer_{l}/cross_task_output_frac'] = float(np.mean(cross_fracs))
 
     return metrics
 
@@ -2199,6 +2321,9 @@ def run_experiment(cfg, train_state, streams, num_classes, n_tasks, test_data=No
         step = int(train_state.step[0].item())
         structure_metrics = compute_structure_metrics(train_state)
         structure_metrics.update(compute_column_metrics(train_state, n_tasks))
+        if cfg.get('log_task_affinity', False):
+            structure_metrics.update(
+                compute_task_affinity_metrics(train_state, n_tasks))
 
         if metrics.pruned_per_layer.size > 0:
             pruned = np.array(metrics.pruned_per_layer.sum(axis=1))
@@ -2209,6 +2334,13 @@ def run_experiment(cfg, train_state, streams, num_classes, n_tasks, test_data=No
             for l in range(n_layers):
                 structure_metrics[f'layer_{l}/pruned'] = float(pruned[:, l].mean())
                 structure_metrics[f'layer_{l}/generated'] = float(generated[:, l].mean())
+
+            # Connection-level counts (nonzero only for connection mode)
+            p_conns = np.array(metrics.pruned_connections.sum(axis=1))  # (n_seeds,)
+            g_conns = np.array(metrics.generated_connections.sum(axis=1))
+            if p_conns.sum() > 0 or g_conns.sum() > 0:
+                structure_metrics['total_pruned_connections'] = float(p_conns.mean())
+                structure_metrics['total_generated_connections'] = float(g_conns.mean())
 
         # Tagged vs untagged scalar metrics (mixed_generation)
         if collect_snapshots:

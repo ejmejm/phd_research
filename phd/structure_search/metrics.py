@@ -9,6 +9,8 @@ class StepMetrics(eqx.Module):
     correct: jax.Array
     pruned_per_layer: jax.Array   # (max_layers,) — 0 on non-restructure steps
     generated_per_layer: jax.Array  # (max_layers,) — 0 on non-restructure steps
+    pruned_connections: jax.Array   # scalar — connections pruned this step (connection mode)
+    generated_connections: jax.Array  # scalar — connections added by generation this step
 
 
 def compute_structure_metrics(train_state) -> dict:
