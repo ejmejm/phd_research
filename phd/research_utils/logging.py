@@ -42,13 +42,15 @@ def flatten_dict(d, parent_key='', sep='.'):
     return dict(items)
 
 
-def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[DictConfig]:
+def init_experiment(project: str, config: Optional[DictConfig],
+                    run_name: Optional[str] = None) -> Optional[DictConfig]:
     """Initialize experiment logging with W&B or Comet ML.
-    
+
     Args:
         project: Name of the project for experiment tracking.
         config: Hydra configuration object containing experiment parameters.
-        
+        run_name: Optional name for the run (MLflow only).
+
     Returns:
         Updated configuration object, or None if no config provided.
     """
@@ -78,7 +80,7 @@ def init_experiment(project: str, config: Optional[DictConfig]) -> Optional[Dict
 
         if os.environ.get('MLFLOW_RUN_ID') is None:
             mlflow.set_experiment(project)
-        mlflow.start_run()
+        mlflow.start_run(run_name=run_name)
 
         # Cache run ID and client for thread-safe logging (mlflow.log_metrics
         # uses thread-local active run which breaks from background threads)
