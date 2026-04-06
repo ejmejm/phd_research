@@ -17,7 +17,7 @@ dataset:
 model:
   type: mlp  # 'mlp', 'dynamic', or 'block_sparse'
   target_params: null  # if set, compute hidden_dim to match this parameter budget
-  n_layers: 2
+  n_layers: 2  # Really number of hidden layers (not including the output layer)
   hidden_dim: 128
   activation: relu
   weight_init_method: lecun_uniform

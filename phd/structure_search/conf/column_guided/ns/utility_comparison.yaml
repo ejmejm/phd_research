@@ -1,10 +1,12 @@
 defaults:
-  - stationary
+  - /stationary
   - _self_
 
-variant: mixed_generation
+variant: utility_comparison
 project: column-guided-utility-deep-dive-ns
-snapshot_subsample: 10
 
 dataset:
   permute_period: 2000
+
+structure_tracker:
+  enabled: false

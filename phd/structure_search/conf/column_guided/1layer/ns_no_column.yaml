@@ -1,0 +1,17 @@
+defaults:
+  - /stationary
+  - _self_
+
+variant: no_column
+project: column-guided-1layer-ns
+
+model:
+  n_layers: 1
+  hidden_dim: 175
+  max_units_per_layer: 3000
+
+dataset:
+  permute_period: 2000
+
+structure_tracker:
+  connection_budget: 20_000

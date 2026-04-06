@@ -1,12 +1,9 @@
 defaults:
-  - stationary
+  - /stationary
   - _self_
 
-variant: utility_comparison
+variant: no_column
 project: column-guided-utility-deep-dive-ns
 
 dataset:
   permute_period: 2000
-
-structure_tracker:
-  enabled: false
