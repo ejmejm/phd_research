@@ -1,9 +1,10 @@
+# @package _global_
 defaults:
   - /stationary
   - _self_
 
 variant: no_column
-project: column-guided-1layer-ns
+project: column-guided-utility-deep-dive-ns
 
 model:
   n_layers: 1

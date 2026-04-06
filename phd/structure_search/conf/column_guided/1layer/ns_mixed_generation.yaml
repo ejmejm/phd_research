@@ -1,9 +1,10 @@
+# @package _global_
 defaults:
   - /stationary
   - _self_
 
 variant: mixed_generation
-project: column-guided-1layer-ns
+project: column-guided-utility-deep-dive-ns
 snapshot_subsample: 10
 
 model:
