@@ -185,10 +185,12 @@ def td_ipc_step(state, observation, *, T, gamma_inf, alpha, gamma_td, variant, e
     # else 'streaming': keep value_nodes as-is
 
     # 5. Run T iPC steps with s_t clamped at input, y_target at output
+    output_node = y_target  # dummy, will be overwritten since has_target=True
     info = None
     for _t in range(T):
-        network, value_nodes, info = ipc_step(
-            network, value_nodes, s_t, y_target, gamma_inf, alpha,
+        network, value_nodes, output_node, info = ipc_step(
+            network, value_nodes, output_node, s_t, gamma_inf, alpha,
+            has_target=True, y_target=y_target,
         )
 
     td_error_sq = jnp.square(reward + gamma_td * jax.lax.stop_gradient(v_next) - v_pred)

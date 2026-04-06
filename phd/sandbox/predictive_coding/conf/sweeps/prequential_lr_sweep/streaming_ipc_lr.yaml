@@ -1,0 +1,50 @@
+experiment: prequential-ipc-sweeps
+sweep_name: prequential_streaming_ipc_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_accuracy, asymptotic_infer_loss]
+  sensitivity:
+    hue: ipc.infer_weight_update
+
+parameters:
+  mlflow: true
+  log_individual_seeds: true
+
+  algorithm: prequential_ipc
+  data.ordering: shuffled
+  ipc.variant: streaming
+  ipc.T_infer: 10
+  ipc.T_learn: 10
+  ipc.T_rest: 10
+  ipc.gamma: 0.5
+
+  model.num_layers: 3
+  model.hidden_dim: 256
+  model.activation: relu
+
+  train.total_samples: 60000
+  train.log_freq: 500
+
+  ipc.alpha:
+    - "${eval:2**-18}"
+    - "${eval:2**-16}"
+    - "${eval:2**-14}"
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
+
+  ipc.infer_weight_update:
+    - true
+    - false
+
+  seed:
+    type: atomic
+    value: [1, 2, 3, 4, 5]

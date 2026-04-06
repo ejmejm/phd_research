@@ -70,18 +70,9 @@ class BPStepMetrics(eqx.Module):
 class PCTrainState(eqx.Module):
     network: PCNetwork
     value_nodes: list     # persistent across observations
+    output_node: jax.Array  # persistent output node (layer 0)
     step: jax.Array
     rng: PRNGKeyArray
-
-
-def _compute_online_prediction(network, value_nodes):
-    """Predict output class from current state (before update).
-
-    mu[0] = weights[0] @ f(value_nodes[0]) is the network's prediction of x[0].
-    """
-    f = ACTIVATION_MAP[network.activation_name]
-    mu_0 = network.weights[0] @ f(value_nodes[0])
-    return jnp.argmax(mu_0)
 
 
 def streaming_ipc_step(state, observation, *, T, gamma, alpha, variant, ema_beta):
@@ -94,27 +85,34 @@ def streaming_ipc_step(state, observation, *, T, gamma, alpha, variant, ema_beta
 
     network = state.network
     value_nodes = state.value_nodes
+    output_node = state.output_node
 
     # Online accuracy: predict BEFORE any update
-    predicted = _compute_online_prediction(network, value_nodes)
+    predicted = jnp.argmax(output_node)
     online_correct = (predicted == label).astype(jnp.float32)
 
     # Optionally reinitialize value nodes
     if variant == 'forward_init':
         value_nodes = pc_forward_pass(network, x_input)
+        f = ACTIVATION_MAP[network.activation_name]
+        output_node = network.weights[0] @ f(value_nodes[0])
     elif variant == 'ema':
         fwd_nodes = pc_forward_pass(network, x_input)
+        f = ACTIVATION_MAP[network.activation_name]
+        fwd_output = network.weights[0] @ f(fwd_nodes[0])
         value_nodes = [
             ema_beta * vn + (1.0 - ema_beta) * fn
             for vn, fn in zip(value_nodes, fwd_nodes)
         ]
-    # else 'streaming': keep value_nodes as-is
+        output_node = ema_beta * output_node + (1.0 - ema_beta) * fwd_output
+    # else 'streaming': keep value_nodes and output_node as-is
 
     # Run T iPC steps (Python for-loop, unrolled at trace time)
     info = None
     for _t in range(T):
-        network, value_nodes, info = ipc_step(
-            network, value_nodes, x_input, y_target, gamma, alpha,
+        network, value_nodes, output_node, info = ipc_step(
+            network, value_nodes, output_node, x_input, gamma, alpha,
+            has_target=True, y_target=y_target,
         )
 
     metrics = PCStepMetrics(
@@ -128,6 +126,102 @@ def streaming_ipc_step(state, observation, *, T, gamma, alpha, variant, ema_beta
         state,
         network=network,
         value_nodes=value_nodes,
+        output_node=output_node,
+        step=state.step + 1,
+    )
+    return new_state, metrics
+
+
+# ---------------------------------------------------------------------------
+# Prequential iPC step
+# ---------------------------------------------------------------------------
+
+class PrequentialPCStepMetrics(eqx.Module):
+    """Per-sample metrics from the prequential PC training loop."""
+    correct: jax.Array            # scalar: 1.0 if prediction correct after inference
+    infer_loss: jax.Array         # scalar: MSE between output_node and label after inference
+    total_energy: jax.Array       # scalar: energy after final learning step
+    layer_errors: jax.Array       # (max_layers,): per-layer squared error norms
+    weight_update_norms: jax.Array  # (max_layers,): per-layer weight update norms
+
+
+def prequential_ipc_step(state, observation, *, T_infer, T_learn, T_rest, gamma,
+                          alpha, variant, ema_beta, infer_weight_update):
+    """One prequential sample step: inference, learning, then rest.
+
+    Per-sample sequence:
+      1. T_infer steps: input clamped, no label (layer 0 free)
+      2. Measure prediction (prequential accuracy/loss)
+      3. T_learn steps: input + label clamped
+      4. T_rest steps: blank input (zeros), no label (layer 0 free)
+
+    All keyword arguments are static (traced once per unique combination).
+    """
+    x_input, label = observation
+    y_target = jax.nn.one_hot(label, NUM_CLASSES)
+    blank_input = jnp.zeros_like(x_input)
+
+    network = state.network
+    value_nodes = state.value_nodes
+    output_node = state.output_node
+
+    # Optionally reinitialize value nodes for the new sample
+    if variant == 'forward_init':
+        value_nodes = pc_forward_pass(network, x_input)
+        f = ACTIVATION_MAP[network.activation_name]
+        output_node = network.weights[0] @ f(value_nodes[0])
+    elif variant == 'ema':
+        fwd_nodes = pc_forward_pass(network, x_input)
+        f = ACTIVATION_MAP[network.activation_name]
+        fwd_output = network.weights[0] @ f(fwd_nodes[0])
+        value_nodes = [
+            ema_beta * vn + (1.0 - ema_beta) * fn
+            for vn, fn in zip(value_nodes, fwd_nodes)
+        ]
+        output_node = ema_beta * output_node + (1.0 - ema_beta) * fwd_output
+    # else 'streaming': keep as-is
+
+    # Phase 1: Inference — present input without label (layer 0 free)
+    unsupervised_alpha = alpha if infer_weight_update else 0.0
+    for _ in range(T_infer):
+        network, value_nodes, output_node, _ = ipc_step(
+            network, value_nodes, output_node, x_input, gamma, unsupervised_alpha,
+            has_target=False,
+        )
+
+    # Measure prediction at end of inference phase
+    predicted = jnp.argmax(output_node)
+    correct = (predicted == label).astype(jnp.float32)
+    infer_loss = jnp.mean(jnp.square(output_node - y_target))
+
+    # Phase 2: Learning — present input with label (layer 0 clamped)
+    info = None
+    for _ in range(T_learn):
+        network, value_nodes, output_node, info = ipc_step(
+            network, value_nodes, output_node, x_input, gamma, alpha,
+            has_target=True, y_target=y_target,
+        )
+
+    # Phase 3: Rest — no input, no label (blank input, layer 0 free)
+    for _ in range(T_rest):
+        network, value_nodes, output_node, info = ipc_step(
+            network, value_nodes, output_node, blank_input, gamma, unsupervised_alpha,
+            has_target=False,
+        )
+
+    metrics = PrequentialPCStepMetrics(
+        correct=correct,
+        infer_loss=infer_loss,
+        total_energy=info['total_energy'],
+        layer_errors=info['layer_errors'],
+        weight_update_norms=info['weight_update_norms'],
+    )
+
+    new_state = tree_replace(
+        state,
+        network=network,
+        value_nodes=value_nodes,
+        output_node=output_node,
         step=state.step + 1,
     )
     return new_state, metrics
@@ -207,13 +301,15 @@ def prepare_ipc_experiment(cfg):
             key=rng_from_string(rng, 'model'),
         )
 
-        # Initialize value nodes to zeros
+        # Initialize value nodes and output node to zeros
         L = network.num_layers
         value_nodes = [jnp.zeros(layer_dims[l]) for l in range(1, L)]
+        output_node = jnp.zeros(layer_dims[0])
 
         train_states.append(PCTrainState(
             network=network,
             value_nodes=value_nodes,
+            output_node=output_node,
             step=jnp.array(0),
             rng=rng_from_string(rng, 'train'),
         ))
@@ -352,6 +448,94 @@ def run_ipc_experiment(cfg, train_state, streams):
     return train_state, all_energies, all_accuracies
 
 
+def run_prequential_experiment(cfg, train_state, streams):
+    """Outer training loop for prequential iPC evaluation."""
+    log_freq = cfg.train.log_freq
+    total_samples = cfg.train.total_samples
+    num_scans = total_samples // log_freq
+    T_infer = cfg.ipc.T_infer
+    T_learn = cfg.ipc.T_learn
+    T_rest = cfg.ipc.T_rest
+    gamma = cfg.ipc.gamma
+    alpha = cfg.ipc.alpha
+    variant = cfg.ipc.variant
+    ema_beta = cfg.ipc.ema_beta
+    infer_weight_update = cfg.ipc.infer_weight_update
+
+    def _step(state, observation):
+        return prequential_ipc_step(
+            state, observation,
+            T_infer=T_infer, T_learn=T_learn, T_rest=T_rest,
+            gamma=gamma, alpha=alpha, variant=variant, ema_beta=ema_beta,
+            infer_weight_update=infer_weight_update,
+        )
+
+    def scan_steps(state, data):
+        return jax.lax.scan(_step, state, data, unroll=SCAN_UNROLL)
+
+    vmapped_scan = jax.jit(jax.vmap(scan_steps))
+
+    all_losses = []
+    all_energies = []
+    all_accuracies = []
+    pbar = tqdm(total=total_samples, desc='Prequential iPC Training')
+
+    log_executor = ThreadPoolExecutor(max_workers=1)
+    log_futures = []
+    logging_active = (cfg.get('mlflow', False) or cfg.get('wandb', False)
+                      or cfg.get('comet_ml', False))
+
+    for _ in range(num_scans):
+        batch = [stream.sample_batch(log_freq) for stream in streams]
+        images = jnp.array(np.stack([b[0] for b in batch]))
+        labels = jnp.array(np.stack([b[1] for b in batch]))
+
+        train_state, metrics = vmapped_scan(train_state, (images, labels))
+
+        per_seed_acc = metrics.correct.mean(axis=1)
+        per_seed_loss = metrics.infer_loss.mean(axis=1)
+        per_seed_energy = metrics.total_energy.mean(axis=1)
+        mean_acc = float(per_seed_acc.mean())
+        mean_loss = float(per_seed_loss.mean())
+        mean_energy = float(per_seed_energy.mean())
+
+        step = int(train_state.step[0].item())
+
+        if logging_active:
+            def _log(mean_acc, mean_loss, mean_energy,
+                     per_seed_acc, per_seed_loss, per_seed_energy, step):
+                log_metrics({
+                    'accuracy': mean_acc,
+                    'infer_loss': mean_loss,
+                    'energy': mean_energy,
+                    'accuracy_std': float(per_seed_acc.std()),
+                }, cfg, step=step)
+                log_child_metrics({
+                    'accuracy': per_seed_acc.tolist(),
+                    'infer_loss': per_seed_loss.tolist(),
+                    'energy': per_seed_energy.tolist(),
+                }, cfg, step=step)
+
+            log_futures.append(log_executor.submit(
+                _log, mean_acc, mean_loss, mean_energy,
+                np.array(per_seed_acc), np.array(per_seed_loss),
+                np.array(per_seed_energy), step,
+            ))
+
+        all_losses.append(mean_loss)
+        all_energies.append(mean_energy)
+        all_accuracies.append(mean_acc)
+        pbar.update(log_freq)
+        pbar.set_postfix({'loss': f'{mean_loss:.4f}', 'acc': f'{mean_acc:.4f}'})
+
+    for f in log_futures:
+        f.result()
+    log_executor.shutdown(wait=False)
+    pbar.close()
+
+    return train_state, all_losses, all_energies, all_accuracies
+
+
 def run_bp_experiment(cfg, train_state, streams):
     """Outer training loop for BP baseline."""
     log_freq = cfg.train.log_freq
@@ -445,6 +629,18 @@ def main(cfg: DictConfig) -> None:
         summary = {
             'average_loss': float(np.mean(all_losses)),
             'asymptotic_loss': float(np.mean(all_losses[-n_tail:])),
+            'asymptotic_accuracy': float(np.mean(all_accuracies[-n_tail:])),
+            'num_params': n_params,
+        }
+    elif algorithm == 'prequential_ipc':
+        train_state, streams, n_params = prepare_ipc_experiment(cfg)
+        train_state, all_losses, all_energies, all_accuracies = run_prequential_experiment(
+            cfg, train_state, streams)
+
+        n_tail = max(1, len(all_losses) // 10)
+        summary = {
+            'average_infer_loss': float(np.mean(all_losses)),
+            'asymptotic_infer_loss': float(np.mean(all_losses[-n_tail:])),
             'asymptotic_accuracy': float(np.mean(all_accuracies[-n_tail:])),
             'num_params': n_params,
         }

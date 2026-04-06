@@ -107,48 +107,64 @@ def pc_forward_pass(
 def ipc_step(
     network: PCNetwork,
     value_nodes: list,
+    output_node: jnp.ndarray,
     x_input: jnp.ndarray,
-    y_target: jnp.ndarray,
     gamma: float,
     alpha: float,
-) -> Tuple[PCNetwork, list, dict]:
+    has_target: bool = True,
+    y_target: jnp.ndarray = None,
+) -> Tuple[PCNetwork, list, jnp.ndarray, dict]:
     """One step of incremental Predictive Coding (simultaneous value + weight update).
+
+    When has_target=True, layer 0 is clamped to y_target (supervised).
+    When has_target=False, layer 0 is free and updated via prediction error.
+    Value node and weight updates happen in both cases.
 
     Args:
         network: PCNetwork with current weights
         value_nodes: list of L-1 arrays [x[1], ..., x[L-1]] (hidden layer values)
+        output_node: current output node value (layer 0); used when has_target=False,
+            updated to the network's prediction of layer 0 when has_target=True
         x_input: input observation (clamped at layer L)
-        y_target: target (clamped at layer 0), e.g. one-hot label
         gamma: inference learning rate (value node update)
         alpha: weight learning rate
+        has_target: if True, clamp layer 0 to y_target; if False, layer 0 is free
+        y_target: target (clamped at layer 0 when has_target=True)
 
     Returns:
-        (updated_network, updated_value_nodes, info_dict)
+        (updated_network, updated_value_nodes, updated_output_node, info_dict)
     """
     f = ACTIVATION_MAP[network.activation_name]
     f_prime = ACTIVATION_DERIV_MAP[network.activation_name]
     L = network.num_layers
 
-    # Build full node list: all_x[0] = y_target, all_x[1..L-1] = value_nodes, all_x[L] = x_input
-    all_x = [y_target] + list(value_nodes) + [x_input]
+    # Layer 0: clamped to target or free output node
+    if has_target:
+        all_x = [y_target] + list(value_nodes) + [x_input]
+    else:
+        all_x = [output_node] + list(value_nodes) + [x_input]
 
     # Compute predictions and errors for all layers
-    predictions = []
     errors = []
     for l in range(L):
         mu_l = network.weights[l] @ f(all_x[l + 1])
-        predictions.append(mu_l)
         errors.append(all_x[l] - mu_l)
 
     # Update hidden value nodes (layers 1 to L-1)
     new_value_nodes = []
     for l in range(1, L):
-        # Top-down prediction error at this layer
         top_down = -errors[l]
-        # Bottom-up error signal from layer below
         bottom_up = f_prime(all_x[l]) * (network.weights[l - 1].T @ errors[l - 1])
         x_new = all_x[l] + gamma * (top_down + bottom_up)
         new_value_nodes.append(x_new)
+
+    # Update output node (layer 0)
+    if has_target:
+        # After learning, set output_node to the network's prediction for layer 0
+        new_output_node = network.weights[0] @ f(new_value_nodes[0])
+    else:
+        # Free node: move toward prediction (only top-down signal, no layer below)
+        new_output_node = all_x[0] - gamma * errors[0]
 
     # Update weights (all layers)
     new_weights = []
@@ -175,7 +191,7 @@ def ipc_step(
         'weight_update_norms': jnp.array(weight_update_norms),
     }
 
-    return new_network, new_value_nodes, info
+    return new_network, new_value_nodes, new_output_node, info
 
 
 def ipc_step_grads(
