@@ -1,0 +1,49 @@
+experiment: connection-learning-260406
+sweep_name: small_static_network_baseline_sweep
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/column_guided_search.py --config-name=stationary.yaml
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  split_by: [dataset.permute_period]
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    hue: init_mode
+    params: [optimizer.learning_rate]
+
+parameters:
+  mlflow: true
+
+  dataset.n_tasks: 2
+
+  structure_tracker.enabled: false
+
+  log_task_affinity: true
+  train.eval_freq: 0
+
+  model.n_layers: 1
+  model.max_units_per_layer: 10
+  model.activation: leaky_relu
+  model.max_connections_per_unit: 32
+  model.max_fan_out: 32
+  model.hidden_dim: "'${switch:${init_mode}, random, 8, column, 10}'"
+
+  init_mode: [random, column]
+  dataset.permute_period: [0, 2000]
+  optimizer.learning_rate:
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
+    - "${eval:2**-8}"
+    - "${eval:2**-6}"
+    - "${eval:2**-4}"
+    - "${eval:2**-2}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3, 4, 5]

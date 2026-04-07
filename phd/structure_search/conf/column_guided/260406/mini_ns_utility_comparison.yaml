@@ -1,0 +1,32 @@
+# @package _global_
+defaults:
+  - /stationary
+  - _self_
+
+variant: utility_comparison
+project: connection-learning-260406
+
+model:
+  n_layers: 1
+  max_units_per_layer: 3000
+  activation: leaky_relu
+  max_connections_per_unit: 32
+  max_fan_out: 32
+  model.hidden_dim: 10 # 8
+
+dataset:
+  n_tasks: 2
+  permute_period: 2000  # Sweep [0, 2000]
+
+structure_tracker:
+  enabled: false
+  connection_budget: 300 # 20_000
+
+optimizer:
+  learning_rate: 0.02
+
+init_mode: column # Sweep [random, column]
+log_task_affinity: true
+train.eval_freq: 0
+
+seed: [1, 2, 3, 4, 5]

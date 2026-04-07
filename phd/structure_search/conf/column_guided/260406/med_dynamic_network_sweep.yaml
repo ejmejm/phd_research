@@ -1,0 +1,53 @@
+experiment: connection-learning-260406
+sweep_name: med_dynamic_network_sweep
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/column_guided_search.py --config-name=1layer/ns_no_column.yaml
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  split_by: [dataset.permute_period]
+  metrics: [asymptotic_loss, asymptotic_accuracy, layer_0/input_entropy, layer_0/output_entropy]
+  sensitivity:
+    hue: structure_tracker.prune_rate
+    params: [optimizer.learning_rate]
+
+parameters:
+  mlflow: true
+
+  dataset.n_tasks: 2
+
+  structure_tracker.connection_budget: 20_000
+  structure_tracker.mode: connection
+  structure_tracker.prune_frequency: 100
+  structure_tracker.max_new_units_per_step: 80
+
+  log_task_affinity: true
+
+  train.total_steps: 600_000
+  train.eval_freq: 0
+
+  model.n_layers: 1
+  model.hidden_dim: 205
+  model.max_units_per_layer: 2000
+  model.activation: leaky_relu
+  model.max_connections_per_unit: 64
+  model.max_fan_out: 64
+
+  structure_tracker.prune_rate: [0.001, 0.0001] # 0.01
+  dataset.permute_period: [0, 2000]
+  optimizer.learning_rate:
+    - "${eval:2**-13}"
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+    - "${eval:2**-5}"
+
+  seed:
+    type: atomic
+    value: [1, 2, 3, 4, 5]
