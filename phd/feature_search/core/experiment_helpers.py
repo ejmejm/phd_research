@@ -26,6 +26,11 @@ if not omegaconf.OmegaConf.has_resolver('eval'):
 if not omegaconf.OmegaConf.has_resolver('as_tuple'):
     omegaconf.OmegaConf.register_new_resolver('as_tuple', lambda *args: tuple(args))
 
+if not omegaconf.OmegaConf.has_resolver('switch'):
+    omegaconf.OmegaConf.register_new_resolver(
+        'switch', lambda key, *pairs: dict(zip(pairs[::2], pairs[1::2]))[key]
+    )
+
 
 def prepare_task(cfg: DictConfig, seed: Optional[int] = None):
     """Prepare the task based on configuration."""

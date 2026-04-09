@@ -1103,6 +1103,28 @@ def _prune_mask_to_buf_mask(
 
 
 
+def _get_reset_value(optimizer_state, field_idx, val):
+    """Determine the reset value for an optimizer state field.
+
+    For most optimizers, affected entries reset to zero. For IDBD, the ``beta``
+    field (index 1) resets to ``init_beta`` (index 0) so the learning rate
+    returns to its initial value rather than becoming exp(0)=1.
+    """
+    from phd.jax_core.optimizers.idbd import IDBDState
+    if isinstance(optimizer_state, IDBDState) and field_idx == 1:
+        # beta field → reset to init_beta (scalar broadcast)
+        return jnp.full_like(val.weights, optimizer_state.init_beta)
+    return jnp.zeros_like(val.weights)
+
+
+def _get_reset_value_output(optimizer_state, field_idx, val):
+    """Same as _get_reset_value but for output_weights."""
+    from phd.jax_core.optimizers.idbd import IDBDState
+    if isinstance(optimizer_state, IDBDState) and field_idx == 1:
+        return jnp.full_like(val.output_weights, optimizer_state.init_beta)
+    return jnp.zeros_like(val.output_weights)
+
+
 def _reset_optimizer_state(
     optimizer: EqxOptimizer,
     model: DynamicNetwork,
@@ -1113,6 +1135,8 @@ def _reset_optimizer_state(
     Zeros momentum/variance for:
     - weights[layer, unit_idx, :] (incoming connections)
     - output_weights[:, buf_pos] (output connections)
+
+    For IDBD, resets beta to init_beta instead of zero.
     """
     buf_positions = _unit_buf_positions(model)
     buf_mask = _prune_mask_to_buf_mask(affected_mask, buf_positions, model.buffer_size)
@@ -1133,9 +1157,10 @@ def _reset_optimizer_state(
             new_fields.append(val)
         elif hasattr(val, 'weights') and hasattr(val, 'output_weights'):
             # val is a filtered DynamicNetwork PyTree — has .weights and .output_weights
-            # Use zeros_like to preserve dtype (e.g. Adam step counts are int32)
-            new_w = jnp.where(weights_mask, jnp.zeros_like(val.weights), val.weights)
-            new_ow = jnp.where(output_mask, jnp.zeros_like(val.output_weights), val.output_weights)
+            reset_w = _get_reset_value(core_state, i, val)
+            reset_ow = _get_reset_value_output(core_state, i, val)
+            new_w = jnp.where(weights_mask, reset_w, val.weights)
+            new_ow = jnp.where(output_mask, reset_ow, val.output_weights)
             new_val = eqx.tree_at(
                 lambda v: (v.weights, v.output_weights), val, (new_w, new_ow),
             )
@@ -1549,8 +1574,10 @@ def _reset_optimizer_state_connections(
         if val is None:
             new_fields.append(val)
         elif hasattr(val, 'weights') and hasattr(val, 'output_weights'):
-            new_w = jnp.where(weights_mask, jnp.zeros_like(val.weights), val.weights)
-            new_ow = jnp.where(output_mask, jnp.zeros_like(val.output_weights), val.output_weights)
+            reset_w = _get_reset_value(core_state, i, val)
+            reset_ow = _get_reset_value_output(core_state, i, val)
+            new_w = jnp.where(weights_mask, reset_w, val.weights)
+            new_ow = jnp.where(output_mask, reset_ow, val.output_weights)
             new_val = eqx.tree_at(
                 lambda v: (v.weights, v.output_weights), val, (new_w, new_ow),
             )

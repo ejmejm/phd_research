@@ -1824,7 +1824,15 @@ def train_step(
     predicted = jnp.argmax(outputs_r, axis=-1)  # (batch_size, n_tasks)
     correct = (predicted == labels).astype(jnp.float32).mean()
 
-    updates, new_optimizer = train_state.optimizer.with_update(grads, train_state.model)
+    # Optimizer update (IDBD needs prediction gradients in addition to loss gradients)
+    if train_state.optimizer.name == 'idbd':
+        output_grads = eqx.filter_grad(
+            lambda m: jax.vmap(m)(images)[0].mean(axis=0).sum()
+        )(train_state.model)
+        updates, new_optimizer = train_state.optimizer.with_update(
+            (grads, output_grads), train_state.model)
+    else:
+        updates, new_optimizer = train_state.optimizer.with_update(grads, train_state.model)
     new_model = eqx.apply_updates(train_state.model, updates)
     new_model = sync_outgoing_weights(new_model)
 
