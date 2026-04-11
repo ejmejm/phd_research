@@ -931,6 +931,137 @@ def free_generate(
     return model, unit_stats, new_budget, gen_mask_2d, gen_info
 
 
+def single_output_generate(
+    model: DynamicNetwork,
+    unit_stats: UnitStats,
+    budget: Float[Array, ''],
+    max_new_units: int,
+    init_utility: Float[Array, ''],
+    rng: PRNGKeyArray,
+    output_connect_strategy: str = 'all',
+    *,
+    n_tasks: int,
+):
+    """Like free_generate but each new unit connects to exactly one random output neuron.
+
+    Incoming connections are sampled the same as free_generate (unrestricted).
+    Each unit gets exactly 1 outgoing connection to a randomly chosen output neuron.
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    input_dim = model.input_dim
+    buffer_size = model.buffer_size
+    output_dim = model.output_dim
+
+    n_total_slots = max_layers * max_units
+    max_new_units = min(max_new_units, n_total_slots)
+
+    rng, slot_rng, sample_rng, output_rng = jax.random.split(rng, 4)
+
+    # --- Find and shuffle inactive slots ---
+    inactive_flat = (model.unit_mask == 0).reshape(-1)
+    noise = jax.random.uniform(slot_rng, (n_total_slots,))
+    sort_key = jnp.where(inactive_flat, noise, 2.0)
+    perm = jnp.argsort(sort_key)
+    cand_flat_idx = perm[:max_new_units]
+    cand_layers = cand_flat_idx // max_units
+    cand_units = cand_flat_idx % max_units
+    cand_valid = inactive_flat[cand_flat_idx]
+
+    # --- Unrestricted source availability ---
+    buf_idx = jnp.arange(buffer_size)
+    is_input = buf_idx < input_dim
+    is_hidden = buf_idx >= input_dim
+    safe_buf = jnp.maximum(buf_idx - input_dim, 0)
+    hidden_layer_of_j = safe_buf // max_units
+    hidden_is_active = model.unit_mask[hidden_layer_of_j, safe_buf % max_units]
+
+    target_l = jnp.arange(max_layers)[:, None]
+    src_l = hidden_layer_of_j[None, :]
+
+    available = (
+        is_input[None, :]
+        | (is_hidden[None, :] & (src_l < target_l) & hidden_is_active[None, :])
+    )
+
+    # --- Sample input connections per candidate ---
+    sample_keys = jax.random.split(sample_rng, max_new_units)
+
+    def sample_one_unit(key, cand_layer):
+        _, key2, key3 = jax.random.split(key, 3)
+        avail = available[cand_layer]
+        n_available = jnp.sum(avail)
+        half_conns = jnp.maximum(max_conns // 2, 1)
+        n_conns = jnp.minimum(n_available, half_conns)
+        n_conns = jnp.maximum(n_conns, 1)
+        shuffle_noise = jax.random.uniform(key2, (buffer_size,))
+        shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
+        sorted_idx = jnp.argsort(shuffle_key)
+        selected = sorted_idx[:max_conns]
+        conn_active = jnp.arange(max_conns) < n_conns
+        new_indices = jnp.where(conn_active, selected, -1).astype(jnp.int32)
+        bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(n_conns, 1).astype(jnp.float32))
+        new_weights = jax.random.uniform(key3, (max_conns,), minval=-bound, maxval=bound)
+        new_weights = jnp.where(conn_active, new_weights, 0.0)
+        return new_indices, new_weights, n_conns, n_available
+
+    all_indices, all_weights, all_input_costs, all_n_avail = jax.vmap(
+        sample_one_unit
+    )(sample_keys, cand_layers)
+
+    cand_valid = cand_valid & (all_n_avail > 0)
+
+    # Exactly 1 outgoing connection per unit
+    n_out_per_unit = jnp.ones(max_new_units, dtype=jnp.int32)
+    all_costs = all_input_costs + 1
+
+    costs_if_valid = jnp.where(cand_valid, all_costs.astype(jnp.float32), 0.0)
+    cumulative_cost = jnp.cumsum(costs_if_valid)
+    gen_mask = cand_valid & (cumulative_cost <= budget)
+
+    old_indices = model.input_indices[cand_layers, cand_units]
+    new_input_indices = model.input_indices.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask[:, None], all_indices, old_indices)
+    )
+    new_weights_arr = model.weights.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask[:, None], all_weights, model.weights[cand_layers, cand_units])
+    )
+    new_unit_mask = model.unit_mask.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 1, model.unit_mask[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    new_activation_indices = model.activation_indices.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 0, model.activation_indices[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    model = eqx.tree_at(
+        lambda m: (m.input_indices, m.weights, m.unit_mask, m.activation_indices),
+        model,
+        (new_input_indices, new_weights_arr, new_unit_mask, new_activation_indices),
+    )
+
+    new_utility = unit_stats.utility.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, init_utility, unit_stats.utility[cand_layers, cand_units])
+    )
+    new_age = unit_stats.age.at[cand_layers, cand_units].set(
+        jnp.where(gen_mask, 0, unit_stats.age[cand_layers, cand_units]).astype(jnp.int32)
+    )
+    unit_stats = UnitStats(age=new_age, utility=new_utility, accumulator=unit_stats.accumulator)
+
+    spent = jnp.sum(jnp.where(gen_mask, all_costs.astype(jnp.float32), 0.0))
+    new_budget = budget - spent
+
+    gen_mask_2d = jnp.zeros((max_layers, max_units), dtype=jnp.bool_)
+    gen_mask_2d = gen_mask_2d.at[cand_layers, cand_units].set(gen_mask)
+
+    gen_info = (cand_layers, cand_units, gen_mask, n_out_per_unit)
+
+    # Assign the single outgoing connection (random output neuron, no hidden targets)
+    model = assign_outgoing_relaxed(
+        model, gen_info, max_new_units, output_rng, n_tasks=n_tasks, column_priority=False,
+    )
+    return model, unit_stats, new_budget, gen_mask_2d, gen_info
+
+
 # ---------------------------------------------------------------------------
 # Mixed generation (column + free with tag protection)
 # ---------------------------------------------------------------------------
@@ -1723,6 +1854,9 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
         elif variant == 'no_column':
             utility_fn = normalized_contribution_utility
             generate_fn = partial(free_generate, n_tasks=n_tasks)
+        elif variant == 'single_output':
+            utility_fn = normalized_contribution_utility
+            generate_fn = partial(single_output_generate, n_tasks=n_tasks)
         elif variant == 'utility_comparison':
             utility_fn = normalized_contribution_utility
             generate_fn = partial(column_generate, n_tasks=n_tasks)  # unused
