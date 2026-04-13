@@ -133,6 +133,45 @@ def batch_purity_entropy_linear(all_M: np.ndarray, input_per_task: int = 784,
     return purs, ents
 
 
+def task_alignment_linear(M: np.ndarray, input_per_task: int = 784,
+                          n_tasks: int = 2,
+                          num_classes: int = 10) -> float:
+    """Fraction of active connections whose input-task matches the output
+    neuron's task. Output neurons are assumed block-indexed by task:
+    neurons [k*C, (k+1)*C) serve task k with C=num_classes per task.
+
+    Robust to small budgets (the per-unit purity metric degenerates to
+    ~1.0 when most units have only 1 connection).
+    """
+    M = np.asarray(M)
+    output_dim = M.shape[0]
+    assert output_dim == n_tasks * num_classes, (
+        f'output_dim={output_dim} must equal n_tasks*num_classes='
+        f'{n_tasks * num_classes}')
+    total = int(M.sum())
+    if total == 0:
+        return 0.0
+    aligned = 0
+    for t in range(n_tasks):
+        out_lo, out_hi = t * num_classes, (t + 1) * num_classes
+        in_lo, in_hi = t * input_per_task, (t + 1) * input_per_task
+        aligned += int(M[out_lo:out_hi, in_lo:in_hi].sum())
+    return aligned / total
+
+
+def batch_task_alignment_linear(all_M: np.ndarray,
+                                input_per_task: int = 784,
+                                n_tasks: int = 2,
+                                num_classes: int = 10) -> np.ndarray:
+    all_M = np.asarray(all_M)
+    S = all_M.shape[0]
+    out = np.zeros(S)
+    for s in range(S):
+        out[s] = task_alignment_linear(
+            all_M[s], input_per_task, n_tasks, num_classes)
+    return out
+
+
 # ─── MLflow ───────────────────────────────────────────────────────────
 
 def mlflow_start(run_name: str, params: Dict[str, Any]):

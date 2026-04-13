@@ -36,6 +36,7 @@ configure_jax(OmegaConf.create(dict(
 
 from common import (
     batch_purity_entropy_linear,
+    batch_task_alignment_linear,
     ci95,
     mlflow_log_aggregate,
     mlflow_log_trajectory,
@@ -125,10 +126,14 @@ def prune_and_generate_one(W, M, U, rng):
 
 # ─── Run one seed ─────────────────────────────────────────────────────
 
-def build_run_fn(mnist_images, mnist_labels, variant: str, n_cycles: int):
+def build_run_fn(mnist_images, mnist_labels, variant: str, n_cycles: int,
+                 budget: int = BUDGET):
     """Return a JIT+vmap-ed run function:
         run_all(rngs, lr) -> (final_M, per_cycle_loss)
     `variant` ∈ {'dynamic', 'fixed_random', 'fixed_intask'}.
+    `budget` is the total connection budget (used for the init mask; the
+    dynamic prune/gen loop preserves it by pruning 1 and generating 1
+    each cycle).
     """
     assert variant in ('dynamic', 'fixed_random', 'fixed_intask')
     is_dynamic = (variant == 'dynamic')
@@ -145,12 +150,12 @@ def build_run_fn(mnist_images, mnist_labels, variant: str, n_cycles: int):
         # --- Init mask ---
         rng, mkey = jax.random.split(rng)
         if variant == 'dynamic':
-            M = sample_init_mask_dynamic(mkey, OUTPUT_DIM, INPUT_DIM, BUDGET)
+            M = sample_init_mask_dynamic(mkey, OUTPUT_DIM, INPUT_DIM, budget)
         elif variant == 'fixed_random':
-            M = sample_fixed_mask_random(mkey, OUTPUT_DIM, INPUT_DIM, BUDGET)
+            M = sample_fixed_mask_random(mkey, OUTPUT_DIM, INPUT_DIM, budget)
         else:  # fixed_intask
             M = sample_fixed_mask_intask(mkey, OUTPUT_DIM, INPUT_DIM,
-                                         BUDGET, N_TASKS)
+                                         budget, N_TASKS)
 
         W = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
         U = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
@@ -233,11 +238,14 @@ def aggregate_results(all_M, all_cycle_loss, n_cycles: int):
     window_steps = np.arange(1, n_windows + 1) * WINDOW_LOG_CYCLES * SPP
 
     purs, ents = batch_purity_entropy_linear(all_M, INPUT_PER_TASK, N_TASKS)
+    aligns = batch_task_alignment_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
 
     return dict(
         final_losses=final_losses,
         purities=purs,
         entropies=ents,
+        alignments=aligns,
         windowed_loss=windowed,
         window_steps=window_steps,
     )
@@ -245,27 +253,28 @@ def aggregate_results(all_M, all_cycle_loss, n_cycles: int):
 
 # ─── Runner ──────────────────────────────────────────────────────────
 
-# Cache compiled run fns across LR sweeps. Key = (variant, n_seeds, n_cycles).
+# Cache compiled run fns. Key = (variant, n_seeds, n_cycles, budget).
 # The persistent XLA cache (configure_jax) handles cross-process caching; this
 # dict avoids rebuilding the traced+vmapped Python wrapper each call.
 _RUN_FN_CACHE = {}
 
 
 def get_run_fn(variant: str, n_seeds: int, n_cycles: int,
-               mnist_images, mnist_labels):
-    key = (variant, n_seeds, n_cycles)
+               mnist_images, mnist_labels, budget: int = BUDGET):
+    key = (variant, n_seeds, n_cycles, budget)
     if key not in _RUN_FN_CACHE:
         _RUN_FN_CACHE[key] = build_run_fn(
-            mnist_images, mnist_labels, variant, n_cycles)
+            mnist_images, mnist_labels, variant, n_cycles, budget=budget)
     return _RUN_FN_CACHE[key]
 
 
 def run_variant(variant: str, lr: float, n_seeds: int, n_cycles: int,
-                mnist_images, mnist_labels):
-    """Run one (variant, lr) configuration across n_seeds and return
-    aggregated results."""
+                mnist_images, mnist_labels, budget: int = BUDGET):
+    """Run one (variant, lr, budget) configuration across n_seeds and
+    return aggregated results."""
     rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
-    run_fn = get_run_fn(variant, n_seeds, n_cycles, mnist_images, mnist_labels)
+    run_fn = get_run_fn(variant, n_seeds, n_cycles, mnist_images,
+                        mnist_labels, budget)
 
     t0 = time.time()
     all_M, all_cycle_loss = run_fn(rngs, jnp.float32(lr))
@@ -281,19 +290,22 @@ def summarize(results, label: str):
     fl = results['final_losses']
     pu = results['purities']
     en = results['entropies']
+    al = results['alignments']
     print(f'  {label:<50} loss={fl.mean():.4f}+/-{ci95(fl):.4f}  '
+          f'align={al.mean():.3f}+/-{ci95(al):.3f}  '
           f'pur={pu.mean():.3f}+/-{ci95(pu):.3f}  '
           f'ent={en.mean():.3f}+/-{ci95(en):.3f}  '
           f'({results["elapsed"]:.0f}s)')
 
 
 def log_run(run_name: str, variant: str, lr: float, n_seeds: int,
-            n_cycles: int, results, log_trajectory: bool = True):
+            n_cycles: int, results, log_trajectory: bool = True,
+            step: int = 1, budget: int = BUDGET, extra_params=None):
     import mlflow
-    mlflow_module = mlflow_start(run_name, dict(
-        step=1,
+    params = dict(
+        step=step,
         variant=variant,
-        budget=BUDGET,
+        budget=budget,
         ema_decay=EMA_DECAY,
         spp=SPP,
         ppe=PPE,
@@ -303,12 +315,17 @@ def log_run(run_name: str, variant: str, lr: float, n_seeds: int,
         n_seeds=n_seeds,
         lr=lr,
         eval_window_steps=EVAL_WINDOW_CYCLES * SPP,
-    ))
+    )
+    if extra_params:
+        params.update(extra_params)
+    mlflow_module = mlflow_start(run_name, params)
     try:
         mlflow_log_aggregate(mlflow_module, 'final_loss',
                              results['final_losses'])
         mlflow_log_aggregate(mlflow_module, 'purity', results['purities'])
         mlflow_log_aggregate(mlflow_module, 'entropy', results['entropies'])
+        mlflow_log_aggregate(mlflow_module, 'task_alignment',
+                             results['alignments'])
         if log_trajectory:
             mlflow_log_trajectory(mlflow_module, 'loss_window_5k',
                                   results['windowed_loss'],
