@@ -5,6 +5,7 @@ linear masks, MLflow run setup, and a ci95 helper. Per-experiment JAX
 code lives in the step scripts.
 """
 
+import os
 from typing import Any, Dict, Optional
 
 import jax
@@ -13,7 +14,20 @@ import numpy as np
 
 
 MLFLOW_PROJECT = 'local_pruning_progression'
-MLFLOW_TRACKING_URI = 'sqlite:///mlruns.db'
+# Fallback if MLFLOW_TRACKING_URI env var isn't set. Matches the default
+# in phd/research_utils/logging.py (MLFLOW_DEFAULT_TRACKING_URI).
+_DEFAULT_MLFLOW_TRACKING_URI = 'sqlite:///mlruns.db'
+
+
+def resolve_mlflow_tracking_uri() -> str:
+    """Return the MLflow tracking URI, resolving relative sqlite paths to
+    absolute (so the DB location doesn't depend on CWD). Matches the
+    prelude in phd/structure_search/train.py:5-8."""
+    uri = os.environ.get('MLFLOW_TRACKING_URI', _DEFAULT_MLFLOW_TRACKING_URI)
+    prefix = 'sqlite:///'
+    if uri.startswith(prefix) and not os.path.isabs(uri[len(prefix):]):
+        uri = f'sqlite:///{os.path.abspath(uri[len(prefix):])}'
+    return uri
 
 
 # ─── Stats ────────────────────────────────────────────────────────────
@@ -124,11 +138,13 @@ def batch_purity_entropy_linear(all_M: np.ndarray, input_per_task: int = 784,
 def mlflow_start(run_name: str, params: Dict[str, Any]):
     """Start an MLflow run under the progression's shared project.
 
-    Returns the mlflow module (already imported) so the caller can
-    log further metrics/params. Uses a flat sqlite tracking URI.
+    Uses the MLFLOW_TRACKING_URI env var (the convention in train.py and
+    the sweep configs), falling back to sqlite:///mlruns.db. Relative
+    sqlite paths are resolved to absolute so the DB doesn't depend on
+    CWD. Returns the mlflow module for further logging.
     """
     import mlflow
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_tracking_uri(resolve_mlflow_tracking_uri())
     mlflow.set_experiment(MLFLOW_PROJECT)
     mlflow.start_run(run_name=run_name)
     mlflow.log_params({k: str(v) for k, v in params.items()})
