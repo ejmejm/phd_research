@@ -88,6 +88,45 @@ def loss_fn(W, M, x, y):
     return -jnp.mean(jnp.sum(jax.nn.one_hot(y, NUM_CLASSES) * lp, axis=-1))
 
 
+# ─── Utility functions ────────────────────────────────────────────────
+#
+# Both return a per-connection utility of shape (OUTPUT_DIM, INPUT_DIM),
+# already masked by M. EMA is applied by the caller.
+
+def contribution_utility(W, M, x, y):
+    """Step 1's utility: |x| * |W| * M. Always non-negative. Rewards
+    high-activity inputs with non-trivial weights."""
+    return jnp.abs(x)[None, :] * jnp.abs(W) * M
+
+
+def signed_utility(W, M, x, y):
+    """Signed LOO utility per connection, extended per-logit for softmax CE:
+        U[k, i] = |e_k + c[k,i]| - |e_k|
+    where
+        e_k      = onehot_k - softmax_k   (per-logit probability-space error)
+        c[k, i]  = W[k,i] * x[i]          (per-connection logit contribution)
+
+    Positive U ⇒ removing the connection would grow |e_k| (connection is
+    helping). Negative U ⇒ removing it would shrink |e_k| (connection is
+    actively hurting). Task-misaligned connections have c independent of
+    e_k, so their signed utility fluctuates sign-wise and EMAs toward ~0
+    or negative; aligned connections accumulate positive U.
+    """
+    logits = forward(W, M, x).reshape(N_TASKS, NUM_CLASSES)
+    softmax = jax.nn.softmax(logits, axis=-1)
+    onehot = jax.nn.one_hot(y, NUM_CLASSES)
+    e = (onehot - softmax).reshape(-1)           # (OUTPUT_DIM,)
+    c = W * x[None, :]                            # (OUTPUT_DIM, INPUT_DIM)
+    u = jnp.abs(e[:, None] + c) - jnp.abs(e[:, None])
+    return u * M
+
+
+UTILITY_FNS = {
+    'contribution': contribution_utility,
+    'signed': signed_utility,
+}
+
+
 # ─── Prune + generate ─────────────────────────────────────────────────
 
 def prune_and_generate_one(W, M, U, rng):
@@ -127,16 +166,19 @@ def prune_and_generate_one(W, M, U, rng):
 # ─── Run one seed ─────────────────────────────────────────────────────
 
 def build_run_fn(mnist_images, mnist_labels, variant: str, n_cycles: int,
-                 budget: int = BUDGET):
+                 budget: int = BUDGET, utility_fn: str = 'contribution'):
     """Return a JIT+vmap-ed run function:
         run_all(rngs, lr) -> (final_M, per_cycle_loss)
     `variant` ∈ {'dynamic', 'fixed_random', 'fixed_intask'}.
     `budget` is the total connection budget (used for the init mask; the
     dynamic prune/gen loop preserves it by pruning 1 and generating 1
     each cycle).
+    `utility_fn` ∈ {'contribution', 'signed'}. Ignored for fixed variants.
     """
     assert variant in ('dynamic', 'fixed_random', 'fixed_intask')
+    assert utility_fn in UTILITY_FNS, f'unknown utility_fn: {utility_fn}'
     is_dynamic = (variant == 'dynamic')
+    utility_impl = UTILITY_FNS[utility_fn]
 
     def make_sample(key):
         k1, k2 = jax.random.split(key)
@@ -173,7 +215,7 @@ def build_run_fn(mnist_images, mnist_labels, variant: str, n_cycles: int,
             loss, g = jax.value_and_grad(loss_fn)(W, M, x, y)
             W = W - lr * g * M
 
-            u = jnp.abs(x)[None, :] * jnp.abs(W) * M
+            u = utility_impl(W, M, x, y)
             U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
 
             step = step + 1
@@ -253,28 +295,31 @@ def aggregate_results(all_M, all_cycle_loss, n_cycles: int):
 
 # ─── Runner ──────────────────────────────────────────────────────────
 
-# Cache compiled run fns. Key = (variant, n_seeds, n_cycles, budget).
+# Cache compiled run fns. Key = (variant, n_seeds, n_cycles, budget, utility_fn).
 # The persistent XLA cache (configure_jax) handles cross-process caching; this
 # dict avoids rebuilding the traced+vmapped Python wrapper each call.
 _RUN_FN_CACHE = {}
 
 
 def get_run_fn(variant: str, n_seeds: int, n_cycles: int,
-               mnist_images, mnist_labels, budget: int = BUDGET):
-    key = (variant, n_seeds, n_cycles, budget)
+               mnist_images, mnist_labels, budget: int = BUDGET,
+               utility_fn: str = 'contribution'):
+    key = (variant, n_seeds, n_cycles, budget, utility_fn)
     if key not in _RUN_FN_CACHE:
         _RUN_FN_CACHE[key] = build_run_fn(
-            mnist_images, mnist_labels, variant, n_cycles, budget=budget)
+            mnist_images, mnist_labels, variant, n_cycles,
+            budget=budget, utility_fn=utility_fn)
     return _RUN_FN_CACHE[key]
 
 
 def run_variant(variant: str, lr: float, n_seeds: int, n_cycles: int,
-                mnist_images, mnist_labels, budget: int = BUDGET):
-    """Run one (variant, lr, budget) configuration across n_seeds and
-    return aggregated results."""
+                mnist_images, mnist_labels, budget: int = BUDGET,
+                utility_fn: str = 'contribution'):
+    """Run one (variant, lr, budget, utility_fn) configuration across
+    n_seeds and return aggregated results."""
     rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
     run_fn = get_run_fn(variant, n_seeds, n_cycles, mnist_images,
-                        mnist_labels, budget)
+                        mnist_labels, budget, utility_fn)
 
     t0 = time.time()
     all_M, all_cycle_loss = run_fn(rngs, jnp.float32(lr))

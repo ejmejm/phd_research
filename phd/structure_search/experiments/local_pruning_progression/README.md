@@ -209,13 +209,52 @@ All runs logged to MLflow as `step2_{variant}_budget{B}` under project
 5. **The "sweet spot" for combined separation + capacity is around
    budget 150–500.** This is where the alignment signal is maximal
    AND the network still has enough capacity to produce useful loss.
-   For follow-on steps (signed utility, hidden layers, per-unit
-   budgets), budget=150 or 500 is a more discriminating operating
-   point than 1500.
+   For follow-on steps (hidden layers, per-unit budgets), budget=150
+   or 500 is a more discriminating operating point than 1500.
+
+## Step 3 — Signed utility
+
+**Hypothesis**: the signed LOO utility `U = |e_k + c[k,i]| − |e_k|`,
+where `e_k = onehot_k − softmax_k` and `c = W[k,i] · x[i]`, should
+give cross-task connections with active inputs negative utility (c is
+uncorrelated with e, so |e+c|−|e| fluctuates sign-wise and EMAs toward
+~0 or negative), while aligned connections accumulate positive U.
+
+Same setup as step 2 (same budget sweep, same lr=0.16, same 225k steps),
+just swapping contribution utility for signed utility in the dynamic
+method. Fixed baselines are unchanged (they don't use utility).
+
+### Results (20 seeds, 95% CI)
+
+Side-by-side with step 2's contribution utility:
+
+| Budget | Utility | Loss | Alignment |
+|:--:|:--|:--:|:--:|
+| 1500 | contribution | 1.040 ± 0.007 | 0.572 ± 0.006 |
+| 1500 | signed       | 1.038 ± 0.008 | 0.575 ± 0.006 |
+| 500  | contribution | 1.206 ± 0.008 | 0.767 ± 0.006 |
+| 500  | signed       | 1.217 ± 0.013 | 0.770 ± 0.006 |
+| 150  | contribution | 1.725 ± 0.014 | 0.832 ± 0.011 |
+| 150  | signed       | 1.764 ± 0.012 | 0.814 ± 0.009 |
+| 50   | contribution | 2.086 ± 0.008 | 0.792 ± 0.023 |
+| 50   | signed       | 2.102 ± 0.010 | 0.774 ± 0.022 |
+| 20   | contribution | 2.217 ± 0.006 | 0.745 ± 0.037 |
+| 20   | signed       | 2.222 ± 0.006 | 0.733 ± 0.038 |
+
+All runs logged as `step3_dynamic_signed_budget{B}`.
+
+### Interpretation
+
+**Signed utility does not improve over contribution utility.** The two
+are essentially identical across all budgets — differences are within CI
+noise and if anything signed is slightly worse (lower alignment at
+budget=150: 0.814 vs 0.832).
 
 ## Scripts
 
 | Script | Purpose |
 |:--|:--|
-| `common.py` | Shared utilities — fixed mask samplers, purity/entropy, MLflow helpers |
-| `01_linear_global.py` | Step 1: linear model, global pruning method + 2 fixed baselines, with LR sweep |
+| `common.py` | Shared utilities — fixed mask samplers, purity/entropy/alignment, MLflow helpers |
+| `01_linear_global.py` | Steps 1–3 core: linear model, global pruning, configurable utility + budget |
+| `02_budget_sweep.py` | Step 2: budget sweep at contribution utility |
+| `03_signed_utility.py` | Step 3: signed LOO utility across same budget sweep |
