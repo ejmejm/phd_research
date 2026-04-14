@@ -1,28 +1,93 @@
-"""Shared utilities for the local_pruning_progression experiments.
+"""Shared utilities and JAX experiment core for local_pruning_progression.
 
-Intentionally minimal — covers fixed-mask sampling, purity/entropy on
-linear masks, MLflow run setup, and a ci95 helper. Per-experiment JAX
-code lives in the step scripts.
+Contains all the JAX training code (forward, loss, utilities,
+build_run_fn, run_variant, aggregate_results) and shared helpers
+(mask samplers, metrics, MLflow, data loading). Step scripts import
+from here and only define their sweep config + objective function.
 """
 
 import os
-from typing import Any, Dict, Optional
+import sys
+from typing import Any, Dict
+
+# Make phd/structure_search/ and the repo root importable.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, '..', '..'))
+sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', '..'))
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from omegaconf import OmegaConf
 
+from phd.jax_core.utils import configure_jax
+
+# Configure JAX persistent XLA compile cache + device before any jit.
+configure_jax(OmegaConf.create(dict(
+    jax_jit_cache_dir='/tmp/jax_cache',
+    device='gpu',
+)))
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Constants
+# ═════════════════════════════════════════════════════════════════════
 
 MLFLOW_PROJECT = 'local_pruning_progression'
-# Fallback if MLFLOW_TRACKING_URI env var isn't set. Matches the default
-# in phd/research_utils/logging.py (MLFLOW_DEFAULT_TRACKING_URI).
+
+N_TASKS = 2
+NUM_CLASSES = 10
+INPUT_PER_TASK = 784
+INPUT_DIM = INPUT_PER_TASK * N_TASKS       # 1568
+OUTPUT_DIM = NUM_CLASSES * N_TASKS         # 20
+BUDGET = 1500
+EMA_DECAY = 0.998
+PERMUTE_PERIOD = 4000
+SPP = 50                                    # steps per prune event
+PPE = 1                                     # connections pruned per event
+N_CYCLES = 4500                             # 4500 * 50 = 225k steps
+TOTAL_STEPS = N_CYCLES * SPP
+EVAL_WINDOW_CYCLES = 800                    # last 40k steps
+WINDOW_LOG_CYCLES = 100                     # 5k step granularity
+N_SEEDS = 20
+BASE_SEED = 42
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Data
+# ═════════════════════════════════════════════════════════════════════
+
+_MNIST_CACHE = {}
+
+def load_mnist():
+    if 'data' not in _MNIST_CACHE:
+        from data import load_dataset
+        images, labels, _, _ = load_dataset('mnist', split='train')
+        _MNIST_CACHE['data'] = (
+            jnp.array(images, dtype=jnp.float32),
+            jnp.array(labels, dtype=jnp.int32),
+        )
+    return _MNIST_CACHE['data']
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Stats
+# ═════════════════════════════════════════════════════════════════════
+
+def ci95(arr: np.ndarray) -> float:
+    arr = np.asarray(arr)
+    return float(1.96 * arr.std(ddof=0) / np.sqrt(len(arr)))
+
+
+# ═════════════════════════════════════════════════════════════════════
+# MLflow helpers
+# ═════════════════════════════════════════════════════════════════════
+
 _DEFAULT_MLFLOW_TRACKING_URI = 'sqlite:///mlruns.db'
 
 
 def resolve_mlflow_tracking_uri() -> str:
-    """Return the MLflow tracking URI, resolving relative sqlite paths to
-    absolute (so the DB location doesn't depend on CWD). Matches the
-    prelude in phd/structure_search/train.py:5-8."""
     uri = os.environ.get('MLFLOW_TRACKING_URI', _DEFAULT_MLFLOW_TRACKING_URI)
     prefix = 'sqlite:///'
     if uri.startswith(prefix) and not os.path.isabs(uri[len(prefix):]):
@@ -30,23 +95,34 @@ def resolve_mlflow_tracking_uri() -> str:
     return uri
 
 
-# ─── Stats ────────────────────────────────────────────────────────────
+def resolve_optuna_tracking_uri() -> str:
+    default = 'sqlite:///optuna.db'
+    uri = os.environ.get('OPTUNA_TRACKING_URI', default)
+    prefix = 'sqlite:///'
+    if uri.startswith(prefix) and not os.path.isabs(uri[len(prefix):]):
+        uri = f'sqlite:///{os.path.abspath(uri[len(prefix):])}'
+    return uri
 
-def ci95(arr: np.ndarray) -> float:
-    arr = np.asarray(arr)
-    return float(1.96 * arr.std(ddof=0) / np.sqrt(len(arr)))
+
+def log_result_metrics(results: dict):
+    """Log aggregated metrics to the currently-active MLflow run."""
+    import mlflow
+    for name, arr in [('final_loss', results['final_losses']),
+                      ('alignment', results['alignments']),
+                      ('purity', results['purities']),
+                      ('entropy', results['entropies'])]:
+        mlflow.log_metric(name, float(arr.mean()))
+        mlflow.log_metric(f'{name}_ci95', ci95(arr))
 
 
-# ─── Fixed-mask samplers (used for baselines) ─────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# Fixed-mask samplers
+# ═════════════════════════════════════════════════════════════════════
 
 def sample_fixed_mask_random(key, output_dim: int, input_dim: int,
                              budget: int) -> jnp.ndarray:
-    """Uniformly sample `budget` of the output_dim*input_dim possible
-    connections. Returns an int32 mask of shape (output_dim, input_dim)."""
     total = output_dim * input_dim
-    assert budget <= total, f'budget {budget} exceeds total slots {total}'
     noise = jax.random.uniform(key, (total,))
-    # Take the `budget` smallest-noise indices.
     picks = jnp.argsort(noise)[:budget]
     flat = jnp.zeros(total, dtype=jnp.int32).at[picks].set(1)
     return flat.reshape(output_dim, input_dim)
@@ -54,17 +130,11 @@ def sample_fixed_mask_random(key, output_dim: int, input_dim: int,
 
 def sample_fixed_mask_intask(key, output_dim: int, input_dim: int,
                              budget: int, n_tasks: int = 2) -> jnp.ndarray:
-    """Block-diagonal random mask: budget/n_tasks connections sampled
-    uniformly within each task's (output_dim/n_tasks × input_dim/n_tasks)
-    block. Budget must divide evenly across tasks."""
     assert budget % n_tasks == 0
-    assert output_dim % n_tasks == 0 and input_dim % n_tasks == 0
     out_per = output_dim // n_tasks
     in_per = input_dim // n_tasks
     budget_per = budget // n_tasks
     block = out_per * in_per
-    assert budget_per <= block
-
     M = jnp.zeros((output_dim, input_dim), dtype=jnp.int32)
     keys = jax.random.split(key, n_tasks)
     for t in range(n_tasks):
@@ -77,77 +147,45 @@ def sample_fixed_mask_intask(key, output_dim: int, input_dim: int,
     return M
 
 
-def sample_init_mask_dynamic(key, output_dim: int, input_dim: int,
-                             budget: int) -> jnp.ndarray:
-    """Initial mask for the dynamic method — same as random fixed,
-    just gets pruned/regenerated during the run."""
+def sample_init_mask_dynamic(key, output_dim, input_dim, budget):
     return sample_fixed_mask_random(key, output_dim, input_dim, budget)
 
 
-# ─── Purity / entropy on a linear mask ────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# Purity / entropy / alignment
+# ═════════════════════════════════════════════════════════════════════
 
-def purity_entropy_linear(M: np.ndarray, input_per_task: int = 784,
-                          n_tasks: int = 2) -> tuple:
-    """Compute per-seed (purity, entropy).
-
-    M shape: (output_dim, input_dim). For each output neuron, split its
-    active inputs by task block and compute purity = max(t_k) / sum(t_k)
-    and normalized binary entropy. Units with no active inputs are
-    skipped. Averages over units.
-    """
+def purity_entropy_linear(M, input_per_task=784, n_tasks=2):
     M = np.asarray(M)
-    output_dim = M.shape[0]
     purs, ents = [], []
-    for u in range(output_dim):
+    for u in range(M.shape[0]):
         counts = np.array([
             int(M[u, t * input_per_task:(t + 1) * input_per_task].sum())
-            for t in range(n_tasks)
-        ])
+            for t in range(n_tasks)])
         total = counts.sum()
         if total == 0:
             continue
         purs.append(counts.max() / total)
         ps = counts / total
-        e = 0.0
-        for p in ps:
-            if p > 0:
-                e -= p * np.log2(p)
+        e = sum(-p * np.log2(p) for p in ps if p > 0)
         ents.append(e / np.log2(n_tasks))
     if not purs:
         return 0.0, 1.0
     return float(np.mean(purs)), float(np.mean(ents))
 
 
-def batch_purity_entropy_linear(all_M: np.ndarray, input_per_task: int = 784,
-                                n_tasks: int = 2):
-    """Apply purity_entropy_linear to each seed in a (S, output, input) mask.
-    Returns (purs, ents) arrays of shape (S,)."""
+def batch_purity_entropy_linear(all_M, input_per_task=784, n_tasks=2):
     all_M = np.asarray(all_M)
     S = all_M.shape[0]
-    purs = np.zeros(S)
-    ents = np.zeros(S)
+    purs, ents = np.zeros(S), np.zeros(S)
     for s in range(S):
-        p, e = purity_entropy_linear(all_M[s], input_per_task, n_tasks)
-        purs[s] = p
-        ents[s] = e
+        purs[s], ents[s] = purity_entropy_linear(
+            all_M[s], input_per_task, n_tasks)
     return purs, ents
 
 
-def task_alignment_linear(M: np.ndarray, input_per_task: int = 784,
-                          n_tasks: int = 2,
-                          num_classes: int = 10) -> float:
-    """Fraction of active connections whose input-task matches the output
-    neuron's task. Output neurons are assumed block-indexed by task:
-    neurons [k*C, (k+1)*C) serve task k with C=num_classes per task.
-
-    Robust to small budgets (the per-unit purity metric degenerates to
-    ~1.0 when most units have only 1 connection).
-    """
+def task_alignment_linear(M, input_per_task=784, n_tasks=2, num_classes=10):
     M = np.asarray(M)
-    output_dim = M.shape[0]
-    assert output_dim == n_tasks * num_classes, (
-        f'output_dim={output_dim} must equal n_tasks*num_classes='
-        f'{n_tasks * num_classes}')
     total = int(M.sum())
     if total == 0:
         return 0.0
@@ -159,10 +197,8 @@ def task_alignment_linear(M: np.ndarray, input_per_task: int = 784,
     return aligned / total
 
 
-def batch_task_alignment_linear(all_M: np.ndarray,
-                                input_per_task: int = 784,
-                                n_tasks: int = 2,
-                                num_classes: int = 10) -> np.ndarray:
+def batch_task_alignment_linear(all_M, input_per_task=784, n_tasks=2,
+                                num_classes=10):
     all_M = np.asarray(all_M)
     S = all_M.shape[0]
     out = np.zeros(S)
@@ -172,39 +208,191 @@ def batch_task_alignment_linear(all_M: np.ndarray,
     return out
 
 
-# ─── MLflow ───────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# Model + utility functions
+# ═════════════════════════════════════════════════════════════════════
 
-def mlflow_start(run_name: str, params: Dict[str, Any]):
-    """Start an MLflow run under the progression's shared project.
-
-    Uses the MLFLOW_TRACKING_URI env var (the convention in train.py and
-    the sweep configs), falling back to sqlite:///mlruns.db. Relative
-    sqlite paths are resolved to absolute so the DB doesn't depend on
-    CWD. Returns the mlflow module for further logging.
-    """
-    import mlflow
-    mlflow.set_tracking_uri(resolve_mlflow_tracking_uri())
-    mlflow.set_experiment(MLFLOW_PROJECT)
-    mlflow.start_run(run_name=run_name)
-    mlflow.log_params({k: str(v) for k, v in params.items()})
-    return mlflow
+def forward(W, M, x):
+    return (W * M) @ x
 
 
-def mlflow_log_aggregate(mlflow, name: str, values: np.ndarray):
-    """Log mean and 95% CI of a (S,) seed array as two metrics."""
-    values = np.asarray(values)
-    mlflow.log_metric(name, float(values.mean()))
-    mlflow.log_metric(f'{name}_ci95', ci95(values))
+def loss_fn(W, M, x, y):
+    logits = forward(W, M, x).reshape(N_TASKS, NUM_CLASSES)
+    lp = jax.nn.log_softmax(logits, axis=-1)
+    return -jnp.mean(jnp.sum(jax.nn.one_hot(y, NUM_CLASSES) * lp, axis=-1))
 
 
-def mlflow_log_trajectory(mlflow, name: str, values: np.ndarray,
-                          steps: np.ndarray):
-    """Log a mean-across-seeds trajectory, one point per (value, step) pair.
+def contribution_utility(W, M, x, y):
+    return jnp.abs(x)[None, :] * jnp.abs(W) * M
 
-    values: (S, T), steps: (T,)
-    """
-    values = np.asarray(values)
-    steps = np.asarray(steps)
-    mean = values.mean(axis=0)
-    for t, s in enumerate(steps):
-        mlflow.log_metric(name, float(mean[t]), step=int(s))
+
+def signed_utility(W, M, x, y):
+    logits = forward(W, M, x).reshape(N_TASKS, NUM_CLASSES)
+    softmax = jax.nn.softmax(logits, axis=-1)
+    onehot = jax.nn.one_hot(y, NUM_CLASSES)
+    e = (onehot - softmax).reshape(-1)
+    c = W * x[None, :]
+    u = jnp.abs(e[:, None] + c) - jnp.abs(e[:, None])
+    return u * M
+
+
+UTILITY_FNS = {
+    'contribution': contribution_utility,
+    'signed': signed_utility,
+}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Prune + generate
+# ═════════════════════════════════════════════════════════════════════
+
+def prune_and_generate_one(W, M, U, rng):
+    prune_key, gen_key, noise_key = jax.random.split(rng, 3)
+
+    noise = jax.random.uniform(noise_key, M.shape,
+                               minval=-1e-10, maxval=1e-10)
+    scores = jnp.where(M == 1, U + noise, jnp.inf)
+    prune_idx = jnp.argmin(scores.reshape(-1))
+
+    flat_M = M.reshape(-1).at[prune_idx].set(0)
+    flat_W = W.reshape(-1).at[prune_idx].set(0.0)
+    flat_U = U.reshape(-1).at[prune_idx].set(0.0)
+    M, W, U = flat_M.reshape(M.shape), flat_W.reshape(W.shape), flat_U.reshape(U.shape)
+
+    gen_noise = jax.random.uniform(gen_key, M.shape)
+    gen_scores = jnp.where(M == 0, gen_noise, 2.0)
+    gen_idx = jnp.argmin(gen_scores.reshape(-1))
+
+    n_active = jnp.sum(M).astype(jnp.float32)
+    mean_u = jnp.where(n_active > 0, jnp.sum(U) / n_active, 0.0)
+
+    flat_M = M.reshape(-1).at[gen_idx].set(1)
+    flat_W = W.reshape(-1).at[gen_idx].set(0.0)
+    flat_U = U.reshape(-1).at[gen_idx].set(mean_u)
+    return flat_W.reshape(W.shape), flat_M.reshape(M.shape), flat_U.reshape(U.shape)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Build JIT+vmap run function
+# ═════════════════════════════════════════════════════════════════════
+
+_RUN_FN_CACHE = {}
+
+
+def build_run_fn(mnist_images, mnist_labels, variant: str,
+                 n_cycles: int = N_CYCLES, budget: int = BUDGET,
+                 utility_fn: str = 'contribution'):
+    assert variant in ('dynamic', 'fixed_random', 'fixed_intask')
+    assert utility_fn in UTILITY_FNS
+    is_dynamic = (variant == 'dynamic')
+    utility_impl = UTILITY_FNS[utility_fn]
+
+    def make_sample(key):
+        k1, k2 = jax.random.split(key)
+        idx1 = jax.random.randint(k1, (), 0, mnist_images.shape[0])
+        idx2 = jax.random.randint(k2, (), 0, mnist_images.shape[0])
+        x = jnp.concatenate([mnist_images[idx1], mnist_images[idx2]])
+        y = jnp.array([mnist_labels[idx1], mnist_labels[idx2]])
+        return x, y
+
+    def run_one(rng, lr):
+        rng, mkey = jax.random.split(rng)
+        if variant == 'dynamic':
+            M = sample_init_mask_dynamic(mkey, OUTPUT_DIM, INPUT_DIM, budget)
+        elif variant == 'fixed_random':
+            M = sample_fixed_mask_random(mkey, OUTPUT_DIM, INPUT_DIM, budget)
+        else:
+            M = sample_fixed_mask_intask(mkey, OUTPUT_DIM, INPUT_DIM,
+                                         budget, N_TASKS)
+
+        W = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        U = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        step = jnp.array(0, dtype=jnp.int32)
+        perm0 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        perm1 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+
+        def train_step(carry, inputs):
+            W, M, U, step, perm0, perm1 = carry
+            data_key, perm_key = inputs
+            x, y_raw = make_sample(data_key)
+            y = jnp.array([perm0[y_raw[0]], perm1[y_raw[1]]])
+            loss_val, g = jax.value_and_grad(loss_fn)(W, M, x, y)
+            W = W - lr * g * M
+            u = utility_impl(W, M, x, y)
+            U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
+            step = step + 1
+            should_perm = (step >= PERMUTE_PERIOD) & (step % PERMUTE_PERIOD == 0)
+            pk1, pk2 = jax.random.split(perm_key)
+            which = jax.random.randint(pk1, (), 0, N_TASKS)
+            new_perm = jax.random.permutation(pk2, NUM_CLASSES).astype(jnp.int32)
+            perm0 = jnp.where(should_perm & (which == 0), new_perm, perm0)
+            perm1 = jnp.where(should_perm & (which == 1), new_perm, perm1)
+            return (W, M, U, step, perm0, perm1), loss_val
+
+        def prune_cycle(carry, _):
+            W, M, U, step, perm0, perm1, rng = carry
+            rng, tk, pk = jax.random.split(rng, 3)
+            data_keys = jax.random.split(tk, SPP)
+            perm_keys = jax.random.split(pk, SPP)
+            (W, M, U, step, perm0, perm1), losses = jax.lax.scan(
+                train_step, (W, M, U, step, perm0, perm1),
+                (data_keys, perm_keys))
+            cycle_loss = losses.mean()
+            if is_dynamic:
+                rng, prune_key = jax.random.split(rng)
+                W, M, U = prune_and_generate_one(W, M, U, prune_key)
+            return (W, M, U, step, perm0, perm1, rng), cycle_loss
+
+        (W, M, U, step, perm0, perm1, rng), per_cycle_loss = jax.lax.scan(
+            prune_cycle, (W, M, U, step, perm0, perm1, rng),
+            None, length=n_cycles)
+        return M, per_cycle_loss
+
+    @jax.jit
+    def run_all(rngs, lr):
+        return jax.vmap(lambda r: run_one(r, lr))(rngs)
+
+    return run_all
+
+
+def get_run_fn(variant, n_seeds, n_cycles=N_CYCLES, budget=BUDGET,
+               utility_fn='contribution'):
+    key = (variant, n_seeds, n_cycles, budget, utility_fn)
+    if key not in _RUN_FN_CACHE:
+        mnist_images, mnist_labels = load_mnist()
+        _RUN_FN_CACHE[key] = build_run_fn(
+            mnist_images, mnist_labels, variant, n_cycles,
+            budget=budget, utility_fn=utility_fn)
+    return _RUN_FN_CACHE[key]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Aggregate + run
+# ═════════════════════════════════════════════════════════════════════
+
+def aggregate_results(all_M, all_cycle_loss, n_cycles=N_CYCLES):
+    all_M = np.asarray(all_M)
+    all_cycle_loss = np.asarray(all_cycle_loss)
+    S = all_cycle_loss.shape[0]
+    final_losses = all_cycle_loss[:, -EVAL_WINDOW_CYCLES:].mean(axis=1)
+    n_windows = n_cycles // WINDOW_LOG_CYCLES
+    trimmed = all_cycle_loss[:, :n_windows * WINDOW_LOG_CYCLES]
+    windowed = trimmed.reshape(S, n_windows, WINDOW_LOG_CYCLES).mean(axis=2)
+    window_steps = np.arange(1, n_windows + 1) * WINDOW_LOG_CYCLES * SPP
+    purs, ents = batch_purity_entropy_linear(all_M, INPUT_PER_TASK, N_TASKS)
+    aligns = batch_task_alignment_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
+    return dict(
+        final_losses=final_losses, purities=purs, entropies=ents,
+        alignments=aligns, windowed_loss=windowed, window_steps=window_steps,
+    )
+
+
+def run_variant(variant, lr, n_seeds=N_SEEDS, n_cycles=N_CYCLES,
+                budget=BUDGET, utility_fn='contribution'):
+    """Run one configuration across seeds, return aggregated results dict."""
+    rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
+    run_fn = get_run_fn(variant, n_seeds, n_cycles, budget, utility_fn)
+    all_M, all_cycle_loss = run_fn(rngs, jnp.float32(lr))
+    jax.block_until_ready((all_M, all_cycle_loss))
+    return aggregate_results(all_M, all_cycle_loss, n_cycles)
