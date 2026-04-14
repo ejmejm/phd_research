@@ -105,7 +105,11 @@ def resolve_optuna_tracking_uri() -> str:
 
 
 def log_result_metrics(results: dict):
-    """Log aggregated metrics to the currently-active MLflow run."""
+    """Log aggregated metrics to the currently-active MLflow run.
+
+    Logs final scalars (mean + CI95) and a per-5k-step loss trajectory
+    (mean across seeds) so convergence is visible in MLflow.
+    """
     import mlflow
     for name, arr in [('final_loss', results['final_losses']),
                       ('alignment', results['alignments']),
@@ -113,6 +117,13 @@ def log_result_metrics(results: dict):
                       ('entropy', results['entropies'])]:
         mlflow.log_metric(name, float(arr.mean()))
         mlflow.log_metric(f'{name}_ci95', ci95(arr))
+
+    # Loss trajectory (mean across seeds, one point per 5k-step window).
+    windowed = np.asarray(results['windowed_loss'])   # (S, T)
+    steps = np.asarray(results['window_steps'])       # (T,)
+    mean_traj = windowed.mean(axis=0)
+    for t, s in enumerate(steps):
+        mlflow.log_metric('loss_window_5k', float(mean_traj[t]), step=int(s))
 
 
 # ═════════════════════════════════════════════════════════════════════
