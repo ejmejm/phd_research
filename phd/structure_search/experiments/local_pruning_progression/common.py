@@ -44,12 +44,14 @@ OUTPUT_DIM = NUM_CLASSES * N_TASKS         # 20
 BUDGET = 1500
 EMA_DECAY = 0.998
 PERMUTE_PERIOD = 4000
-SPP = 50                                    # steps per prune event
+SPP = 50                                    # default steps per prune event
 PPE = 1                                     # connections pruned per event
-N_CYCLES = 4500                             # 4500 * 50 = 225k steps
-TOTAL_STEPS = N_CYCLES * SPP
-EVAL_WINDOW_CYCLES = 800                    # last 40k steps
-WINDOW_LOG_CYCLES = 100                     # 5k step granularity
+N_CYCLES = 4500                             # default 4500 * 50 = 225k steps
+TOTAL_STEPS = N_CYCLES * SPP                # 225000 — target for step-based sweeps
+EVAL_WINDOW_CYCLES = 800                    # last 40k steps (at default SPP)
+EVAL_WINDOW_STEPS = EVAL_WINDOW_CYCLES * SPP
+WINDOW_LOG_CYCLES = 100                     # 5k step granularity (at default SPP)
+WINDOW_LOG_STEPS = WINDOW_LOG_CYCLES * SPP
 N_SEEDS = 20
 BASE_SEED = 42
 
@@ -467,12 +469,17 @@ def prune_nonpositive(W, M, U):
     return W * keep, M * keep, U * keep, n_pruned
 
 
-def build_run_fn_step4(mnist_images, mnist_labels, max_cycles=N_CYCLES):
+def build_run_fn_step4(mnist_images, mnist_labels, max_cycles=N_CYCLES,
+                       spp=SPP):
     """Build JIT+vmap run function for step 4 threshold pruning.
 
     Starts fully connected, prunes all connections with signed utility <= 0
-    every SPP steps. Stops pruning after 3 consecutive zero-prune events.
+    every `spp` steps. Stops pruning after 3 consecutive zero-prune events.
     Training continues post-convergence for the eval window.
+
+    Note: each cycle runs `spp` training steps THEN prunes. So the first
+    prune event is at step `spp`, not at step 0 — the utility EMA always
+    has at least `spp` steps of warmup before any pruning decision.
     """
     utility_impl = signed_utility
 
@@ -522,8 +529,8 @@ def build_run_fn_step4(mnist_images, mnist_labels, max_cycles=N_CYCLES):
             (W, M, U, step, perm0, perm1, rng,
              consecutive_zeros, converged, converge_cycle) = carry
             rng, tk, pk = jax.random.split(rng, 3)
-            data_keys = jax.random.split(tk, SPP)
-            perm_keys = jax.random.split(pk, SPP)
+            data_keys = jax.random.split(tk, spp)
+            perm_keys = jax.random.split(pk, spp)
             (W, M, U, step, perm0, perm1), losses = jax.lax.scan(
                 train_step, (W, M, U, step, perm0, perm1),
                 (data_keys, perm_keys))
@@ -573,17 +580,17 @@ def build_run_fn_step4(mnist_images, mnist_labels, max_cycles=N_CYCLES):
     return run_all
 
 
-def get_run_fn_step4(n_seeds, max_cycles=N_CYCLES):
-    key = ('step4', n_seeds, max_cycles)
+def get_run_fn_step4(n_seeds, max_cycles=N_CYCLES, spp=SPP):
+    key = ('step4', n_seeds, max_cycles, spp)
     if key not in _RUN_FN_CACHE:
         mnist_images, mnist_labels = load_mnist()
         _RUN_FN_CACHE[key] = build_run_fn_step4(
-            mnist_images, mnist_labels, max_cycles)
+            mnist_images, mnist_labels, max_cycles, spp)
     return _RUN_FN_CACHE[key]
 
 
 def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
-                            converge_cycles, max_cycles=N_CYCLES):
+                            converge_cycles, max_cycles=N_CYCLES, spp=SPP):
     all_M = np.asarray(all_M)
     all_cycle_loss = np.asarray(all_cycle_loss)
     all_pruned = np.asarray(all_pruned)
@@ -591,13 +598,26 @@ def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
     converge_cycles = np.asarray(converge_cycles)
     S = all_cycle_loss.shape[0]
 
-    final_losses = all_cycle_loss[:, -EVAL_WINDOW_CYCLES:].mean(axis=1)
+    # Eval window: last EVAL_WINDOW_STEPS of training
+    eval_window_cycles = min(EVAL_WINDOW_STEPS // spp, max_cycles)
+    if eval_window_cycles < 1:
+        eval_window_cycles = 1
+    final_losses = all_cycle_loss[:, -eval_window_cycles:].mean(axis=1)
 
-    # Windowed loss trajectory (same granularity as steps 1-3)
-    n_windows = max_cycles // WINDOW_LOG_CYCLES
-    trimmed = all_cycle_loss[:, :n_windows * WINDOW_LOG_CYCLES]
-    windowed = trimmed.reshape(S, n_windows, WINDOW_LOG_CYCLES).mean(axis=2)
-    window_steps = np.arange(1, n_windows + 1) * WINDOW_LOG_CYCLES * SPP
+    # Trajectory windows: every WINDOW_LOG_STEPS of training
+    window_log_cycles = max(1, WINDOW_LOG_STEPS // spp)
+    n_windows = max_cycles // window_log_cycles
+    n_trim = n_windows * window_log_cycles
+    trimmed = all_cycle_loss[:, :n_trim]
+    windowed = trimmed.reshape(S, n_windows, window_log_cycles).mean(axis=2)
+    window_steps = np.arange(1, n_windows + 1) * window_log_cycles * spp
+
+    trimmed_pruned = all_pruned[:, :n_trim]
+    pruned_windowed = trimmed_pruned.reshape(
+        S, n_windows, window_log_cycles).sum(axis=2).mean(axis=0)
+    trimmed_active = all_active[:, :n_trim]
+    active_windowed = trimmed_active.reshape(
+        S, n_windows, window_log_cycles)[:, :, -1].mean(axis=0)
 
     purs, ents = batch_purity_entropy_linear(all_M, INPUT_PER_TASK, N_TASKS)
     aligns = batch_task_alignment_linear(
@@ -605,30 +625,44 @@ def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
     f1s = batch_task_separation_f1_linear(
         all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
 
-    # Per-seed final budget (n_active at convergence)
+    # Per-seed final budget (n_active at convergence). For seeds that
+    # never converged, converge_cycles == max_cycles, so clip.
     cc_clipped = np.minimum(converge_cycles, max_cycles - 1)
     final_budgets = all_active[np.arange(S), cc_clipped].astype(np.float64)
+
+    # Convergence steps (= converge_cycles * spp) for easier reporting
+    converge_steps = converge_cycles.astype(np.float64) * spp
 
     return dict(
         final_losses=final_losses, purities=purs, entropies=ents,
         alignments=aligns, separation_f1s=f1s,
         windowed_loss=windowed, window_steps=window_steps,
         converge_cycles=converge_cycles.astype(np.float64),
+        converge_steps=converge_steps,
         final_budgets=final_budgets,
         pruned_trajectory=all_pruned, active_trajectory=all_active,
+        pruned_windowed=pruned_windowed, active_windowed=active_windowed,
+        spp=spp,
     )
 
 
-def run_threshold_variant(lr, n_seeds=N_SEEDS, max_cycles=N_CYCLES):
-    """Run step 4 threshold pruning across seeds, return aggregated results."""
+def run_threshold_variant(lr, n_seeds=N_SEEDS, spp=SPP,
+                          total_steps=TOTAL_STEPS):
+    """Run step 4 threshold pruning across seeds, return aggregated results.
+
+    Holds total training steps constant across spp values — n_cycles is
+    derived as total_steps // spp so each run sees the same amount of
+    training.
+    """
+    max_cycles = total_steps // spp
     rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
-    run_fn = get_run_fn_step4(n_seeds, max_cycles)
+    run_fn = get_run_fn_step4(n_seeds, max_cycles, spp)
     out = run_fn(rngs, jnp.float32(lr))
     all_M, all_cycle_loss, all_pruned, all_active, converge_cycles = out
     jax.block_until_ready(out)
     return aggregate_results_step4(
         all_M, all_cycle_loss, all_pruned, all_active,
-        converge_cycles, max_cycles)
+        converge_cycles, max_cycles, spp)
 
 
 def log_result_metrics_step4(results):
@@ -637,24 +671,16 @@ def log_result_metrics_step4(results):
     log_result_metrics(results)
 
     for name, arr in [('converge_cycle', results['converge_cycles']),
+                      ('converge_step', results['converge_steps']),
                       ('final_budget', results['final_budgets'])]:
         mlflow.log_metric(name, float(np.mean(arr)))
         mlflow.log_metric(f'{name}_ci95', ci95(arr))
 
-    # Log pruned/active trajectories (windowed, every WINDOW_LOG_CYCLES)
-    pruned = np.asarray(results['pruned_trajectory'])
-    active = np.asarray(results['active_trajectory'])
-    S, T = pruned.shape
-    n_windows = T // WINDOW_LOG_CYCLES
-    window_steps = np.arange(1, n_windows + 1) * WINDOW_LOG_CYCLES * SPP
-
-    pruned_windowed = pruned[:, :n_windows * WINDOW_LOG_CYCLES].reshape(
-        S, n_windows, WINDOW_LOG_CYCLES).sum(axis=2).mean(axis=0)
-    active_windowed = active[:, :n_windows * WINDOW_LOG_CYCLES].reshape(
-        S, n_windows, WINDOW_LOG_CYCLES)[:, :, -1].mean(axis=0)
-
+    window_steps = results['window_steps']
+    pruned_w = results['pruned_windowed']
+    active_w = results['active_windowed']
     for t, s in enumerate(window_steps):
-        mlflow.log_metric('n_pruned_window', float(pruned_windowed[t]),
+        mlflow.log_metric('n_pruned_window', float(pruned_w[t]),
                           step=int(s))
-        mlflow.log_metric('n_active', float(active_windowed[t]),
+        mlflow.log_metric('n_active', float(active_w[t]),
                           step=int(s))
