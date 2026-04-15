@@ -250,6 +250,105 @@ are essentially identical across all budgets — differences are within CI
 noise and if anything signed is slightly worse (lower alignment at
 budget=150: 0.814 vs 0.832).
 
+## Step 4 — Threshold pruning from fully connected
+
+**Hypothesis**: the prior steps are unstable because they always prune the
+*globally lowest-utility* connection, no matter how useful it actually is —
+the network is in constant churn. Step 4 swaps that for a **fixed threshold
+at zero**: start fully connected, and at each prune event remove every
+connection with signed EMA utility ≤ 0. No generation. The network stops
+pruning once no harmful connections remain (3 consecutive prune events
+with zero pruned), and then trains without any further topology changes.
+The final connectivity is whatever the network naturally settles on.
+
+Setup: linear, non-stationary multi-MNIST, 20 seeds, 4500 max cycles
+(225k steps), SPP=50, signed utility, EMA γ=0.998. Init: M = ones
+(all 31,360 connections active). After convergence, training continues
+for the eval window. LR swept separately since the fully-connected
+gradient scale is very different from the budget=1500 regime.
+
+### Separation metric note
+
+Alignment (precision = TP / (TP+FP)) can be gamed by pruning everything
+except a handful of correctly-aligned connections. Step 4 therefore adds
+**separation F1**: treat each (output, input) pair as a classification
+problem where the label is "input's task == output's task" and the
+prediction is "connection active". Then:
+
+- TP = active connection & input in right task
+- FP = active connection & input in wrong task
+- FN = inactive connection & input in right task (missed coverage)
+- Precision = TP/(TP+FP) = current alignment metric
+- Recall = TP/(TP+FN) = fraction of same-task inputs that are connected
+- F1 = harmonic mean of the two — penalizes both cross-task noise *and*
+  missing same-task coverage.
+
+Reference points (20 outputs × 1568 inputs, 15,680 possible aligned):
+oracle intask at budget=1500 → F1=0.175 (perfect precision, limited
+coverage); fully connected → F1=0.667 (perfect recall, half precision);
+"gamed" 1 aligned connection → F1=0.0001.
+
+### LR sweep (20 seeds, 95% CI)
+
+Powers of 2 centered on 2^-5 = 0.03125.
+
+| LR | Loss | Alignment (P) | Sep-F1 | Purity | Budget | Converge cycle |
+|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| 2^-7 (0.0078) | 1.987 ± 0.055 | 0.828 ± 0.011 | 0.153 ± 0.023 | 0.822 | 1615 ± 265 | 791 ± 50 |
+| 2^-6 (0.0156) | 1.668 ± 0.060 | 0.857 ± 0.009 | 0.180 ± 0.024 | 0.837 | 1874 ± 284 | 892 ± 81 |
+| **2^-5 (0.0313)** | **0.985 ± 0.011** | 0.713 ± 0.008 | **0.381 ± 0.008** | 0.716 | 5757 ± 241 | 500 ± 69 |
+| 2^-4 (0.0625) | 1.207 ± 0.011 | 0.503 ± 0.000 | 0.548 ± 0.002 | 0.508 | 18765 ± 152 | 49 ± 11 |
+| 2^-3 (0.125) | 2.398 ± 0.021 | 0.500 ± 0.000 | 0.550 ± 0.002 | 0.507 | 19153 ± 161 | 18 ± 2 |
+
+All runs logged as `step4_threshold_lr_sweep_lr={value}` under project
+`local_pruning_progression`.
+
+### Interpretation
+
+1. **Best LR drops ~5×** from step 1. Previous steps peaked at lr=0.16;
+   step 4 peaks at **lr=2^-5 ≈ 0.031** and lr=2^-3 = 0.125 already collapses
+   (loss 2.40, essentially uniform). The fully-connected init has ~21× more
+   active connections than budget=1500, so the summed gradient is much larger
+   and a smaller LR is needed to avoid weight blow-up.
+
+2. **Step 4 roughly matches step 1's dynamic method on loss at its best LR:**
+   0.985 vs 1.040. The network keeps ~5,800 connections — about 4× the
+   budget=1500 setting — so the capacity-vs-sparsity trade-off tilts in
+   step 4's favor. Not apples-to-apples with steps 1–3, but it demonstrates
+   that the threshold mechanism finds a useful operating point without
+   needing a hand-picked budget.
+
+3. **Final budget is strongly LR-dependent.** Low LR (2^-7–2^-6) prunes
+   aggressively to ~1,600–1,900 connections because weights barely move and
+   most connections accumulate near-zero (hence non-positive) utility. High
+   LR (2^-4–2^-3) barely prunes at all (~19,000 kept) because large weight
+   magnitudes make almost every contribution look useful. Medium LR (2^-5)
+   lands in between: enough signal to distinguish useful from useless,
+   enough pressure to prune the latter.
+
+4. **Convergence happens well within the run budget** for all viable LRs —
+   cycle 500 at lr=2^-5 (25k steps), and never later than cycle ~900. The
+   eval window (last 800 cycles = 40k steps) is always fully post-convergence
+   at the best LR, so the reported losses reflect the **stable pruned
+   network**, not a still-changing one.
+
+5. **Alignment is misleading; separation-F1 tells the real story.** Low-LR
+   configs look great on alignment (0.83–0.86) but their F1 is terrible
+   (0.15–0.18) — they prune so aggressively that they only cover a tiny
+   fraction of useful same-task inputs, so the "high alignment" is mostly
+   a small-budget artefact. At the best-loss lr=2^-5, alignment is lower
+   (0.713) but F1 is the highest among trained configurations (0.381) —
+   the network keeps ~2× more of the possible aligned connections than
+   the low-LR regime while still having ~71% of its connections aligned.
+   The high-LR configs (2^-4, 2^-3) have higher F1 (0.548, 0.550) than lr=2^-5
+   only because they're essentially fully connected, which is the F1
+   ceiling for a non-separating network (P=0.5, R=1.0).
+
+6. **The stability goal is met.** At lr=2^-5, the topology freezes at cycle
+   500 (25k steps); the remaining 200k steps train under a fixed network.
+   No churn. This is a qualitatively different operating regime from the
+   constantly-rewiring dynamic methods in steps 1–3.
+
 ## Scripts
 
 | Script | Purpose |
@@ -258,3 +357,4 @@ budget=150: 0.814 vs 0.832).
 | `01_linear_global.py` | Steps 1–3 core: linear model, global pruning, configurable utility + budget |
 | `02_budget_sweep.py` | Step 2: budget sweep at contribution utility |
 | `03_signed_utility.py` | Step 3: signed LOO utility across same budget sweep |
+| `04_threshold_pruning.py` | Step 4: LR sweep for threshold pruning from fully connected |

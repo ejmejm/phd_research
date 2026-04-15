@@ -113,6 +113,7 @@ def log_result_metrics(results: dict):
     import mlflow
     for name, arr in [('final_loss', results['final_losses']),
                       ('alignment', results['alignments']),
+                      ('separation_f1', results['separation_f1s']),
                       ('purity', results['purities']),
                       ('entropy', results['entropies'])]:
         mlflow.log_metric(name, float(arr.mean()))
@@ -215,6 +216,48 @@ def batch_task_alignment_linear(all_M, input_per_task=784, n_tasks=2,
     out = np.zeros(S)
     for s in range(S):
         out[s] = task_alignment_linear(
+            all_M[s], input_per_task, n_tasks, num_classes)
+    return out
+
+
+def task_separation_f1_linear(M, input_per_task=784, n_tasks=2,
+                              num_classes=10):
+    """F1 of connectivity as a binary classifier of 'input-task == output-task'.
+
+    TP: active connection & input in same task as output
+    FP: active connection & input in different task
+    FN: inactive connection & input in same task
+    (TN: inactive connection & input in different task — unused)
+
+    Precision == task_alignment. Recall = TP / (TP + FN) = fraction of
+    same-task inputs that are connected. F1 penalizes both cross-task
+    connections (low precision) and missed same-task inputs (low recall),
+    so it can't be gamed by keeping only a handful of aligned connections.
+    """
+    M = np.asarray(M)
+    tp = 0
+    for t in range(n_tasks):
+        out_lo, out_hi = t * num_classes, (t + 1) * num_classes
+        in_lo, in_hi = t * input_per_task, (t + 1) * input_per_task
+        tp += int(M[out_lo:out_hi, in_lo:in_hi].sum())
+    total_active = int(M.sum())
+    fp = total_active - tp
+    possible_aligned = n_tasks * num_classes * input_per_task
+    fn = possible_aligned - tp
+    if tp == 0:
+        return 0.0
+    precision = tp / (tp + fp)
+    recall = tp / (tp + fn)
+    return 2 * precision * recall / (precision + recall)
+
+
+def batch_task_separation_f1_linear(all_M, input_per_task=784, n_tasks=2,
+                                    num_classes=10):
+    all_M = np.asarray(all_M)
+    S = all_M.shape[0]
+    out = np.zeros(S)
+    for s in range(S):
+        out[s] = task_separation_f1_linear(
             all_M[s], input_per_task, n_tasks, num_classes)
     return out
 
@@ -393,9 +436,12 @@ def aggregate_results(all_M, all_cycle_loss, n_cycles=N_CYCLES):
     purs, ents = batch_purity_entropy_linear(all_M, INPUT_PER_TASK, N_TASKS)
     aligns = batch_task_alignment_linear(
         all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
+    f1s = batch_task_separation_f1_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
     return dict(
         final_losses=final_losses, purities=purs, entropies=ents,
-        alignments=aligns, windowed_loss=windowed, window_steps=window_steps,
+        alignments=aligns, separation_f1s=f1s,
+        windowed_loss=windowed, window_steps=window_steps,
     )
 
 
@@ -407,3 +453,208 @@ def run_variant(variant, lr, n_seeds=N_SEEDS, n_cycles=N_CYCLES,
     all_M, all_cycle_loss = run_fn(rngs, jnp.float32(lr))
     jax.block_until_ready((all_M, all_cycle_loss))
     return aggregate_results(all_M, all_cycle_loss, n_cycles)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Step 4 — Threshold pruning from fully connected
+# ═════════════════════════════════════════════════════════════════════
+
+def prune_nonpositive(W, M, U):
+    """Prune all active connections with EMA utility <= 0. No generation."""
+    should_prune = (M == 1) & (U <= 0.0)
+    n_pruned = jnp.sum(should_prune)
+    keep = 1 - should_prune.astype(jnp.int32)
+    return W * keep, M * keep, U * keep, n_pruned
+
+
+def build_run_fn_step4(mnist_images, mnist_labels, max_cycles=N_CYCLES):
+    """Build JIT+vmap run function for step 4 threshold pruning.
+
+    Starts fully connected, prunes all connections with signed utility <= 0
+    every SPP steps. Stops pruning after 3 consecutive zero-prune events.
+    Training continues post-convergence for the eval window.
+    """
+    utility_impl = signed_utility
+
+    def make_sample(key):
+        k1, k2 = jax.random.split(key)
+        idx1 = jax.random.randint(k1, (), 0, mnist_images.shape[0])
+        idx2 = jax.random.randint(k2, (), 0, mnist_images.shape[0])
+        x = jnp.concatenate([mnist_images[idx1], mnist_images[idx2]])
+        y = jnp.array([mnist_labels[idx1], mnist_labels[idx2]])
+        return x, y
+
+    def run_one(rng, lr):
+        rng, _ = jax.random.split(rng)
+        M = jnp.ones((OUTPUT_DIM, INPUT_DIM), dtype=jnp.int32)
+        W = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        U = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        step = jnp.array(0, dtype=jnp.int32)
+        perm0 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        perm1 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        consecutive_zeros = jnp.array(0, dtype=jnp.int32)
+        converged = jnp.array(False)
+        converge_cycle = jnp.array(max_cycles, dtype=jnp.int32)
+
+        def train_step(carry, inputs):
+            W, M, U, step, perm0, perm1 = carry
+            data_key, perm_key = inputs
+            x, y_raw = make_sample(data_key)
+            y = jnp.array([perm0[y_raw[0]], perm1[y_raw[1]]])
+            loss_val, g = jax.value_and_grad(loss_fn)(W, M, x, y)
+            W = W - lr * g * M
+            u = utility_impl(W, M, x, y)
+            U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
+            step = step + 1
+            should_perm = (step >= PERMUTE_PERIOD) & (
+                step % PERMUTE_PERIOD == 0)
+            pk1, pk2 = jax.random.split(perm_key)
+            which = jax.random.randint(pk1, (), 0, N_TASKS)
+            new_perm = jax.random.permutation(
+                pk2, NUM_CLASSES).astype(jnp.int32)
+            perm0 = jnp.where(
+                should_perm & (which == 0), new_perm, perm0)
+            perm1 = jnp.where(
+                should_perm & (which == 1), new_perm, perm1)
+            return (W, M, U, step, perm0, perm1), loss_val
+
+        def prune_cycle(carry, cycle_idx):
+            (W, M, U, step, perm0, perm1, rng,
+             consecutive_zeros, converged, converge_cycle) = carry
+            rng, tk, pk = jax.random.split(rng, 3)
+            data_keys = jax.random.split(tk, SPP)
+            perm_keys = jax.random.split(pk, SPP)
+            (W, M, U, step, perm0, perm1), losses = jax.lax.scan(
+                train_step, (W, M, U, step, perm0, perm1),
+                (data_keys, perm_keys))
+            cycle_loss = losses.mean()
+
+            # Prune (skip if already converged)
+            W_p, M_p, U_p, n_pruned = prune_nonpositive(W, M, U)
+            W = jnp.where(converged, W, W_p)
+            M = jnp.where(converged, M, M_p)
+            U = jnp.where(converged, U, U_p)
+            n_pruned = jnp.where(converged, 0, n_pruned)
+
+            # Convergence tracking
+            new_consec = jnp.where(
+                n_pruned == 0,
+                consecutive_zeros + 1,
+                jnp.array(0, dtype=jnp.int32))
+            new_consec = jnp.where(converged, consecutive_zeros, new_consec)
+            newly_converged = (~converged) & (new_consec >= 3)
+            converged = converged | newly_converged
+            converge_cycle = jnp.where(
+                newly_converged, cycle_idx, converge_cycle)
+
+            n_active = jnp.sum(M)
+            return (W, M, U, step, perm0, perm1, rng,
+                    new_consec, converged, converge_cycle), \
+                   (cycle_loss,
+                    n_pruned.astype(jnp.int32),
+                    n_active.astype(jnp.int32))
+
+        init_carry = (W, M, U, step, perm0, perm1, rng,
+                      consecutive_zeros, converged, converge_cycle)
+        final_carry, (per_cycle_loss, per_cycle_pruned,
+                      per_cycle_active) = jax.lax.scan(
+            prune_cycle, init_carry,
+            jnp.arange(max_cycles, dtype=jnp.int32))
+
+        final_M = final_carry[1]
+        final_converge_cycle = final_carry[9]
+        return (final_M, per_cycle_loss, per_cycle_pruned,
+                per_cycle_active, final_converge_cycle)
+
+    @jax.jit
+    def run_all(rngs, lr):
+        return jax.vmap(lambda r: run_one(r, lr))(rngs)
+
+    return run_all
+
+
+def get_run_fn_step4(n_seeds, max_cycles=N_CYCLES):
+    key = ('step4', n_seeds, max_cycles)
+    if key not in _RUN_FN_CACHE:
+        mnist_images, mnist_labels = load_mnist()
+        _RUN_FN_CACHE[key] = build_run_fn_step4(
+            mnist_images, mnist_labels, max_cycles)
+    return _RUN_FN_CACHE[key]
+
+
+def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
+                            converge_cycles, max_cycles=N_CYCLES):
+    all_M = np.asarray(all_M)
+    all_cycle_loss = np.asarray(all_cycle_loss)
+    all_pruned = np.asarray(all_pruned)
+    all_active = np.asarray(all_active)
+    converge_cycles = np.asarray(converge_cycles)
+    S = all_cycle_loss.shape[0]
+
+    final_losses = all_cycle_loss[:, -EVAL_WINDOW_CYCLES:].mean(axis=1)
+
+    # Windowed loss trajectory (same granularity as steps 1-3)
+    n_windows = max_cycles // WINDOW_LOG_CYCLES
+    trimmed = all_cycle_loss[:, :n_windows * WINDOW_LOG_CYCLES]
+    windowed = trimmed.reshape(S, n_windows, WINDOW_LOG_CYCLES).mean(axis=2)
+    window_steps = np.arange(1, n_windows + 1) * WINDOW_LOG_CYCLES * SPP
+
+    purs, ents = batch_purity_entropy_linear(all_M, INPUT_PER_TASK, N_TASKS)
+    aligns = batch_task_alignment_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
+    f1s = batch_task_separation_f1_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
+
+    # Per-seed final budget (n_active at convergence)
+    cc_clipped = np.minimum(converge_cycles, max_cycles - 1)
+    final_budgets = all_active[np.arange(S), cc_clipped].astype(np.float64)
+
+    return dict(
+        final_losses=final_losses, purities=purs, entropies=ents,
+        alignments=aligns, separation_f1s=f1s,
+        windowed_loss=windowed, window_steps=window_steps,
+        converge_cycles=converge_cycles.astype(np.float64),
+        final_budgets=final_budgets,
+        pruned_trajectory=all_pruned, active_trajectory=all_active,
+    )
+
+
+def run_threshold_variant(lr, n_seeds=N_SEEDS, max_cycles=N_CYCLES):
+    """Run step 4 threshold pruning across seeds, return aggregated results."""
+    rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
+    run_fn = get_run_fn_step4(n_seeds, max_cycles)
+    out = run_fn(rngs, jnp.float32(lr))
+    all_M, all_cycle_loss, all_pruned, all_active, converge_cycles = out
+    jax.block_until_ready(out)
+    return aggregate_results_step4(
+        all_M, all_cycle_loss, all_pruned, all_active,
+        converge_cycles, max_cycles)
+
+
+def log_result_metrics_step4(results):
+    """Log step 4 metrics: base metrics + convergence + trajectories."""
+    import mlflow
+    log_result_metrics(results)
+
+    for name, arr in [('converge_cycle', results['converge_cycles']),
+                      ('final_budget', results['final_budgets'])]:
+        mlflow.log_metric(name, float(np.mean(arr)))
+        mlflow.log_metric(f'{name}_ci95', ci95(arr))
+
+    # Log pruned/active trajectories (windowed, every WINDOW_LOG_CYCLES)
+    pruned = np.asarray(results['pruned_trajectory'])
+    active = np.asarray(results['active_trajectory'])
+    S, T = pruned.shape
+    n_windows = T // WINDOW_LOG_CYCLES
+    window_steps = np.arange(1, n_windows + 1) * WINDOW_LOG_CYCLES * SPP
+
+    pruned_windowed = pruned[:, :n_windows * WINDOW_LOG_CYCLES].reshape(
+        S, n_windows, WINDOW_LOG_CYCLES).sum(axis=2).mean(axis=0)
+    active_windowed = active[:, :n_windows * WINDOW_LOG_CYCLES].reshape(
+        S, n_windows, WINDOW_LOG_CYCLES)[:, :, -1].mean(axis=0)
+
+    for t, s in enumerate(window_steps):
+        mlflow.log_metric('n_pruned_window', float(pruned_windowed[t]),
+                          step=int(s))
+        mlflow.log_metric('n_active', float(active_windowed[t]),
+                          step=int(s))
