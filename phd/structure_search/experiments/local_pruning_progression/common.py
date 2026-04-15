@@ -73,6 +73,26 @@ def load_mnist():
     return _MNIST_CACHE['data']
 
 
+def load_mnist_normalized():
+    """MNIST with per-pixel standardization so input std ≈ 1.
+
+    Subtracts per-pixel mean and divides by per-pixel std (floored at 1e-3
+    so near-constant "dead" pixels don't amplify noise). Used by step 6 so
+    the statistical-threshold formula can assume σ_x = 1 without having to
+    track a per-weight noise scale at runtime.
+    """
+    if 'data_normalized' not in _MNIST_CACHE:
+        images_jnp, labels = load_mnist()
+        images = np.asarray(images_jnp)
+        mean = images.mean(axis=0, keepdims=True)
+        std = images.std(axis=0, keepdims=True)
+        normalized = (images - mean) / np.maximum(std, 1e-3)
+        _MNIST_CACHE['data_normalized'] = (
+            jnp.array(normalized, dtype=jnp.float32), labels,
+        )
+    return _MNIST_CACHE['data_normalized']
+
+
 # ═════════════════════════════════════════════════════════════════════
 # Stats
 # ═════════════════════════════════════════════════════════════════════
@@ -684,3 +704,180 @@ def log_result_metrics_step4(results):
                           step=int(s))
         mlflow.log_metric('n_active', float(active_w[t]),
                           step=int(s))
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Step 6 — Statistical-confidence threshold pruning
+# ═════════════════════════════════════════════════════════════════════
+
+# Precomputed constant in the τ formula:
+#   K = (1 − 2/π) · (1 − β) / (1 + β)
+STAT_PRUNE_K = (1.0 - 2.0 / np.pi) * (1.0 - EMA_DECAY) / (1.0 + EMA_DECAY)
+
+
+def prune_statistical(W, M, U, step, z_alpha):
+    """Prune active connections where the bias-corrected EMA utility is
+    below the per-weight statistical confidence threshold τ_w.
+
+    With σ_x = 1 (inputs normalized upfront), the threshold is
+        τ_w = −z_α · |w| · sqrt(K · (1 + β^t) / (1 − β^t))
+    and the EMA is bias-corrected as
+        U_corr = U / (1 − β^t).
+    A weight is pruned iff U_corr < τ_w, i.e. the utility is bad enough
+    that we are 1 − α confident it isn't just noise.
+
+    t = step count (= age of the weight, since weights are never
+    regenerated in this code path).
+    """
+    t = step.astype(jnp.float32)
+    beta = jnp.float32(EMA_DECAY)
+    beta_t = jnp.power(beta, t)
+    # Floor to avoid divide-by-zero at t=0. In practice the first prune
+    # is at step = spp > 0, so 1 − β^t > 0 already — belt and braces.
+    one_minus = jnp.maximum(1.0 - beta_t, 1e-12)
+    U_corr = U / one_minus
+    ratio = (1.0 + beta_t) / one_minus
+    tau = -z_alpha * jnp.abs(W) * jnp.sqrt(STAT_PRUNE_K * ratio)
+    should_prune = (M == 1) & (U_corr < tau)
+    n_pruned = jnp.sum(should_prune)
+    keep = 1 - should_prune.astype(jnp.int32)
+    return W * keep, M * keep, U * keep, n_pruned
+
+
+def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
+                       spp=SPP):
+    """Build JIT+vmap run function for step 6 statistical-threshold pruning.
+
+    Like step 4 but swaps the U ≤ 0 rule for a per-weight statistical
+    confidence threshold. z_alpha is passed as a runtime argument so a
+    single JIT compile covers every CI value in the sweep.
+
+    Expects `mnist_images` to be pre-normalized (per-pixel std ≈ 1) so
+    the formula can assume σ_x = 1 without runtime bookkeeping.
+    """
+    utility_impl = signed_utility
+
+    def make_sample(key):
+        k1, k2 = jax.random.split(key)
+        idx1 = jax.random.randint(k1, (), 0, mnist_images.shape[0])
+        idx2 = jax.random.randint(k2, (), 0, mnist_images.shape[0])
+        x = jnp.concatenate([mnist_images[idx1], mnist_images[idx2]])
+        y = jnp.array([mnist_labels[idx1], mnist_labels[idx2]])
+        return x, y
+
+    def run_one(rng, lr, z_alpha):
+        rng, _ = jax.random.split(rng)
+        M = jnp.ones((OUTPUT_DIM, INPUT_DIM), dtype=jnp.int32)
+        W = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        U = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        step = jnp.array(0, dtype=jnp.int32)
+        perm0 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        perm1 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        consecutive_zeros = jnp.array(0, dtype=jnp.int32)
+        converged = jnp.array(False)
+        converge_cycle = jnp.array(max_cycles, dtype=jnp.int32)
+
+        def train_step(carry, inputs):
+            W, M, U, step, perm0, perm1 = carry
+            data_key, perm_key = inputs
+            x, y_raw = make_sample(data_key)
+            y = jnp.array([perm0[y_raw[0]], perm1[y_raw[1]]])
+            loss_val, g = jax.value_and_grad(loss_fn)(W, M, x, y)
+            W = W - lr * g * M
+            u = utility_impl(W, M, x, y)
+            U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
+            step = step + 1
+            should_perm = (step >= PERMUTE_PERIOD) & (
+                step % PERMUTE_PERIOD == 0)
+            pk1, pk2 = jax.random.split(perm_key)
+            which = jax.random.randint(pk1, (), 0, N_TASKS)
+            new_perm = jax.random.permutation(
+                pk2, NUM_CLASSES).astype(jnp.int32)
+            perm0 = jnp.where(
+                should_perm & (which == 0), new_perm, perm0)
+            perm1 = jnp.where(
+                should_perm & (which == 1), new_perm, perm1)
+            return (W, M, U, step, perm0, perm1), loss_val
+
+        def prune_cycle(carry, cycle_idx):
+            (W, M, U, step, perm0, perm1, rng,
+             consecutive_zeros, converged, converge_cycle) = carry
+            rng, tk, pk = jax.random.split(rng, 3)
+            data_keys = jax.random.split(tk, spp)
+            perm_keys = jax.random.split(pk, spp)
+            (W, M, U, step, perm0, perm1), losses = jax.lax.scan(
+                train_step, (W, M, U, step, perm0, perm1),
+                (data_keys, perm_keys))
+            cycle_loss = losses.mean()
+
+            # Prune (skip if already converged)
+            W_p, M_p, U_p, n_pruned = prune_statistical(
+                W, M, U, step, z_alpha)
+            W = jnp.where(converged, W, W_p)
+            M = jnp.where(converged, M, M_p)
+            U = jnp.where(converged, U, U_p)
+            n_pruned = jnp.where(converged, 0, n_pruned)
+
+            # Convergence tracking
+            new_consec = jnp.where(
+                n_pruned == 0,
+                consecutive_zeros + 1,
+                jnp.array(0, dtype=jnp.int32))
+            new_consec = jnp.where(converged, consecutive_zeros, new_consec)
+            newly_converged = (~converged) & (new_consec >= 3)
+            converged = converged | newly_converged
+            converge_cycle = jnp.where(
+                newly_converged, cycle_idx, converge_cycle)
+
+            n_active = jnp.sum(M)
+            return (W, M, U, step, perm0, perm1, rng,
+                    new_consec, converged, converge_cycle), \
+                   (cycle_loss,
+                    n_pruned.astype(jnp.int32),
+                    n_active.astype(jnp.int32))
+
+        init_carry = (W, M, U, step, perm0, perm1, rng,
+                      consecutive_zeros, converged, converge_cycle)
+        final_carry, (per_cycle_loss, per_cycle_pruned,
+                      per_cycle_active) = jax.lax.scan(
+            prune_cycle, init_carry,
+            jnp.arange(max_cycles, dtype=jnp.int32))
+
+        final_M = final_carry[1]
+        final_converge_cycle = final_carry[9]
+        return (final_M, per_cycle_loss, per_cycle_pruned,
+                per_cycle_active, final_converge_cycle)
+
+    @jax.jit
+    def run_all(rngs, lr, z_alpha):
+        return jax.vmap(lambda r: run_one(r, lr, z_alpha))(rngs)
+
+    return run_all
+
+
+def get_run_fn_step6(n_seeds, max_cycles=N_CYCLES, spp=SPP):
+    key = ('step6', n_seeds, max_cycles, spp)
+    if key not in _RUN_FN_CACHE:
+        mnist_images, mnist_labels = load_mnist_normalized()
+        _RUN_FN_CACHE[key] = build_run_fn_step6(
+            mnist_images, mnist_labels, max_cycles, spp)
+    return _RUN_FN_CACHE[key]
+
+
+def run_statistical_variant(lr, z_alpha, n_seeds=N_SEEDS, spp=SPP,
+                            total_steps=TOTAL_STEPS):
+    """Run step 6 statistical-threshold pruning across seeds.
+
+    Holds total training steps constant across SPP values: n_cycles is
+    derived as total_steps // spp so each run sees the same amount of
+    training.
+    """
+    max_cycles = total_steps // spp
+    rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
+    run_fn = get_run_fn_step6(n_seeds, max_cycles, spp)
+    out = run_fn(rngs, jnp.float32(lr), jnp.float32(z_alpha))
+    all_M, all_cycle_loss, all_pruned, all_active, converge_cycles = out
+    jax.block_until_ready(out)
+    return aggregate_results_step4(
+        all_M, all_cycle_loss, all_pruned, all_active,
+        converge_cycles, max_cycles, spp)
