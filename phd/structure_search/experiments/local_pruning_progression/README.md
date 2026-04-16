@@ -7,53 +7,123 @@ add hidden units, per-unit local budgets, and dynamic budget allocation.
 
 Builds on findings from `../debug_task_separation/`.
 
+## Metrics
+
+All metrics are reported as mean ± 95% CI over 20 seeds unless otherwise
+noted. The architecture is a linear model: `logits = (W * M) @ x`,
+reshaped to (N_TASKS=2, 10) for per-task softmax CE. `W, M : (20, 1568)`.
+Inputs are two concatenated MNIST digits (784 + 784 = 1568). Outputs are
+20 neurons: 10 per task (one per digit class).
+
+### Loss
+
+- **final_loss** — mean training cross-entropy loss over the final **40k
+  steps** of the run. Measures the network's rate of adaptation under
+  non-stationarity (label permutations every 4000 steps), not peak
+  accuracy. Lower is better.
+
+### Connectivity / structure metrics
+
+These measure what the final connectivity mask `M` looks like — which
+(output, input) slots are active and whether they respect task boundaries.
+Each output neuron `k` serves a specific task `t = k // 10`. Each input
+`j` belongs to a specific task `t = j // 784`. A connection `(k, j)` is
+**task-aligned** when `k // 10 == j // 784`.
+
+- **alignment** (= precision) — fraction of active connections that are
+  task-aligned: `TP / (TP + FP)` where TP = active and aligned, FP =
+  active and cross-task. Chance level = 0.5, oracle = 1.0. Introduced in
+  step 2. Can be gamed by pruning everything except a few aligned
+  connections.
+- **separation_f1** — F1 score treating connection activity as a binary
+  classifier of "is this slot task-aligned?":
+  - TP = active & aligned
+  - FP = active & cross-task
+  - FN = inactive & aligned (missed same-task coverage)
+  - F1 = 2·P·R / (P+R) where P = alignment, R = TP / (TP+FN)
+
+  Penalizes both cross-task noise (low P) and missing same-task coverage
+  (low R). Can't be gamed by sparse aligned-only masks. Introduced in
+  step 4. Reference points: oracle intask at budget=1500 → F1=0.175;
+  fully connected → F1=0.667. Not meaningful at fixed low budgets
+  (e.g. 1500) because recall is capped at budget / n_possible_aligned.
+- **purity** — per-unit metric. For output neuron k, count active
+  connections from each task block: `t0 = M[k, 0:784].sum()`,
+  `t1 = M[k, 784:1568].sum()`. Purity of that unit =
+  `max(t0, t1) / (t0 + t1)`. Average across units (skip units with no
+  active connections). Chance ≈ 0.5, oracle = 1.0.
+- **entropy** — per-unit metric. Normalized binary entropy of the same
+  `(t0, t1)` split: `H = −Σ p·log₂(p) / log₂(2)` where `p = (t0, t1)
+  / (t0+t1)`. Averaged across units. Perfect separation → 0.0, fully
+  mixed → 1.0.
+
+### Budget / convergence metrics (steps 4+)
+
+These apply to experiments that start fully connected and prune down to
+a natural size.
+
+- **final_budget** — number of active connections at convergence (when 3
+  consecutive prune events prune 0 connections). Per-seed, indexed by
+  converge_cycle.
+- **converge_step** — training step at which 3 consecutive zero-prune
+  events is first reached. Sentinel value = total steps if convergence
+  never happens.
+
+### Trajectory metrics (logged to MLflow)
+
+- **loss_window_5k** — mean loss in each 5k-step window, for convergence
+  inspection.
+- **n_pruned_window** / **n_generated_window** — total connections
+  pruned / generated per 5k-step window (mean across seeds).
+- **n_active** — active connection count at end of each 5k-step window
+  (mean across seeds).
+- **demand_unit_{00..19}** (step 7) — per-output-neuron demand `d_i` at
+  end of each 5k-step window (mean across seeds). Shows which neurons
+  the generation policy is favoring over time.
+
 ## Invariants (constant across every step)
 
-These hold for every experiment and every baseline in this directory.
+These hold for every experiment in this directory.
 
 - **Task**: non-stationary parallel multi-MNIST, 2 sub-tasks. Inputs are
-concatenated MNIST digits (1568 = 2 × 784). Labels are two class indices
-in [0, 10). Every **4000 steps** one randomly-chosen task's label mapping
-is replaced with a fresh random permutation of [0..9]. Non-stationarity
-is there to overcome the blocking problem.
+  concatenated MNIST digits (1568 = 2 × 784). Labels are two class indices
+  in [0, 10). Every **4000 steps** one randomly-chosen task's label mapping
+  is replaced with a fresh random permutation of [0..9]. Non-stationarity
+  is there to overcome the blocking problem. Steps 1-5 use raw MNIST
+  (pixels in [0, 1]); **steps 6-7 use per-pixel standardized MNIST**
+  (mean 0, std ≈ 1) so the statistical-threshold formula can assume
+  σ_x = 1.
 - **Batch size**: 1 (online).
 - **Seeds**: 20 seeds per reported configuration, base seed 42.
-- **Run length**: ≥ 100k steps; extended as needed to (a) hit ~3× connection
-turnover for dynamic methods and (b) give convergence within the
-evaluation window. Default for step 1 is 225k.
+- **Run length**: 225k training steps for all steps.
 - **Evaluation**: running average of training cross-entropy loss over the
-final **40k steps** of the run. This measures rate of adaptation, not
-peak accuracy.
+  final **40k steps** of the run. This measures rate of adaptation under
+  non-stationarity, not peak accuracy.
 - **Reported metrics** (for every run, mean ± 95% CI over seeds):
-`final_loss`, `purity`, `entropy`.
-  - *Purity* — treat each output neuron as a "unit". For output neuron k,
-  split its active input connections into the two task blocks (inputs
-  0..783 = task 0, inputs 784..1567 = task 1). Purity of that unit =
-  `max(t0, t1) / (t0 + t1)`. Average over units (units with no active
-  connections are skipped).
-  - *Entropy* — normalized binary entropy of the same (t0, t1) split,
-  averaged over units.
-- **Baselines for every step** (logged as their own MLflow runs):
+  `final_loss`, `alignment`, `purity`, `entropy`, and step-specific
+  metrics as applicable. See **Metrics** section above for definitions.
+- **Baselines** (steps 1-3 only; logged as their own MLflow runs):
   1. **Random fixed connectivity** — 1500 connections sampled uniformly
-    from the full (20 × 1568) slot pool, frozen for the whole run. Train
+     from the full (20 × 1568) slot pool, frozen for the whole run. Train
      weights with SGD; no pruning/generation.
   2. **Within-task fixed connectivity** — 750 connections per task sampled
-    uniformly from within that task's (10 × 784) block, frozen for the
-     run. (For later steps with hidden units, "fixed within-task" becomes
-     "dense within-task" since the dense budget then fits under 1500.)
-- **Learning-rate sweep**: every configuration (method and both baselines)
-gets its own LR sweep — best LR differs between fixed and dynamic
-connectivity, and between the two baselines. Sweep grid is geometric by
-factor of 4 (e.g. `{1.5625e-4, 6.25e-4, 2.5e-3, 1e-2, 4e-2}`), extended
-until both tails of the LR vs. final-loss curve rise above the minimum
-(a U-shape). Sweep with 5 seeds per LR, then re-run the winning LR with
-20 seeds for the reported number.
-- **MLflow**: project name `local_pruning_progression`. One run per
-reported configuration, named `step{N}_{variant}` (e.g. `step1_method`,
-`step1_baseline_random`, `step1_baseline_intask`). Sweep runs append
-`_lr={value}`. Logs only aggregated (mean + CI) metrics across seeds —
-no per-seed child runs. Also logs a moving-window loss trajectory
-(`loss_window_5k` every 5k steps) for convergence inspection.
+     uniformly from within that task's (10 × 784) block, frozen for the
+     run.
+
+  Steps 4+ change the paradigm (fully-connected init, threshold pruning,
+  normalized inputs) and do not re-run these baselines.
+- **Learning-rate sweep**: every step does its own LR sweep since gradient
+  scale changes with init, budget, and input normalization. Steps 1-3 use
+  a factor-of-4 geometric grid with 5 seeds per LR, then re-run the
+  winner with 20 seeds. Steps 4+ use powers-of-2 grids with 20 seeds
+  directly (via mlflow-sweeper).
+- **MLflow**: project name `local_pruning_progression`. Steps 1-3 name
+  runs as `step{N}_{variant}` (e.g. `step1_dynamic`). Steps 4+ use
+  mlflow-sweeper with sweep names like `step{N}_{sweep_name}` and
+  per-trial runs tagged with parameter values. Logs aggregated (mean + CI)
+  metrics across seeds — no per-seed child runs. Also logs a
+  moving-window loss trajectory (`loss_window_5k` every 5k steps) for
+  convergence inspection.
 
 ## Step 1 — Linear, global pruning
 
