@@ -881,3 +881,346 @@ def run_statistical_variant(lr, z_alpha, n_seeds=N_SEEDS, spp=SPP,
     return aggregate_results_step4(
         all_M, all_cycle_loss, all_pruned, all_active,
         converge_cycles, max_cycles, spp)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Step 7 — Demand-driven connection generation
+# ═════════════════════════════════════════════════════════════════════
+
+# Demand EMA decay (~100-update memory; faster than utility EMA β=0.998
+# because demand updates are sparse — at most a few per cycle).
+BETA_D = 0.99
+# Connection auto-resolves into demand EMA at this age (= 1/(1−β),
+# the effective sample size of the utility EMA — by then the EMA has
+# fully matured even without a threshold crossing).
+DEMAND_N_EFF = 500
+# Softmax allocation temperature. Raw signed-utility magnitudes are
+# typically O(0.01-0.1), so T=0.01 gives meaningful concentration.
+SOFTMAX_T = 0.01
+
+# Allocation method codes (so build_run_fn_step7 can branch in pure Python
+# at compile time without dragging string-handling into JAX).
+_ALLOC_CLIPPED_LINEAR = 'clipped_linear'
+_ALLOC_SOFTMAX = 'softmax'
+
+
+def _bias_correction_factors(A):
+    """Return (one_minus, ratio) used by both U_corr and τ_w.
+
+    Uses per-connection age A (int32, shape M) instead of the global step
+    counter — so newly-generated connections get the wide CI / generous
+    threshold appropriate for an immature EMA.
+    """
+    t = A.astype(jnp.float32)
+    beta = jnp.float32(EMA_DECAY)
+    beta_t = jnp.power(beta, t)
+    one_minus = jnp.maximum(1.0 - beta_t, 1e-12)
+    ratio = (1.0 + beta_t) / one_minus
+    return one_minus, ratio
+
+
+def _resolve_and_update_demand(W, M, U, A, R, D, z_alpha):
+    """Per-cycle resolution + demand EMA update.
+
+    Returns (D_new, R_new, U_corr, tau_w). U_corr and tau_w are returned
+    so the prune step doesn't have to recompute them.
+    """
+    one_minus, ratio = _bias_correction_factors(A)
+    U_corr = U / one_minus
+    tau_w = -z_alpha * jnp.abs(W) * jnp.sqrt(STAT_PRUNE_K * ratio)
+
+    # Symmetric two-sided + age fallback. Only resolve once per
+    # incarnation (R==0) and only for active connections (M==1).
+    crossed_neg = U_corr < tau_w
+    crossed_pos = U_corr > -tau_w
+    aged_out = A >= DEMAND_N_EFF
+    newly_resolved = (M == 1) & (R == 0) & (
+        crossed_neg | crossed_pos | aged_out)
+    nr_f = newly_resolved.astype(jnp.float32)
+
+    # Per-output-neuron count and mean of the bias-corrected utility of
+    # newly-resolved connections.
+    m_per_neuron = jnp.sum(nr_f, axis=1)                  # (OUTPUT_DIM,)
+    sum_per_neuron = jnp.sum(nr_f * U_corr, axis=1)       # (OUTPUT_DIM,)
+    safe_m = jnp.maximum(m_per_neuron, 1.0)
+    u_mean_per_neuron = sum_per_neuron / safe_m
+
+    # Closed-form: applying d ← β_d·d + (1−β_d)·u_mean repeatedly m_i
+    # times collapses to d ← β_d^m_i·d + (1−β_d^m_i)·u_mean. For m_i=0,
+    # β_d^0 = 1, so D[i] is unchanged.
+    decay_pow = jnp.power(jnp.float32(BETA_D), m_per_neuron)
+    D_new = decay_pow * D + (1.0 - decay_pow) * u_mean_per_neuron
+
+    R_new = R | newly_resolved.astype(jnp.int32)
+    return D_new, R_new, U_corr, tau_w
+
+
+def _prune_step7(W, M, U, A, R, U_corr, tau_w):
+    """Prune connections with U_corr < τ_w. Zero out all per-connection
+    state (W, U, A, R) for pruned slots so a future generation event into
+    the same slot starts from a clean state.
+    """
+    should_prune = (M == 1) & (U_corr < tau_w)
+    n_pruned = jnp.sum(should_prune)
+    keep = 1 - should_prune.astype(jnp.int32)
+    keep_f = keep.astype(jnp.float32)
+    return (W * keep_f, M * keep, U * keep_f, A * keep, R * keep,
+            n_pruned)
+
+
+def _allocate(D, method):
+    """Compute per-output-neuron allocation probabilities from demand D."""
+    if method == _ALLOC_CLIPPED_LINEAR:
+        pos = jnp.maximum(D, 0.0)
+        s = jnp.sum(pos)
+        n = D.shape[0]
+        uniform = jnp.full((n,), 1.0 / n, dtype=jnp.float32)
+        return jnp.where(s > 0, pos / jnp.maximum(s, 1e-12), uniform)
+    elif method == _ALLOC_SOFTMAX:
+        return jax.nn.softmax(D / jnp.float32(SOFTMAX_T))
+    else:
+        raise ValueError(f'Unknown allocation method: {method}')
+
+
+def _generate(W, M, U, A, R, n_pruned, p, rng):
+    """Sample n_pruned new connections via Gumbel-max top-k.
+
+    Only empty slots (M==0) are eligible. Each empty slot's score is
+    log(p[output]) + Gumbel(0,1) + tiny uniform tie-breaker. We pick
+    the n_pruned highest-scoring empty slots and mark them active. New
+    slots inherit W=U=A=R=0 (which they already are, since pruning
+    zeroed them and untouched-empty slots were never written).
+    """
+    g_key, n_key = jax.random.split(rng)
+    log_p = jnp.log(p + 1e-12)[:, None]                   # (OUTPUT_DIM, 1)
+    u = jax.random.uniform(g_key, M.shape,
+                           minval=1e-12, maxval=1.0)
+    gumbel = -jnp.log(-jnp.log(u))
+    tiny = 1e-12 * jax.random.uniform(n_key, M.shape)
+    raw_scores = log_p + gumbel + tiny
+    neg_inf = jnp.full(M.shape, -jnp.inf, dtype=jnp.float32)
+    scores = jnp.where(M == 0, raw_scores, neg_inf)
+
+    flat = scores.reshape(-1)
+    sorted_desc = -jnp.sort(-flat)                        # descending
+    idx = jnp.maximum(n_pruned.astype(jnp.int32) - 1, 0)
+    threshold = jnp.where(
+        n_pruned > 0,
+        sorted_desc[idx],
+        jnp.float32(jnp.inf))
+    to_generate = (M == 0) & (scores >= threshold)
+    n_generated = jnp.sum(to_generate)
+    add = to_generate.astype(jnp.int32)
+    return W, M + add, U, A, R, n_generated
+
+
+def build_run_fn_step7(mnist_images, mnist_labels, n_cycles=N_CYCLES,
+                       spp=SPP, allocation_method=_ALLOC_CLIPPED_LINEAR):
+    """Build JIT+vmap run function for step 7 demand-driven generation.
+
+    Starts from a random sparse mask at BUDGET=1500, then every `spp`
+    train steps: resolve newly-mature connections into per-output-neuron
+    demand D, statistically prune (CI-based), then generate exactly
+    n_pruned_this_cycle new connections via Gumbel-max top-k weighted by
+    `_allocate(D, allocation_method)`. Active count stays at BUDGET.
+
+    Expects pre-normalized MNIST (load_mnist_normalized) so τ_w can use
+    σ_x = 1.
+    """
+    utility_impl = signed_utility
+
+    def make_sample(key):
+        k1, k2 = jax.random.split(key)
+        idx1 = jax.random.randint(k1, (), 0, mnist_images.shape[0])
+        idx2 = jax.random.randint(k2, (), 0, mnist_images.shape[0])
+        x = jnp.concatenate([mnist_images[idx1], mnist_images[idx2]])
+        y = jnp.array([mnist_labels[idx1], mnist_labels[idx2]])
+        return x, y
+
+    def run_one(rng, lr, z_alpha):
+        rng, mkey = jax.random.split(rng)
+        M = sample_init_mask_dynamic(
+            mkey, OUTPUT_DIM, INPUT_DIM, BUDGET)
+        W = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        U = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        A = jnp.zeros((OUTPUT_DIM, INPUT_DIM), dtype=jnp.int32)
+        R = jnp.zeros((OUTPUT_DIM, INPUT_DIM), dtype=jnp.int32)
+        D = jnp.zeros((OUTPUT_DIM,), dtype=jnp.float32)
+        step = jnp.array(0, dtype=jnp.int32)
+        perm0 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        perm1 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+
+        def train_step(carry, inputs):
+            W, M, U, A, step, perm0, perm1 = carry
+            data_key, perm_key = inputs
+            x, y_raw = make_sample(data_key)
+            y = jnp.array([perm0[y_raw[0]], perm1[y_raw[1]]])
+            loss_val, g = jax.value_and_grad(loss_fn)(W, M, x, y)
+            W = W - lr * g * M
+            u = utility_impl(W, M, x, y)
+            U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
+            A = A + M
+            step = step + 1
+            should_perm = (step >= PERMUTE_PERIOD) & (
+                step % PERMUTE_PERIOD == 0)
+            pk1, pk2 = jax.random.split(perm_key)
+            which = jax.random.randint(pk1, (), 0, N_TASKS)
+            new_perm = jax.random.permutation(
+                pk2, NUM_CLASSES).astype(jnp.int32)
+            perm0 = jnp.where(
+                should_perm & (which == 0), new_perm, perm0)
+            perm1 = jnp.where(
+                should_perm & (which == 1), new_perm, perm1)
+            return (W, M, U, A, step, perm0, perm1), loss_val
+
+        def cycle(carry, _):
+            (W, M, U, A, R, D, step, perm0, perm1, rng) = carry
+            rng, tk, pk, gk = jax.random.split(rng, 4)
+            data_keys = jax.random.split(tk, spp)
+            perm_keys = jax.random.split(pk, spp)
+            (W, M, U, A, step, perm0, perm1), losses = jax.lax.scan(
+                train_step, (W, M, U, A, step, perm0, perm1),
+                (data_keys, perm_keys))
+            cycle_loss = losses.mean()
+
+            # Resolve + demand update
+            D, R, U_corr, tau_w = _resolve_and_update_demand(
+                W, M, U, A, R, D, z_alpha)
+
+            # Prune
+            W, M, U, A, R, n_pruned = _prune_step7(
+                W, M, U, A, R, U_corr, tau_w)
+
+            # Generate
+            p = _allocate(D, allocation_method)
+            W, M, U, A, R, n_generated = _generate(
+                W, M, U, A, R, n_pruned, p, gk)
+
+            n_active = jnp.sum(M)
+            return (W, M, U, A, R, D, step, perm0, perm1, rng), \
+                   (cycle_loss,
+                    n_pruned.astype(jnp.int32),
+                    n_generated.astype(jnp.int32),
+                    n_active.astype(jnp.int32),
+                    D)
+
+        init_carry = (W, M, U, A, R, D, step, perm0, perm1, rng)
+        final_carry, (per_cycle_loss, per_cycle_pruned,
+                      per_cycle_generated, per_cycle_active,
+                      per_cycle_D) = jax.lax.scan(
+            cycle, init_carry, None, length=n_cycles)
+
+        final_M = final_carry[1]
+        return (final_M, per_cycle_loss, per_cycle_pruned,
+                per_cycle_generated, per_cycle_active, per_cycle_D)
+
+    @jax.jit
+    def run_all(rngs, lr, z_alpha):
+        return jax.vmap(lambda r: run_one(r, lr, z_alpha))(rngs)
+
+    return run_all
+
+
+def get_run_fn_step7(n_seeds, n_cycles=N_CYCLES, spp=SPP,
+                     allocation_method=_ALLOC_CLIPPED_LINEAR):
+    key = ('step7', n_seeds, n_cycles, spp, allocation_method)
+    if key not in _RUN_FN_CACHE:
+        mnist_images, mnist_labels = load_mnist_normalized()
+        _RUN_FN_CACHE[key] = build_run_fn_step7(
+            mnist_images, mnist_labels, n_cycles, spp, allocation_method)
+    return _RUN_FN_CACHE[key]
+
+
+def aggregate_results_step7(all_M, all_cycle_loss, all_pruned,
+                            all_generated, all_active, all_D,
+                            n_cycles=N_CYCLES, spp=SPP):
+    """Step-7 aggregator. Like step-4's, but with no convergence/budget
+    fields, plus per-cycle generation count and per-output-neuron demand
+    trajectory.
+    """
+    all_M = np.asarray(all_M)
+    all_cycle_loss = np.asarray(all_cycle_loss)
+    all_pruned = np.asarray(all_pruned)
+    all_generated = np.asarray(all_generated)
+    all_active = np.asarray(all_active)
+    all_D = np.asarray(all_D)                  # (S, n_cycles, OUTPUT_DIM)
+    S = all_cycle_loss.shape[0]
+
+    eval_window_cycles = min(EVAL_WINDOW_STEPS // spp, n_cycles)
+    if eval_window_cycles < 1:
+        eval_window_cycles = 1
+    final_losses = all_cycle_loss[:, -eval_window_cycles:].mean(axis=1)
+
+    window_log_cycles = max(1, WINDOW_LOG_STEPS // spp)
+    n_windows = n_cycles // window_log_cycles
+    n_trim = n_windows * window_log_cycles
+    trimmed = all_cycle_loss[:, :n_trim]
+    windowed = trimmed.reshape(S, n_windows, window_log_cycles).mean(axis=2)
+    window_steps = np.arange(1, n_windows + 1) * window_log_cycles * spp
+
+    pruned_windowed = all_pruned[:, :n_trim].reshape(
+        S, n_windows, window_log_cycles).sum(axis=2).mean(axis=0)
+    generated_windowed = all_generated[:, :n_trim].reshape(
+        S, n_windows, window_log_cycles).sum(axis=2).mean(axis=0)
+    active_windowed = all_active[:, :n_trim].reshape(
+        S, n_windows, window_log_cycles)[:, :, -1].mean(axis=0)
+
+    # Demand trajectory: take the last D snapshot in each window per
+    # neuron, then mean across seeds. Shape (n_windows, OUTPUT_DIM).
+    D_trim = all_D[:, :n_trim, :]
+    demand_windowed = D_trim.reshape(
+        S, n_windows, window_log_cycles, OUTPUT_DIM)[:, :, -1, :].mean(axis=0)
+
+    purs, ents = batch_purity_entropy_linear(all_M, INPUT_PER_TASK, N_TASKS)
+    aligns = batch_task_alignment_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
+    f1s = batch_task_separation_f1_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
+
+    return dict(
+        final_losses=final_losses, purities=purs, entropies=ents,
+        alignments=aligns, separation_f1s=f1s,
+        windowed_loss=windowed, window_steps=window_steps,
+        pruned_windowed=pruned_windowed,
+        generated_windowed=generated_windowed,
+        active_windowed=active_windowed,
+        demand_windowed=demand_windowed,
+        spp=spp,
+    )
+
+
+def run_generation_variant(lr, allocation_method, ci=0.9, n_seeds=N_SEEDS,
+                           spp=SPP, n_cycles=N_CYCLES):
+    """Run step 7 demand-driven generation across seeds."""
+    import scipy.stats
+    z_alpha = float(scipy.stats.norm.ppf(ci))
+    rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
+    run_fn = get_run_fn_step7(n_seeds, n_cycles, spp, allocation_method)
+    out = run_fn(rngs, jnp.float32(lr), jnp.float32(z_alpha))
+    all_M, all_cycle_loss, all_pruned, all_generated, all_active, all_D = out
+    jax.block_until_ready(out)
+    return aggregate_results_step7(
+        all_M, all_cycle_loss, all_pruned, all_generated, all_active,
+        all_D, n_cycles, spp)
+
+
+def log_result_metrics_step7(results):
+    """Log step 7 metrics: base metrics + generation count + per-output
+    demand trajectory."""
+    import mlflow
+    log_result_metrics(results)
+
+    window_steps = results['window_steps']
+    pruned_w = results['pruned_windowed']
+    generated_w = results['generated_windowed']
+    active_w = results['active_windowed']
+    demand_w = results['demand_windowed']                  # (n_windows, 20)
+    for t, s in enumerate(window_steps):
+        s_int = int(s)
+        mlflow.log_metric('n_pruned_window', float(pruned_w[t]), step=s_int)
+        mlflow.log_metric('n_generated_window',
+                          float(generated_w[t]), step=s_int)
+        mlflow.log_metric('n_active', float(active_w[t]), step=s_int)
+        for i in range(OUTPUT_DIM):
+            mlflow.log_metric(f'demand_unit_{i:02d}',
+                              float(demand_w[t, i]), step=s_int)
