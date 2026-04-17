@@ -1224,3 +1224,305 @@ def log_result_metrics_step7(results):
         for i in range(OUTPUT_DIM):
             mlflow.log_metric(f'demand_unit_{i:02d}',
                               float(demand_w[t, i]), step=s_int)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Step 7 diagnostics — per-task stat tracking
+# ═════════════════════════════════════════════════════════════════════
+
+DIAG_WINDOW_STEPS = 500   # log every 500 steps for diagnostic resolution
+
+
+def build_run_fn_step7_diag(mnist_images, mnist_labels, n_cycles=N_CYCLES,
+                            spp=SPP,
+                            allocation_method=_ALLOC_CLIPPED_LINEAR,
+                            permute_task=None, permute_period=PERMUTE_PERIOD,
+                            task_scales=None, random_task=None):
+    """Diagnostic variant of step 7 with per-task stat tracking.
+
+    permute_task: None = no permutation, 0 or 1 = permute only that task.
+    permute_period: steps between permutations.
+    task_scales: list/tuple of length N_TASKS, or None. Multiplies logits
+                 per task before softmax/loss. [2.0, 1.0] doubles task 0.
+    random_task: None = normal labels, 0 or 1 = replace that task's label
+                 with a uniform-random class each step.
+    """
+    scales = jnp.ones((N_TASKS,), dtype=jnp.float32)
+    if task_scales is not None:
+        scales = jnp.array(task_scales, dtype=jnp.float32)
+    nc = NUM_CLASSES
+
+    def make_sample(key):
+        k1, k2 = jax.random.split(key)
+        idx1 = jax.random.randint(k1, (), 0, mnist_images.shape[0])
+        idx2 = jax.random.randint(k2, (), 0, mnist_images.shape[0])
+        x = jnp.concatenate([mnist_images[idx1], mnist_images[idx2]])
+        y = jnp.array([mnist_labels[idx1], mnist_labels[idx2]])
+        return x, y
+
+    def loss_fn_diag(W, M, x, y):
+        logits = forward(W, M, x).reshape(N_TASKS, NUM_CLASSES)
+        logits = logits * scales[:, None]
+        lp = jax.nn.log_softmax(logits, axis=-1)
+        return -jnp.mean(
+            jnp.sum(jax.nn.one_hot(y, NUM_CLASSES) * lp, axis=-1))
+
+    def utility_fn_diag(W, M, x, y):
+        logits = forward(W, M, x).reshape(N_TASKS, NUM_CLASSES)
+        logits = logits * scales[:, None]
+        sm = jax.nn.softmax(logits, axis=-1)
+        onehot = jax.nn.one_hot(y, NUM_CLASSES)
+        e = (onehot - sm).reshape(-1)
+        c = W * x[None, :]
+        u = jnp.abs(e[:, None] + c) - jnp.abs(e[:, None])
+        return u * M
+
+    def run_one(rng, lr, z_alpha):
+        rng, mkey = jax.random.split(rng)
+        M = sample_init_mask_dynamic(mkey, OUTPUT_DIM, INPUT_DIM, BUDGET)
+        W = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        U = jnp.zeros((OUTPUT_DIM, INPUT_DIM))
+        A = jnp.zeros((OUTPUT_DIM, INPUT_DIM), dtype=jnp.int32)
+        R = jnp.zeros((OUTPUT_DIM, INPUT_DIM), dtype=jnp.int32)
+        D = jnp.zeros((OUTPUT_DIM,), dtype=jnp.float32)
+        step = jnp.array(0, dtype=jnp.int32)
+        perm0 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        perm1 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+
+        def train_step(carry, inputs):
+            W, M, U, A, step, perm0, perm1 = carry
+            data_key, perm_key, rand_key = inputs
+            x, y_raw = make_sample(data_key)
+            y = jnp.array([perm0[y_raw[0]], perm1[y_raw[1]]])
+
+            if random_task is not None:
+                y = y.at[random_task].set(
+                    jax.random.randint(rand_key, (), 0, NUM_CLASSES))
+
+            loss_val, g = jax.value_and_grad(loss_fn_diag)(W, M, x, y)
+            W = W - lr * g * M
+            u = utility_fn_diag(W, M, x, y)
+            U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
+            A = A + M
+            step = step + 1
+
+            if permute_task is not None:
+                should_perm = (step >= permute_period) & (
+                    step % permute_period == 0)
+                new_perm = jax.random.permutation(
+                    perm_key, NUM_CLASSES).astype(jnp.int32)
+                if permute_task == 0:
+                    perm0 = jnp.where(should_perm, new_perm, perm0)
+                else:
+                    perm1 = jnp.where(should_perm, new_perm, perm1)
+
+            return (W, M, U, A, step, perm0, perm1), loss_val
+
+        def cycle(carry, _):
+            (W, M, U, A, R, D, step, perm0, perm1, rng) = carry
+            rng, tk, pk, gk, rk = jax.random.split(rng, 5)
+            data_keys = jax.random.split(tk, spp)
+            perm_keys = jax.random.split(pk, spp)
+            rand_keys = jax.random.split(rk, spp)
+            (W, M, U, A, step, perm0, perm1), losses = jax.lax.scan(
+                train_step, (W, M, U, A, step, perm0, perm1),
+                (data_keys, perm_keys, rand_keys))
+            cycle_loss = losses.mean()
+
+            D, R, U_corr, tau_w = _resolve_and_update_demand(
+                W, M, U, A, R, D, z_alpha)
+
+            M_pre = M
+            W, M, U, A, R, n_pruned = _prune_step7(
+                W, M, U, A, R, U_corr, tau_w)
+            M_post_prune = M
+
+            p = _allocate(D, allocation_method)
+            W, M, U, A, R, n_generated = _generate(
+                W, M, U, A, R, n_pruned, p, gk)
+
+            # Per-task stats from M snapshots
+            pruned_mask = (M_pre == 1) & (M_post_prune == 0)
+            gen_mask = (M_post_prune == 0) & (M == 1)
+            n_pruned_t0 = jnp.sum(pruned_mask[:nc, :])
+            n_pruned_t1 = jnp.sum(pruned_mask[nc:, :])
+            n_gen_t0 = jnp.sum(gen_mask[:nc, :])
+            n_gen_t1 = jnp.sum(gen_mask[nc:, :])
+            n_active_t0 = jnp.sum(M[:nc, :])
+            n_active_t1 = jnp.sum(M[nc:, :])
+
+            return (W, M, U, A, R, D, step, perm0, perm1, rng), \
+                   (cycle_loss,
+                    n_pruned.astype(jnp.int32),
+                    n_generated.astype(jnp.int32),
+                    jnp.sum(M).astype(jnp.int32),
+                    D,
+                    n_pruned_t0.astype(jnp.int32),
+                    n_pruned_t1.astype(jnp.int32),
+                    n_gen_t0.astype(jnp.int32),
+                    n_gen_t1.astype(jnp.int32),
+                    n_active_t0.astype(jnp.int32),
+                    n_active_t1.astype(jnp.int32))
+
+        init_carry = (W, M, U, A, R, D, step, perm0, perm1, rng)
+        final_carry, outputs = jax.lax.scan(
+            cycle, init_carry, None, length=n_cycles)
+
+        final_M = final_carry[1]
+        return (final_M,) + outputs
+
+    @jax.jit
+    def run_all(rngs, lr, z_alpha):
+        return jax.vmap(lambda r: run_one(r, lr, z_alpha))(rngs)
+
+    return run_all
+
+
+def get_run_fn_step7_diag(n_seeds, n_cycles=N_CYCLES, spp=SPP,
+                          allocation_method=_ALLOC_CLIPPED_LINEAR,
+                          permute_task=None, permute_period=PERMUTE_PERIOD,
+                          task_scales=None, random_task=None):
+    key = ('step7_diag', n_seeds, n_cycles, spp, allocation_method,
+           permute_task, permute_period,
+           tuple(task_scales) if task_scales else None,
+           random_task)
+    if key not in _RUN_FN_CACHE:
+        mnist_images, mnist_labels = load_mnist_normalized()
+        _RUN_FN_CACHE[key] = build_run_fn_step7_diag(
+            mnist_images, mnist_labels, n_cycles, spp,
+            allocation_method, permute_task, permute_period,
+            task_scales, random_task)
+    return _RUN_FN_CACHE[key]
+
+
+def aggregate_results_step7_diag(all_M, all_cycle_loss, all_pruned,
+                                 all_gen, all_active, all_D,
+                                 all_pruned_t0, all_pruned_t1,
+                                 all_gen_t0, all_gen_t1,
+                                 all_active_t0, all_active_t1,
+                                 n_cycles=N_CYCLES, spp=SPP,
+                                 window_log_steps=DIAG_WINDOW_STEPS):
+    all_M = np.asarray(all_M)
+    all_cycle_loss = np.asarray(all_cycle_loss)
+    all_D = np.asarray(all_D)
+    S = all_cycle_loss.shape[0]
+
+    eval_window_cycles = min(EVAL_WINDOW_STEPS // spp, n_cycles)
+    if eval_window_cycles < 1:
+        eval_window_cycles = 1
+    final_losses = all_cycle_loss[:, -eval_window_cycles:].mean(axis=1)
+
+    wlc = max(1, window_log_steps // spp)
+    n_win = n_cycles // wlc
+    n_trim = n_win * wlc
+    window_steps = np.arange(1, n_win + 1) * wlc * spp
+
+    def _window_sum_mean(arr):
+        a = np.asarray(arr)[:, :n_trim]
+        return a.reshape(S, n_win, wlc).sum(axis=2).mean(axis=0)
+
+    def _window_last_mean(arr):
+        a = np.asarray(arr)[:, :n_trim]
+        return a.reshape(S, n_win, wlc)[:, :, -1].mean(axis=0)
+
+    def _window_loss(arr):
+        a = np.asarray(arr)[:, :n_trim]
+        return a.reshape(S, n_win, wlc).mean(axis=2)
+
+    windowed_loss = _window_loss(all_cycle_loss)
+
+    # Demand per task: mean of D[:nc] and D[nc:] per window
+    nc = NUM_CLASSES
+    D_trim = all_D[:, :n_trim, :]
+    D_win = D_trim.reshape(S, n_win, wlc, OUTPUT_DIM)[:, :, -1, :]
+    demand_t0_w = D_win[:, :, :nc].mean(axis=2).mean(axis=0)   # (n_win,)
+    demand_t1_w = D_win[:, :, nc:].mean(axis=2).mean(axis=0)
+    demand_full_w = D_win.mean(axis=0)                          # (n_win, 20)
+
+    purs, ents = batch_purity_entropy_linear(all_M, INPUT_PER_TASK, N_TASKS)
+    aligns = batch_task_alignment_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
+
+    return dict(
+        final_losses=final_losses, purities=purs, entropies=ents,
+        alignments=aligns,
+        windowed_loss=windowed_loss, window_steps=window_steps,
+        pruned_w=_window_sum_mean(all_pruned),
+        gen_w=_window_sum_mean(all_gen),
+        active_w=_window_last_mean(all_active),
+        demand_t0_w=demand_t0_w,
+        demand_t1_w=demand_t1_w,
+        demand_full_w=demand_full_w,
+        pruned_t0_w=_window_sum_mean(all_pruned_t0),
+        pruned_t1_w=_window_sum_mean(all_pruned_t1),
+        gen_t0_w=_window_sum_mean(all_gen_t0),
+        gen_t1_w=_window_sum_mean(all_gen_t1),
+        active_t0_w=_window_last_mean(all_active_t0),
+        active_t1_w=_window_last_mean(all_active_t1),
+        spp=spp,
+    )
+
+
+def run_generation_diag(lr, ci=0.9, n_seeds=N_SEEDS, spp=SPP,
+                        n_cycles=N_CYCLES,
+                        allocation_method=_ALLOC_CLIPPED_LINEAR,
+                        permute_task=None, permute_period=PERMUTE_PERIOD,
+                        task_scales=None, random_task=None,
+                        window_log_steps=DIAG_WINDOW_STEPS):
+    import scipy.stats
+    z_alpha = float(scipy.stats.norm.ppf(ci))
+    rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
+    run_fn = get_run_fn_step7_diag(
+        n_seeds, n_cycles, spp, allocation_method,
+        permute_task, permute_period, task_scales, random_task)
+    out = run_fn(rngs, jnp.float32(lr), jnp.float32(z_alpha))
+    jax.block_until_ready(out)
+    (all_M, all_cycle_loss, all_pruned, all_gen, all_active, all_D,
+     all_pruned_t0, all_pruned_t1, all_gen_t0, all_gen_t1,
+     all_active_t0, all_active_t1) = out
+    return aggregate_results_step7_diag(
+        all_M, all_cycle_loss, all_pruned, all_gen, all_active, all_D,
+        all_pruned_t0, all_pruned_t1, all_gen_t0, all_gen_t1,
+        all_active_t0, all_active_t1,
+        n_cycles, spp, window_log_steps)
+
+
+def log_result_metrics_step7_diag(results, t0_label='task_0',
+                                  t1_label='task_1'):
+    """Log diagnostic step 7 metrics with per-task labels."""
+    import mlflow
+    for name, arr in [('final_loss', results['final_losses']),
+                      ('alignment', results['alignments']),
+                      ('purity', results['purities']),
+                      ('entropy', results['entropies'])]:
+        mlflow.log_metric(name, float(arr.mean()))
+        mlflow.log_metric(f'{name}_ci95', ci95(arr))
+
+    ws = results['window_steps']
+    for t, s in enumerate(ws):
+        si = int(s)
+        mlflow.log_metric('loss_window',
+                          float(results['windowed_loss'].mean(axis=0)[t]),
+                          step=si)
+        mlflow.log_metric('n_pruned', float(results['pruned_w'][t]),
+                          step=si)
+        mlflow.log_metric('n_generated', float(results['gen_w'][t]),
+                          step=si)
+        mlflow.log_metric('n_active', float(results['active_w'][t]),
+                          step=si)
+        mlflow.log_metric(f'demand_{t0_label}',
+                          float(results['demand_t0_w'][t]), step=si)
+        mlflow.log_metric(f'demand_{t1_label}',
+                          float(results['demand_t1_w'][t]), step=si)
+        mlflow.log_metric(f'pruned_{t0_label}',
+                          float(results['pruned_t0_w'][t]), step=si)
+        mlflow.log_metric(f'pruned_{t1_label}',
+                          float(results['pruned_t1_w'][t]), step=si)
+        mlflow.log_metric(f'generated_{t0_label}',
+                          float(results['gen_t0_w'][t]), step=si)
+        mlflow.log_metric(f'generated_{t1_label}',
+                          float(results['gen_t1_w'][t]), step=si)
+        mlflow.log_metric(f'active_{t0_label}',
+                          float(results['active_t0_w'][t]), step=si)
+        mlflow.log_metric(f'active_{t1_label}',
+                          float(results['active_t1_w'][t]), step=si)
