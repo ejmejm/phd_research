@@ -38,12 +38,14 @@ Plasticity is not the problem — the search algorithm is.
 To isolate which component of the guided search matters, three configs
 progressively remove the column guidance:
 
-| Config | Utility fn | Generation fn | Test Acc |
-|--------|-----------|--------------|----------|
-| `stationary` | `column_utility` | `column_generate` | ~95.6% |
-| `relaxed_outputs` | `column_utility` | `column_generate_relaxed` | ~95.6% |
-| `normal_utility` | `normalized_contribution_utility` | `column_generate_relaxed` | ~89.4% |
-| `no_column` | `normalized_contribution_utility` | `free_generate` | ~89.4% |
+
+| Config            | Utility fn                        | Generation fn             | Test Acc |
+| ----------------- | --------------------------------- | ------------------------- | -------- |
+| `stationary`      | `column_utility`                  | `column_generate`         | ~95.6%   |
+| `relaxed_outputs` | `column_utility`                  | `column_generate_relaxed` | ~95.6%   |
+| `normal_utility`  | `normalized_contribution_utility` | `column_generate_relaxed` | ~89.4%   |
+| `no_column`       | `normalized_contribution_utility` | `free_generate`           | ~89.4%   |
+
 
 **Conclusion.** The column-based utility function (not the generation strategy)
 is the dominant factor.  Without it, performance drops to ~89% regardless of
@@ -69,7 +71,7 @@ tracking:
 
 - `init_mode=random`: Normal random init (cross-column connections)
 - `init_mode=column`: All connections within-column; 104 units per column per
-  layer (evenly distributed)
+layer (evenly distributed)
 
 ```bash
 python experiments/column_guided_search.py --config-name utility_comparison init_mode=random
@@ -131,10 +133,11 @@ mlflow-sweeper conf/column_guided/mixed_generation_ns_sweep.yaml
 
 **Result.** Higher non-stationarity → more new features adopted.  The surviving
 new features are overwhelmingly column-constrained.  This confirms that:
+
 1. Non-stationarity solves the blocking problem
 2. When blocking is removed, within-column features *are* preferentially kept
 3. The utility function can discover structure — it just needs churn to overcome
-   the incumbency advantage of established features
+  the incumbency advantage of established features
 
 ### What's next: does this actually help performance?
 
@@ -187,16 +190,16 @@ Cols 3-4 are empty.  When `init_mode=column`, units are distributed evenly
 (104 per column).
 
 **Column assignment** is purely positional:
+
 - Input pixel `p` → column `p // (input_dim // n_tasks)`
 - Hidden unit slot `u` → column `u // (max_units // n_tasks)`
 - Output neuron `k` → column `k // (output_dim // n_tasks)`
 
-**`column_utility`** (used in guided search): if a unit has any cross-column
+`**column_utility`** (used in guided search): if a unit has any cross-column
 connections, `utility = -cross_count` (pruned first); otherwise
 `utility = contribution_utility`.
 
-**`normalized_contribution_utility`** (used in mixed generation): `mean|act| ×
-sum|outgoing_weights| / max(n_outgoing, 1)`.  No column bias.
+`**normalized_contribution_utility`** (used in mixed generation): `mean|act| × sum|outgoing_weights| / max(n_outgoing, 1)`.  No column bias.
 
 **Structure modification** happens every `prune_frequency=200` steps.  The prune
 accumulator grows by `prune_rate × active_connections` each step and carries
@@ -205,11 +208,14 @@ over unused budget across cycles.  Generation fills up to
 
 ## Reference: Config Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `variant` | `column_guided` | Which utility/generation functions to use |
-| `init_mode` | `random` | `random` or `column` (within-column init) |
-| `dataset.permute_period` | `0` | Steps between label permutations (0=stationary) |
-| `dataset.permute_stop` | `0` | Stop permuting after this step (0=never) |
-| `structure_tracker.enabled` | `true` | Set `false` to disable pruning/generation |
-| `snapshot_subsample` | `10` | Keep every Nth step in snapshot data |
+
+| Option                      | Default         | Description                                     |
+| --------------------------- | --------------- | ----------------------------------------------- |
+| `variant`                   | `column_guided` | Which utility/generation functions to use       |
+| `init_mode`                 | `random`        | `random` or `column` (within-column init)       |
+| `dataset.permute_period`    | `0`             | Steps between label permutations (0=stationary) |
+| `dataset.permute_stop`      | `0`             | Stop permuting after this step (0=never)        |
+| `structure_tracker.enabled` | `true`          | Set `false` to disable pruning/generation       |
+| `snapshot_subsample`        | `10`            | Keep every Nth step in snapshot data            |
+
+
