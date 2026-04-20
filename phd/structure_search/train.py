@@ -28,6 +28,8 @@ from phd.jax_core.utils import tree_replace
 from phd.research_utils.logging import (
     init_experiment,
     init_child_runs,
+    import_logger,
+    bind_to_active_run,
     log_metrics,
     log_child_metrics,
     finish_child_runs,
@@ -110,6 +112,106 @@ def _make_output_only_filter_spec(model: DynamicNetwork):
     """Build optimizer filter_spec for DynamicNetwork: only output_weights are trainable."""
     spec = jax.tree.map(lambda _: False, model)
     return eqx.tree_at(lambda n: n.output_weights, spec, True)
+
+
+def _apply_random_sparsity(
+    model: DynamicNetwork, key: PRNGKeyArray,
+    max_in: Optional[int] = None, max_out: Optional[int] = None,
+) -> DynamicNetwork:
+    """Subsample per-unit input and output counts to induce random sparsity.
+
+    For each active hidden unit:
+      - Sample k_in uniformly from [1, min(existing_fan_in, max_in)]; keep
+        only the first k_in incoming slots (init_random_dynamic_network
+        packs active connections into leading slots, so this is well-defined).
+      - Sample k_out uniformly from [1, min(existing_fan_out, max_out)];
+        keep only k_out output_mask columns active (rest zeroed).
+
+    max_in / max_out default to the model's structural caps
+    (``max_connections_per_unit`` and ``output_dim``) — i.e. no extra cap
+    beyond what the init already produced. Pass explicit caps when the
+    init's structural limit differs from the desired subsample bound (e.g.
+    `max_connections_per_unit=256` for generation headroom but
+    ``max_in=128`` for the init distribution).
+
+    Hidden-to-hidden outgoing is rebuilt via build_outgoing_indices afterward.
+    Turns the deterministic-fan-in / all-to-all-output init into a
+    random-fan-in / random-fan-out init.
+    """
+    max_layers = model.max_layers
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+    output_dim = model.output_dim
+
+    if max_in is None:
+        max_in = max_conns
+    if max_out is None:
+        max_out = output_dim
+
+    in_key, out_key = jax.random.split(key)
+
+    # --- Subsample incoming per unit ---
+    existing_in = (model.input_indices >= 0).sum(axis=-1)  # (max_layers, max_units)
+    active_units = model.unit_mask == 1
+    max_in_const = jnp.int32(max_in)
+
+    def draw_k_in(k_rng, existing, is_active):
+        cap = jnp.minimum(existing, max_in_const)
+        lo = jnp.int32(1)
+        hi = jnp.maximum(cap, 1) + 1
+        drawn = jax.random.randint(k_rng, (), lo, hi).astype(jnp.int32)
+        return jnp.where(is_active & (existing > 0), drawn, existing.astype(jnp.int32))
+
+    def per_layer_in(layer_key, existing_l, active_l):
+        unit_keys = jax.random.split(layer_key, max_units)
+        return jax.vmap(draw_k_in)(unit_keys, existing_l, active_l)
+
+    layer_in_keys = jax.random.split(in_key, max_layers)
+    k_in = jax.vmap(per_layer_in)(layer_in_keys, existing_in, active_units)
+
+    slot_idx = jnp.arange(max_conns)[None, None, :]
+    keep_slot = slot_idx < k_in[:, :, None]
+    new_input_indices = jnp.where(keep_slot, model.input_indices, jnp.int32(-1))
+    new_weights = jnp.where(keep_slot, model.weights, 0.0)
+
+    # --- Subsample output (hidden-to-output) per last-layer hidden unit ---
+    last_layer = max_layers - 1
+    buf_positions = model.input_dim + last_layer * max_units + jnp.arange(max_units)
+    existing_out_col = model.output_mask[:, buf_positions].sum(axis=0)  # (max_units,)
+    last_active = model.unit_mask[last_layer] == 1
+    old_cols = model.output_mask[:, buf_positions].T.astype(jnp.int32)  # (max_units, output_dim)
+
+    max_out_const = jnp.int32(max_out)
+
+    def subsample_one_output_unit(unit_key, existing, is_active, mask_col):
+        k_rng, noise_rng = jax.random.split(unit_key)
+        cap = jnp.minimum(existing, max_out_const)
+        lo = jnp.int32(1)
+        hi = jnp.maximum(cap, 1) + 1
+        drawn = jax.random.randint(k_rng, (), lo, hi).astype(jnp.int32)
+        k_out = jnp.where(is_active & (existing > 0), drawn, existing.astype(jnp.int32))
+        noise = jax.random.uniform(noise_rng, (output_dim,))
+        score = jnp.where(mask_col > 0, noise, 2.0)
+        rank = jnp.argsort(score)
+        keep_rank = (jnp.arange(output_dim) < k_out).astype(jnp.int32)
+        new_col = jnp.zeros(output_dim, dtype=jnp.int32).at[rank].set(keep_rank)
+        return new_col * (mask_col > 0).astype(jnp.int32)
+
+    out_keys = jax.random.split(out_key, max_units)
+    new_cols = jax.vmap(subsample_one_output_unit)(
+        out_keys, existing_out_col, last_active, old_cols,
+    )  # (max_units, output_dim)
+    new_output_mask = model.output_mask.at[:, buf_positions].set(new_cols.T)
+    new_output_weights = jnp.where(
+        new_output_mask > 0, model.output_weights, 0.0,
+    )
+
+    model = eqx.tree_at(
+        lambda m: (m.input_indices, m.weights, m.output_mask, m.output_weights),
+        model,
+        (new_input_indices, new_weights, new_output_mask, new_output_weights),
+    )
+    return build_outgoing_indices(model)
 
 
 def prepare_experiment(
@@ -204,6 +306,10 @@ def prepare_experiment(
                 init_strategy=cfg.model.get('init_strategy', 'linear'),
                 key=model_key,
             )
+            if cfg.model.get('random_sparsity_init', False):
+                model = _apply_random_sparsity(
+                    model, key=rng_from_string(rng, 'random_sparsity'),
+                )
             if cfg.model.get('freeze_hidden_weights', False):
                 filter_spec = _make_output_only_filter_spec(model)
             else:
@@ -419,9 +525,13 @@ def train_step(
     n_model_layers = new_model.max_layers if hasattr(new_model, 'max_layers') else 0
     pruned_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
     generated_per_layer = jnp.zeros(n_model_layers, dtype=jnp.int32)
+    pruned_connections = jnp.array(0, dtype=jnp.int32)
+    generated_connections = jnp.array(0, dtype=jnp.int32)
     if do_restructure and isinstance(new_tracker, ConnectivityManagerBase):
         rng, restructure_rng = jax.random.split(train_state.rng)
-        new_tracker, new_model, new_optimizer, pruned_per_layer, generated_per_layer, _, _ = (
+        (new_tracker, new_model, new_optimizer,
+         pruned_per_layer, generated_per_layer,
+         pruned_connections, generated_connections) = (
             new_tracker.modify_structure(new_model, new_optimizer, rng=restructure_rng))
 
     new_state = tree_replace(
@@ -436,6 +546,8 @@ def train_step(
         loss=loss, correct=correct,
         pruned_per_layer=pruned_per_layer,
         generated_per_layer=generated_per_layer,
+        pruned_connections=pruned_connections,
+        generated_connections=generated_connections,
     )
 
 
@@ -718,10 +830,19 @@ def run_experiment(
 # Entry point
 # ---------------------------------------------------------------------------
 
-@hydra.main(config_path='conf', config_name='config', version_base='1.1')
-def main(cfg: DictConfig) -> None:
+def run_config(cfg: DictConfig) -> dict:
+    """Run one training experiment and return summary metrics.
+
+    Callable variant of main(). Does NOT call init_experiment /
+    finish_experiment — the caller owns the MLflow run lifecycle so sweep
+    drivers can reuse an existing active run per trial. ``import_logger``
+    is still called so the module-level mlflow/wandb/comet_ml globals
+    inside ``research_utils.logging`` are populated before they're used
+    by ``init_child_runs`` / ``log_metrics`` / etc.
+    """
     configure_jax(cfg)
-    cfg = init_experiment(cfg.project, cfg)
+    import_logger(cfg)
+    bind_to_active_run(cfg)
 
     # Normalize seeds
     if cfg.seed is None:
@@ -784,7 +905,16 @@ def main(cfg: DictConfig) -> None:
         }, cfg)
 
     finish_child_runs(cfg)
-    finish_experiment(cfg)
+    return summary
+
+
+@hydra.main(config_path='conf', config_name='config', version_base='1.1')
+def main(cfg: DictConfig) -> None:
+    cfg = init_experiment(cfg.project, cfg)
+    try:
+        run_config(cfg)
+    finally:
+        finish_experiment(cfg)
 
 
 if __name__ == '__main__':

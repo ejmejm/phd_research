@@ -47,12 +47,13 @@ from phd.feature_search.jax_core.experiment_helpers import (
 )
 from phd.jax_core.utils import configure_jax, count_params, stack_pytrees, tree_replace
 from phd.research_utils.logging import (
-    init_experiment, init_child_runs, log_metrics, log_child_metrics,
+    init_experiment, init_child_runs, import_logger, bind_to_active_run,
+    log_metrics, log_child_metrics,
     finish_child_runs, finish_experiment,
 )
 from phd.structure_search.connectivity_manager import (
     ConnectivityManager, ConnectionConnectivityManager, ConnectionStats,
-    UnitStats, contribution_utility, median_utility_init,
+    UnitStats, contribution_utility, loo_utility, median_utility_init,
     contribution_connection_utility, propagated_connection_utility,
     _unit_buf_positions, _prune_mask_to_buf_mask, _reset_optimizer_state,
     _reset_optimizer_state_connections, assign_sparse_outgoing,
@@ -809,6 +810,7 @@ def free_generate(
     output_connect_strategy: str = 'all',
     *,
     n_tasks: int,
+    random_input_count: bool = False,
 ):
     """Variant 3: no column restrictions on either incoming or outgoing connections.
 
@@ -817,6 +819,10 @@ def free_generate(
     assign_outgoing_relaxed with column_priority=False, so targets are chosen
     purely at random from all outputs and all later-layer hidden units.
     The number of outgoing connections per unit is sampled from [1, max_out].
+
+    If random_input_count is True, the number of incoming connections per unit
+    is sampled from U[1, max_connections_per_unit // 2] instead of being fixed
+    at max_connections_per_unit // 2. Default False preserves legacy behavior.
     """
     max_layers = model.max_layers
     max_units = model.max_units_per_layer
@@ -860,12 +866,18 @@ def free_generate(
     sample_keys = jax.random.split(sample_rng, max_new_units)
 
     def sample_one_unit(key, cand_layer):
-        _, key2, key3 = jax.random.split(key, 3)
         avail = available[cand_layer]
         n_available = jnp.sum(avail)
         half_conns = jnp.maximum(max_conns // 2, 1)
-        n_conns = jnp.minimum(n_available, half_conns)
-        n_conns = jnp.maximum(n_conns, 1)
+        if random_input_count:
+            _, key2, key3, key4 = jax.random.split(key, 4)
+            n_conns_draw = jax.random.randint(key4, (), 1, half_conns + 1)
+            n_conns = jnp.minimum(n_conns_draw, n_available)
+            n_conns = jnp.maximum(n_conns, 1)
+        else:
+            _, key2, key3 = jax.random.split(key, 3)
+            n_conns = jnp.minimum(n_available, half_conns)
+            n_conns = jnp.maximum(n_conns, 1)
         shuffle_noise = jax.random.uniform(key2, (buffer_size,))
         shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
         sorted_idx = jnp.argsort(shuffle_key)
@@ -1205,12 +1217,17 @@ def free_generate_protected(
     *,
     n_tasks: int,
     column_tag: Array,
+    random_input_count: bool = False,
 ):
     """Like free_generate but outgoing connections respect column_tag protection.
 
     Free-generated units cannot push outgoing connections to column-tagged units
     in a different column.  Uses assign_outgoing_protected instead of
     assign_outgoing_relaxed.
+
+    If random_input_count is True, the number of incoming connections per unit
+    is sampled from U[1, max_connections_per_unit // 2]. Default False
+    preserves legacy behavior.
     """
     max_layers = model.max_layers
     max_units = model.max_units_per_layer
@@ -1253,12 +1270,18 @@ def free_generate_protected(
     sample_keys = jax.random.split(sample_rng, max_new_units)
 
     def sample_one_unit(key, cand_layer):
-        _, key2, key3 = jax.random.split(key, 3)
         avail = available[cand_layer]
         n_available = jnp.sum(avail)
         half_conns = jnp.maximum(max_conns // 2, 1)
-        n_conns = jnp.minimum(n_available, half_conns)
-        n_conns = jnp.maximum(n_conns, 1)
+        if random_input_count:
+            _, key2, key3, key4 = jax.random.split(key, 4)
+            n_conns_draw = jax.random.randint(key4, (), 1, half_conns + 1)
+            n_conns = jnp.minimum(n_conns_draw, n_available)
+            n_conns = jnp.maximum(n_conns, 1)
+        else:
+            _, key2, key3 = jax.random.split(key, 3)
+            n_conns = jnp.minimum(n_available, half_conns)
+            n_conns = jnp.maximum(n_conns, 1)
         shuffle_noise = jax.random.uniform(key2, (buffer_size,))
         shuffle_key = jnp.where(avail, shuffle_noise, 2.0)
         sorted_idx = jnp.argsort(shuffle_key)
@@ -1336,12 +1359,17 @@ def mixed_generate(
     *,
     n_tasks: int,
     column_tag: Array,
+    random_input_count: bool = False,
 ):
     """Generate units: half column-constrained, half free (with tag protection).
 
     Column-constrained units use column_generate (within-column incoming and
     outgoing).  Free units use free_generate_protected (unrestricted incoming,
     outgoing protected from cross-column connections to tagged units).
+
+    random_input_count applies only to the free half (it would change the
+    structural meaning of the column-constrained half). Default False
+    preserves legacy behavior.
 
     Returns updated column_tag as the last element of gen_info so the caller
     can extract and store it.
@@ -1363,6 +1391,7 @@ def mixed_generate(
     model, unit_stats, remaining2, gen_mask_free, gen_info = free_generate_protected(
         model, unit_stats, half_budget, half_units, init_utility, rng2,
         n_tasks=n_tasks, column_tag=column_tag,
+        random_input_count=random_input_count,
     )
 
     # Tag newly created free units as 2
@@ -1836,8 +1865,17 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
             init_strategy=cfg.model.get('init_strategy', 'linear'),
             key=model_key,
         )
-        # Replace dense all-to-all output init with sparse random connections
-        model = _sparsify_outputs(model, output_init_key)
+        if cfg.model.get('random_sparsity_init', False):
+            # Import locally to avoid pulling train.py at module-import time.
+            from phd.structure_search.train import _apply_random_sparsity
+            model = _apply_random_sparsity(
+                model, key=rng_from_string(rng, 'random_sparsity'),
+                max_in=cfg.model.get('random_sparsity_max_in', None),
+                max_out=cfg.model.get('random_sparsity_max_out', None),
+            )
+        else:
+            # Replace dense all-to-all output init with sparse random connections
+            model = _sparsify_outputs(model, output_init_key)
 
         optimizer = prepare_optimizer(
             model, cfg.optimizer.name, cfg.optimizer,
@@ -1845,6 +1883,7 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
         )
 
         variant = cfg.get('variant', 'column_guided')
+        random_input_count = cfg.model.get('random_input_count', False)
         if variant == 'relaxed_outputs':
             utility_fn = partial(column_utility, n_tasks=n_tasks)
             generate_fn = partial(column_generate_relaxed, n_tasks=n_tasks)
@@ -1853,16 +1892,25 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
             generate_fn = partial(column_generate_relaxed, n_tasks=n_tasks)
         elif variant == 'no_column':
             utility_fn = normalized_contribution_utility
-            generate_fn = partial(free_generate, n_tasks=n_tasks)
+            generate_fn = partial(
+                free_generate, n_tasks=n_tasks,
+                random_input_count=random_input_count,
+            )
         elif variant == 'single_output':
             utility_fn = normalized_contribution_utility
+            generate_fn = partial(single_output_generate, n_tasks=n_tasks)
+        elif variant == 'loo_single_output':
+            utility_fn = loo_utility
             generate_fn = partial(single_output_generate, n_tasks=n_tasks)
         elif variant == 'utility_comparison':
             utility_fn = normalized_contribution_utility
             generate_fn = partial(column_generate, n_tasks=n_tasks)  # unused
         elif variant == 'mixed_generation':
             utility_fn = normalized_contribution_utility
-            generate_fn = partial(mixed_generate, n_tasks=n_tasks)
+            generate_fn = partial(
+                mixed_generate, n_tasks=n_tasks,
+                random_input_count=random_input_count,
+            )
         else:  # 'column_guided' (original)
             utility_fn = partial(column_utility, n_tasks=n_tasks)
             generate_fn = partial(column_generate, n_tasks=n_tasks)
@@ -2740,10 +2788,21 @@ def _save_utility_distribution_gif(full_data, cfg, n_frames=60, seed_idx=0):
 # Entry point
 # ---------------------------------------------------------------------------
 
-@hydra.main(config_path='../conf/column_guided', config_name='stationary', version_base='1.1')
-def main(cfg: DictConfig) -> None:
+def run_config(cfg: DictConfig) -> dict:
+    """Run a single column_guided_search experiment and return summary metrics.
+
+    Callable variant of main(): performs the same training + logging pipeline
+    but does NOT call init_experiment / finish_experiment — the caller is
+    responsible for the MLflow run lifecycle. This lets sweep drivers
+    (e.g. mlflow-sweeper's `run_sweep`) reuse an already-active run instead
+    of nesting a fresh one per trial. ``import_logger`` is still called so
+    the module-level mlflow/wandb/comet_ml globals inside
+    ``research_utils.logging`` are populated before they're used by
+    ``init_child_runs`` / ``log_metrics`` / etc.
+    """
     configure_jax(cfg)
-    cfg = init_experiment(cfg.project, cfg)
+    import_logger(cfg)
+    bind_to_active_run(cfg)
 
     if cfg.seed is None:
         cfg.seed = [np.random.randint(0, 1_000_000_000)]
@@ -2822,7 +2881,16 @@ def main(cfg: DictConfig) -> None:
         _save_snapshots(all_snapshots, cfg)
 
     finish_child_runs(cfg)
-    finish_experiment(cfg)
+    return summary
+
+
+@hydra.main(config_path='../conf/column_guided', config_name='stationary', version_base='1.1')
+def main(cfg: DictConfig) -> None:
+    cfg = init_experiment(cfg.project, cfg)
+    try:
+        run_config(cfg)
+    finally:
+        finish_experiment(cfg)
 
 
 if __name__ == '__main__':

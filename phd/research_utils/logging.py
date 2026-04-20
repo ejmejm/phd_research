@@ -314,18 +314,44 @@ def get_comet_sweep_id() -> Optional[str]:
 
 def import_logger(config: DictConfig) -> None:
     """Import the appropriate logging framework based on configuration.
-    
+
     Args:
         config: Hydra configuration object specifying which logger to use.
     """
     global wandb, comet_ml, mlflow
-    
+
     if config.get('mlflow', False):
         import mlflow
     if config.get('wandb', False):
         import wandb
     elif config.get('comet_ml', False):
         import comet_ml
+
+
+def bind_to_active_run(config: DictConfig) -> None:
+    """Populate module-level MLflow globals from the currently-active run.
+
+    For sweep drivers (e.g. mlflow-sweeper) that start the trial's MLflow
+    run themselves, callees that skip ``init_experiment`` still need the
+    module-level ``mlflow`` / ``_mlflow_run_id`` / ``_mlflow_client``
+    globals populated — otherwise ``log_metrics`` / ``init_child_runs``
+    will fail on ``None.set_tag(...)`` / ``None.log_metric(...)``.
+    Assumes ``mlflow.active_run()`` returns the trial run.
+    """
+    global mlflow, _mlflow_run_id, _mlflow_client
+    if not config.get('mlflow', False):
+        return
+    import mlflow as _mlflow
+    mlflow = _mlflow
+    active = mlflow.active_run()
+    if active is None:
+        raise RuntimeError(
+            'bind_to_active_run() called but no MLflow run is active. '
+            'Either call init_experiment() first, or start a run before '
+            'invoking run_config().'
+        )
+    _mlflow_run_id = active.info.run_id
+    _mlflow_client = mlflow.tracking.MlflowClient()
 
 
 def log_metrics(metrics: Dict[str, Union[int, float]], config: DictConfig, 

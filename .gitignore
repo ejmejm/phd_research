@@ -10,6 +10,7 @@ __pycache__/
 
 # Logs and outputs
 outputs/
+output/
 
 # Hydra outputs
 .hydra/
