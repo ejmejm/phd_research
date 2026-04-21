@@ -1,14 +1,14 @@
-"""Step 1 — Static, frozen-connectivity baselines.
+"""Step 1 — LR sweep over the three static baselines.
 
-Three variants at matched ~30k-connection parameter budget:
+Sweeps ``variant × lr`` at **5 seeds per trial** — light enough to scan the
+full LR grid cheaply but with enough noise averaging to pick a winner per
+variant. The winning LRs are consumed by ``01_main.py`` to re-run each
+variant at 20 seeds as an individual MLflow run (not a sweep).
+
+Variants (all at matched ~30k-connection budget):
 - ``dense``           — one-hidden-layer MLP, n_tasks=1 view of the 1568-dim input
 - ``block_sparse``    — one sub-MLP per task (n_tasks=2)
 - ``random_sparsity`` — DynamicNetwork with per-unit n_in ~ U[1,128], n_out ~ U[1,20]
-
-Sweeps LR × variant over the standard 260417 grid. Expected ordering on
-final loss: block_sparse > random_sparsity > dense (tighter oracle wins;
-random-sparsity falls between because it shares the dense input space
-while still getting random connection luck).
 """
 
 import sys
@@ -23,19 +23,22 @@ from mlflow_sweeper.runner import run_sweep
 from omegaconf import OmegaConf
 
 from common import (
-    LR_GRID, MLFLOW_PROJECT, build_step1_config,
+    BASE_SEED, LR_GRID, MLFLOW_PROJECT, build_step1_config,
     resolve_mlflow_tracking_uri, resolve_optuna_tracking_uri,
 )
 from phd.structure_search.train import run_config
 
 
+SWEEP_SEEDS = list(range(BASE_SEED, BASE_SEED + 5))   # 5 seeds for LR scan
+
+
 SWEEP_CONFIG = {
     'experiment': MLFLOW_PROJECT,
-    'sweep_name': 'step1_static_baselines',
+    'sweep_name': 'step1_lr_sweep',
     'algorithm': 'grid',
     'optuna_storage': resolve_optuna_tracking_uri(),
     'mlflow_storage': resolve_mlflow_tracking_uri(),
-    'output_dir': 'output/step1',
+    'output_dir': 'output/step1_lr_sweep',
     'spec': {
         'direction': 'minimize',
         'metric': 'asymptotic_loss',
@@ -58,7 +61,7 @@ SWEEP_CONFIG = {
 def objective(**params):
     variant = str(params['variant'])
     lr = float(params['lr'])
-    cfg = build_step1_config(variant=variant, lr=lr)
+    cfg = build_step1_config(variant=variant, lr=lr, seeds=SWEEP_SEEDS)
     return run_config(cfg)
 
 

@@ -37,10 +37,10 @@ OUTPUT_DIM = 20
 
 TOTAL_STEPS = 225_000
 LOG_FREQ = 2_000
-PERMUTE_PERIOD = 2_000
+PERMUTE_PERIOD = 4_000
 
 N_SEEDS = 20
-BASE_SEED = 42
+BASE_SEED = 260420
 SEEDS = list(range(BASE_SEED, BASE_SEED + N_SEEDS))
 
 BUDGET = 30_000           # target active-connection budget for all variants
@@ -54,15 +54,15 @@ H_BLOCK_SPARSE = 19       # BlockSparseMLP(n_tasks=2) count_params = 30172
 UNITS_RANDOM_SPARSITY = 405  # avg count_active_connections over 5 seeds = 30181
 
 # Steps 2-4: DynamicNetwork dimensions
-MAX_UNITS = 810           # 2 * UNITS_RANDOM_SPARSITY (headroom for generation)
+MAX_UNITS = 2000           # 2 * UNITS_RANDOM_SPARSITY (headroom for generation)
 MAX_CONNECTIONS_PER_UNIT = 256  # half_conns = 128 → up to 128 incoming per unit
 MAX_FAN_OUT = 40               # max_out = 20 → up to 20 outgoing per unit
 
 PRUNE_RATE = 0.0001
-PRUNE_FREQUENCY = 200
+PRUNE_FREQUENCY = 100
 
 # LR sweep grid (matches 260417 convention, extended to 2^-1)
-LR_GRID = [2**-13, 2**-11, 2**-9, 2**-7, 2**-5, 2**-3, 2**-1]
+LR_GRID = [2**-11, 2**-9, 2**-7, 2**-5, 2**-3]
 
 
 # =============================================================================
@@ -163,6 +163,9 @@ def build_step1_config(variant: str, lr: float,
             'max_fan_out': 20,
             'activation': ACTIVATION,
             'connect_all_to_output': False,
+            # No-op when hidden_dim > 0 (the wiring loop overwrites the
+            # init-strategy arrays). Only matters for the empty-init path
+            # (step 5's planned hidden_dim=0 + init_strategy='empty').
             'init_strategy': 'linear',
             'random_sparsity_init': True,
         }
@@ -207,6 +210,9 @@ def build_step_2_4_config(
         'max_fan_out': MAX_FAN_OUT,
         'activation': ACTIVATION,
         'connect_all_to_output': False,
+        # No-op when hidden_dim > 0 (the wiring loop overwrites the
+        # init-strategy arrays). Only matters for the empty-init path
+        # (step 5's planned hidden_dim=0 + init_strategy='empty').
         'init_strategy': 'linear',
         'random_input_count': random_input_count,
         # Start from random-sparsity connectivity so the init matches step 1.

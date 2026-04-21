@@ -30,7 +30,7 @@ input → 20 output), SGD, batch size 1, 225k training steps.
 ### Loss / accuracy
 - **asymptotic_loss** — mean training cross-entropy loss over the last
   10% of the run (~22.5k steps). Measures rate of adaptation under
-  non-stationarity (label permutations every 2000 steps), not peak
+  non-stationarity (label permutations every 4000 steps), not peak
   accuracy. Lower is better.
 - **asymptotic_accuracy** — per-task argmax accuracy averaged over the
   same window.
@@ -55,7 +55,7 @@ input → 20 output), SGD, batch size 1, 225k training steps.
 
 - **Task**: non-stationary parallel MNIST, `n_tasks=2`. One randomly
   chosen task has its label map replaced with a fresh permutation every
-  **2000 steps** (`dataset.permute_period=2000`).
+  **4000 steps** (`dataset.permute_period=4000`).
 - **Input dim**: 1568 (2 × 784, raw MNIST; step 5 will use normalized
   MNIST via `load_mnist_normalized`).
 - **Output dim**: 20 (2 × 10). Per-task softmax CE.

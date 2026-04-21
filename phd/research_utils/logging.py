@@ -337,6 +337,12 @@ def bind_to_active_run(config: DictConfig) -> None:
     globals populated — otherwise ``log_metrics`` / ``init_child_runs``
     will fail on ``None.set_tag(...)`` / ``None.log_metric(...)``.
     Assumes ``mlflow.active_run()`` returns the trial run.
+
+    Also logs the full flattened config as MLflow parameters on the active
+    run (mirroring the call ``init_experiment`` would have made). Keys
+    already set on the run (e.g. sweep axes logged by mlflow-sweeper) are
+    preserved — we compare against the active run's existing params and
+    only log the delta so the call is idempotent.
     """
     global mlflow, _mlflow_run_id, _mlflow_client
     if not config.get('mlflow', False):
@@ -352,6 +358,20 @@ def bind_to_active_run(config: DictConfig) -> None:
         )
     _mlflow_run_id = active.info.run_id
     _mlflow_client = mlflow.tracking.MlflowClient()
+
+    raw_dict_config = omegaconf.OmegaConf.to_container(
+        config, resolve=True, throw_on_missing=True,
+    )
+    flat_config = flatten_dict(raw_dict_config)
+    existing_params = _mlflow_client.get_run(_mlflow_run_id).data.params
+    new_params = {
+        k: str(v) for k, v in flat_config.items() if k not in existing_params
+    }
+    if new_params:
+        from mlflow.entities import Param
+        params = [Param(k, v) for k, v in new_params.items()]
+        for i in range(0, len(params), 100):
+            _mlflow_client.log_batch(_mlflow_run_id, params=params[i:i + 100])
 
 
 def log_metrics(metrics: Dict[str, Union[int, float]], config: DictConfig, 
