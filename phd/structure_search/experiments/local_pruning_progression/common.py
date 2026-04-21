@@ -133,11 +133,14 @@ def log_result_metrics(results: dict):
     (mean across seeds) so convergence is visible in MLflow.
     """
     import mlflow
-    for name, arr in [('final_loss', results['final_losses']),
-                      ('alignment', results['alignments']),
-                      ('separation_f1', results['separation_f1s']),
-                      ('purity', results['purities']),
-                      ('entropy', results['entropies'])]:
+    pairs = [('final_loss', results['final_losses']),
+             ('alignment', results['alignments']),
+             ('separation_f1', results['separation_f1s']),
+             ('purity', results['purities']),
+             ('entropy', results['entropies'])]
+    if 'final_accuracies' in results:
+        pairs.insert(1, ('final_accuracy', results['final_accuracies']))
+    for name, arr in pairs:
         mlflow.log_metric(name, float(arr.mean()))
         mlflow.log_metric(f'{name}_ci95', ci95(arr))
 
@@ -147,6 +150,11 @@ def log_result_metrics(results: dict):
     mean_traj = windowed.mean(axis=0)
     for t, s in enumerate(steps):
         mlflow.log_metric('loss_window_5k', float(mean_traj[t]), step=int(s))
+    if 'windowed_acc' in results:
+        acc_traj = np.asarray(results['windowed_acc']).mean(axis=0)
+        for t, s in enumerate(steps):
+            mlflow.log_metric('acc_window_5k', float(acc_traj[t]),
+                              step=int(s))
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -298,6 +306,26 @@ def loss_fn(W, M, x, y):
     return -jnp.mean(jnp.sum(jax.nn.one_hot(y, NUM_CLASSES) * lp, axis=-1))
 
 
+def bce_loss_fn(W, M, x, y):
+    """Per-output BCE with a 20-dim binary target (two 1's, one per task).
+
+    Scaled by /N_TASKS to keep the per-task loss magnitude roughly
+    comparable to softmax CE — makes LR comparisons across loss variants
+    less apples-vs-oranges.
+    """
+    logits = forward(W, M, x)
+    target = jax.nn.one_hot(y, NUM_CLASSES).reshape(-1)
+    lp = (target * jax.nn.log_sigmoid(logits)
+          + (1.0 - target) * jax.nn.log_sigmoid(-logits))
+    return -jnp.sum(lp) / float(N_TASKS)
+
+
+LOSS_FNS = {
+    'softmax_ce': loss_fn,
+    'bce': bce_loss_fn,
+}
+
+
 def contribution_utility(W, M, x, y):
     return jnp.abs(x)[None, :] * jnp.abs(W) * M
 
@@ -312,9 +340,49 @@ def signed_utility(W, M, x, y):
     return u * M
 
 
+def bce_utility(W, M, x, y):
+    pre_act = forward(W, M, x)
+    target = jax.nn.one_hot(y, NUM_CLASSES).reshape(-1)
+    pre_act_removed = pre_act[:, None] - x[None, :] * W
+    lp = (target * jax.nn.log_sigmoid(pre_act)
+          + (1.0 - target) * jax.nn.log_sigmoid(-pre_act))
+    lp_removed = (target[:, None] * jax.nn.log_sigmoid(pre_act_removed)
+                  + (1.0 - target)[:, None]
+                  * jax.nn.log_sigmoid(-pre_act_removed))
+    u = (-lp_removed) - (-lp[:, None])
+    return u * M
+
+
+def softmax_ce_utility(W, M, x, y):
+    """Per-weight LOO utility under per-task softmax CE (the training loss).
+
+    Removing weight W[k, j] changes only logit[k] by d = −x[j]·W[k, j];
+    all other logits are untouched. Exploiting that, the LOO NLL delta
+    collapses to
+
+        U[k, j] = −d · 𝟙[k%NUM_CLASSES == y[k // NUM_CLASSES]]
+                  + log(1 + p_k · (exp(d) − 1))
+
+    where p_k = softmax(logits_task_t)[k % NUM_CLASSES] is the per-task
+    softmax probability at output k. Positive U ⇒ removing hurts NLL ⇒
+    keep.
+    """
+    logits = forward(W, M, x).reshape(N_TASKS, NUM_CLASSES)
+    p = jax.nn.softmax(logits, axis=-1).reshape(-1)
+    k_idx = jnp.arange(OUTPUT_DIM)
+    y_match = (k_idx % NUM_CLASSES
+               == y[k_idx // NUM_CLASSES]).astype(jnp.float32)
+    d = -x[None, :] * W
+    u = (-d * y_match[:, None]
+         + jnp.log1p(p[:, None] * jnp.expm1(d)))
+    return u * M
+
+
 UTILITY_FNS = {
     'contribution': contribution_utility,
     'signed': signed_utility,
+    'bce': bce_utility,
+    'softmax_ce': softmax_ce_utility,
 }
 
 
@@ -357,11 +425,14 @@ _RUN_FN_CACHE = {}
 
 def build_run_fn(mnist_images, mnist_labels, variant: str,
                  n_cycles: int = N_CYCLES, budget: int = BUDGET,
-                 utility_fn: str = 'contribution'):
+                 utility_fn: str = 'contribution',
+                 loss_fn_name: str = 'softmax_ce'):
     assert variant in ('dynamic', 'fixed_random', 'fixed_intask')
     assert utility_fn in UTILITY_FNS
+    assert loss_fn_name in LOSS_FNS
     is_dynamic = (variant == 'dynamic')
     utility_impl = UTILITY_FNS[utility_fn]
+    loss_impl = LOSS_FNS[loss_fn_name]
 
     def make_sample(key):
         k1, k2 = jax.random.split(key)
@@ -392,7 +463,11 @@ def build_run_fn(mnist_images, mnist_labels, variant: str,
             data_key, perm_key = inputs
             x, y_raw = make_sample(data_key)
             y = jnp.array([perm0[y_raw[0]], perm1[y_raw[1]]])
-            loss_val, g = jax.value_and_grad(loss_fn)(W, M, x, y)
+            loss_val, g = jax.value_and_grad(loss_impl)(W, M, x, y)
+            # Per-task accuracy from the same pre-update forward.
+            logits = forward(W, M, x).reshape(N_TASKS, NUM_CLASSES)
+            acc_val = jnp.mean((jnp.argmax(logits, axis=-1) == y)
+                               .astype(jnp.float32))
             W = W - lr * g * M
             u = utility_impl(W, M, x, y)
             U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
@@ -403,26 +478,28 @@ def build_run_fn(mnist_images, mnist_labels, variant: str,
             new_perm = jax.random.permutation(pk2, NUM_CLASSES).astype(jnp.int32)
             perm0 = jnp.where(should_perm & (which == 0), new_perm, perm0)
             perm1 = jnp.where(should_perm & (which == 1), new_perm, perm1)
-            return (W, M, U, step, perm0, perm1), loss_val
+            return (W, M, U, step, perm0, perm1), (loss_val, acc_val)
 
         def prune_cycle(carry, _):
             W, M, U, step, perm0, perm1, rng = carry
             rng, tk, pk = jax.random.split(rng, 3)
             data_keys = jax.random.split(tk, SPP)
             perm_keys = jax.random.split(pk, SPP)
-            (W, M, U, step, perm0, perm1), losses = jax.lax.scan(
+            (W, M, U, step, perm0, perm1), (losses, accs) = jax.lax.scan(
                 train_step, (W, M, U, step, perm0, perm1),
                 (data_keys, perm_keys))
             cycle_loss = losses.mean()
+            cycle_acc = accs.mean()
             if is_dynamic:
                 rng, prune_key = jax.random.split(rng)
                 W, M, U = prune_and_generate_one(W, M, U, prune_key)
-            return (W, M, U, step, perm0, perm1, rng), cycle_loss
+            return (W, M, U, step, perm0, perm1, rng), (cycle_loss, cycle_acc)
 
-        (W, M, U, step, perm0, perm1, rng), per_cycle_loss = jax.lax.scan(
+        (W, M, U, step, perm0, perm1, rng), (per_cycle_loss,
+                                              per_cycle_acc) = jax.lax.scan(
             prune_cycle, (W, M, U, step, perm0, perm1, rng),
             None, length=n_cycles)
-        return M, per_cycle_loss
+        return M, per_cycle_loss, per_cycle_acc
 
     @jax.jit
     def run_all(rngs, lr):
@@ -432,13 +509,14 @@ def build_run_fn(mnist_images, mnist_labels, variant: str,
 
 
 def get_run_fn(variant, n_seeds, n_cycles=N_CYCLES, budget=BUDGET,
-               utility_fn='contribution'):
-    key = (variant, n_seeds, n_cycles, budget, utility_fn)
+               utility_fn='contribution', loss_fn_name='softmax_ce'):
+    key = (variant, n_seeds, n_cycles, budget, utility_fn, loss_fn_name)
     if key not in _RUN_FN_CACHE:
         mnist_images, mnist_labels = load_mnist()
         _RUN_FN_CACHE[key] = build_run_fn(
             mnist_images, mnist_labels, variant, n_cycles,
-            budget=budget, utility_fn=utility_fn)
+            budget=budget, utility_fn=utility_fn,
+            loss_fn_name=loss_fn_name)
     return _RUN_FN_CACHE[key]
 
 
@@ -446,7 +524,8 @@ def get_run_fn(variant, n_seeds, n_cycles=N_CYCLES, budget=BUDGET,
 # Aggregate + run
 # ═════════════════════════════════════════════════════════════════════
 
-def aggregate_results(all_M, all_cycle_loss, n_cycles=N_CYCLES):
+def aggregate_results(all_M, all_cycle_loss, all_cycle_acc=None,
+                      n_cycles=N_CYCLES):
     all_M = np.asarray(all_M)
     all_cycle_loss = np.asarray(all_cycle_loss)
     S = all_cycle_loss.shape[0]
@@ -460,21 +539,30 @@ def aggregate_results(all_M, all_cycle_loss, n_cycles=N_CYCLES):
         all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
     f1s = batch_task_separation_f1_linear(
         all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
-    return dict(
+    out = dict(
         final_losses=final_losses, purities=purs, entropies=ents,
         alignments=aligns, separation_f1s=f1s,
         windowed_loss=windowed, window_steps=window_steps,
     )
+    if all_cycle_acc is not None:
+        all_cycle_acc = np.asarray(all_cycle_acc)
+        out['final_accuracies'] = all_cycle_acc[:, -EVAL_WINDOW_CYCLES:].mean(axis=1)
+        acc_trim = all_cycle_acc[:, :n_windows * WINDOW_LOG_CYCLES]
+        out['windowed_acc'] = acc_trim.reshape(
+            S, n_windows, WINDOW_LOG_CYCLES).mean(axis=2)
+    return out
 
 
 def run_variant(variant, lr, n_seeds=N_SEEDS, n_cycles=N_CYCLES,
-                budget=BUDGET, utility_fn='contribution'):
+                budget=BUDGET, utility_fn='contribution',
+                loss_fn_name='softmax_ce'):
     """Run one configuration across seeds, return aggregated results dict."""
     rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
-    run_fn = get_run_fn(variant, n_seeds, n_cycles, budget, utility_fn)
-    all_M, all_cycle_loss = run_fn(rngs, jnp.float32(lr))
-    jax.block_until_ready((all_M, all_cycle_loss))
-    return aggregate_results(all_M, all_cycle_loss, n_cycles)
+    run_fn = get_run_fn(variant, n_seeds, n_cycles, budget, utility_fn,
+                        loss_fn_name)
+    all_M, all_cycle_loss, all_cycle_acc = run_fn(rngs, jnp.float32(lr))
+    jax.block_until_ready((all_M, all_cycle_loss, all_cycle_acc))
+    return aggregate_results(all_M, all_cycle_loss, all_cycle_acc, n_cycles)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -710,12 +798,24 @@ def log_result_metrics_step4(results):
 # Step 6 — Statistical-confidence threshold pruning
 # ═════════════════════════════════════════════════════════════════════
 
-# Precomputed constant in the τ formula:
-#   K = (1 − 2/π) · (1 − β) / (1 + β)
-STAT_PRUNE_K = (1.0 - 2.0 / np.pi) * (1.0 - EMA_DECAY) / (1.0 + EMA_DECAY)
+# Precomputed constants in the τ formula:
+#   K = C · (1 − β) / (1 + β)
+# The leading C depends on the utility. For signed utility the per-sample
+# noise has the form |N(0,σ²)| − const, so Var ∝ (1 − 2/π)·σ² and
+# C = 1 − 2/π. For BCE, the per-sample term is (σ(pre_act) − target)·w·x
+# (no absolute value), so its per-sample variance is bounded by |w·x|·σ_x
+# directly and C = 1.
+STAT_PRUNE_K_SIGNED = (1.0 - 2.0 / np.pi) * (1.0 - EMA_DECAY) / (1.0 + EMA_DECAY)
+STAT_PRUNE_K_BCE = (1.0 - EMA_DECAY) / (1.0 + EMA_DECAY)
+STAT_PRUNE_K = STAT_PRUNE_K_SIGNED  # default / back-compat
+
+UTILITY_K = {
+    'signed': STAT_PRUNE_K_SIGNED,
+    'bce': STAT_PRUNE_K_BCE,
+}
 
 
-def prune_statistical(W, M, U, step, z_alpha):
+def prune_statistical(W, M, U, step, z_alpha, K=STAT_PRUNE_K):
     """Prune active connections where the bias-corrected EMA utility is
     below the per-weight statistical confidence threshold τ_w.
 
@@ -725,6 +825,9 @@ def prune_statistical(W, M, U, step, z_alpha):
         U_corr = U / (1 − β^t).
     A weight is pruned iff U_corr < τ_w, i.e. the utility is bad enough
     that we are 1 − α confident it isn't just noise.
+
+    `K` selects the utility-specific leading constant (STAT_PRUNE_K_SIGNED
+    for step 6 signed utility, STAT_PRUNE_K_BCE for step 8 BCE utility).
 
     t = step count (= age of the weight, since weights are never
     regenerated in this code path).
@@ -737,7 +840,7 @@ def prune_statistical(W, M, U, step, z_alpha):
     one_minus = jnp.maximum(1.0 - beta_t, 1e-12)
     U_corr = U / one_minus
     ratio = (1.0 + beta_t) / one_minus
-    tau = -z_alpha * jnp.abs(W) * jnp.sqrt(STAT_PRUNE_K * ratio)
+    tau = -z_alpha * jnp.abs(W) * jnp.sqrt(K * ratio)
     should_prune = (M == 1) & (U_corr < tau)
     n_pruned = jnp.sum(should_prune)
     keep = 1 - should_prune.astype(jnp.int32)
@@ -745,7 +848,7 @@ def prune_statistical(W, M, U, step, z_alpha):
 
 
 def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
-                       spp=SPP):
+                       spp=SPP, utility_fn='signed'):
     """Build JIT+vmap run function for step 6 statistical-threshold pruning.
 
     Like step 4 but swaps the U ≤ 0 rule for a per-weight statistical
@@ -754,8 +857,16 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
 
     Expects `mnist_images` to be pre-normalized (per-pixel std ≈ 1) so
     the formula can assume σ_x = 1 without runtime bookkeeping.
+
+    `utility_fn` selects the per-connection utility used to drive the
+    threshold: 'signed' (default, step 6) or 'bce' (step 8). The threshold
+    constant K is picked accordingly.
     """
-    utility_impl = signed_utility
+    assert utility_fn in UTILITY_FNS
+    assert utility_fn in UTILITY_K, (
+        f"utility_fn {utility_fn!r} has no K defined for the threshold")
+    utility_impl = UTILITY_FNS[utility_fn]
+    K = UTILITY_K[utility_fn]
 
     def make_sample(key):
         k1, k2 = jax.random.split(key)
@@ -812,7 +923,7 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
 
             # Prune (skip if already converged)
             W_p, M_p, U_p, n_pruned = prune_statistical(
-                W, M, U, step, z_alpha)
+                W, M, U, step, z_alpha, K)
             W = jnp.where(converged, W, W_p)
             M = jnp.where(converged, M, M_p)
             U = jnp.where(converged, U, U_p)
@@ -855,26 +966,30 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
     return run_all
 
 
-def get_run_fn_step6(n_seeds, max_cycles=N_CYCLES, spp=SPP):
-    key = ('step6', n_seeds, max_cycles, spp)
+def get_run_fn_step6(n_seeds, max_cycles=N_CYCLES, spp=SPP,
+                     utility_fn='signed'):
+    key = ('step6', n_seeds, max_cycles, spp, utility_fn)
     if key not in _RUN_FN_CACHE:
         mnist_images, mnist_labels = load_mnist_normalized()
         _RUN_FN_CACHE[key] = build_run_fn_step6(
-            mnist_images, mnist_labels, max_cycles, spp)
+            mnist_images, mnist_labels, max_cycles, spp, utility_fn)
     return _RUN_FN_CACHE[key]
 
 
 def run_statistical_variant(lr, z_alpha, n_seeds=N_SEEDS, spp=SPP,
-                            total_steps=TOTAL_STEPS):
+                            total_steps=TOTAL_STEPS, utility_fn='signed'):
     """Run step 6 statistical-threshold pruning across seeds.
 
     Holds total training steps constant across SPP values: n_cycles is
     derived as total_steps // spp so each run sees the same amount of
     training.
+
+    `utility_fn` selects the per-connection utility ('signed' for step 6,
+    'bce' for step 8).
     """
     max_cycles = total_steps // spp
     rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
-    run_fn = get_run_fn_step6(n_seeds, max_cycles, spp)
+    run_fn = get_run_fn_step6(n_seeds, max_cycles, spp, utility_fn)
     out = run_fn(rngs, jnp.float32(lr), jnp.float32(z_alpha))
     all_M, all_cycle_loss, all_pruned, all_active, converge_cycles = out
     jax.block_until_ready(out)

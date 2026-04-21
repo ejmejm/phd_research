@@ -742,6 +742,68 @@ Logged as `step7_generation_allocation_method={value}`.
    demand-driven generation in this setup is no better than uniform
    random generation, because the demand signal lacks structure.
 
+## Step 8 — Statistical threshold pruning with BCE utility
+
+**Hypothesis**: step 6's signed softmax-error utility is coupled across
+classes within a task — increasing the contribution to one class's logit
+necessarily changes the softmax of its siblings, so cross-task
+connections get noisy utility signals from within-task gradient churn.
+A **per-target BCE utility** treats each output logit as an independent
+binary classifier; cross-task inputs feed into heads whose target is
+always 0 once the net has learned, giving a cleaner and more stable
+negative-utility signal. Expect higher alignment / F1 at comparable
+loss to step 6.
+
+### Method
+
+Same pipeline as step 6 (fully-connected init, bias-corrected EMA,
+statistical threshold, normalized MNIST, 3-consecutive-zero stop),
+only the utility changes. For connection `(k, j)` with weight `W[k,j]`
+and input `x[j]`:
+
+```
+pre_act        = (W * M) @ x                    # (OUT,)
+target         = one_hot(y, NUM_CLASSES).ravel() # (OUT,), two 1's
+pre_act_removed = pre_act[:, None] − x[None, :] * W   # (OUT, IN)
+lp  = target · log σ(pre_act)  + (1 − target) · log σ(−pre_act)
+lp' = target · log σ(pre_act_removed) + (1 − target) · log σ(−pre_act_removed)
+U   = (−lp') − (−lp)
+```
+
+Sign convention matches signed utility (positive = keep, negative =
+prune candidate), so the step 6 threshold formula
+
+```
+τ_w(t) = −z_α · |w| · σ_x · sqrt(K · (1 + β^t) / (1 − β^t))
+```
+
+applies, but **K changes**. Signed utility's per-sample noise has the
+form `|N(0,σ²)| − const`, which has variance `(1 − 2/π)·σ²`, hence
+step 6 uses `K = (1 − 2/π)·(1 − β)/(1 + β)`. BCE utility's per-sample
+term is `(σ(pre_act) − target)·w·x` — no absolute value, bounded
+coefficient in [−1, 1], so the leading `(1 − 2/π)` drops out and
+step 8 uses `K = (1 − β)/(1 + β)`. Everything else (β=0.998,
+normalized MNIST so σ_x=1, 225k steps, convergence on 3 consecutive
+zero-prune events, 20 seeds) matches step 6. **Training loss remains
+softmax CE** — only the pruning signal is BCE.
+
+### LR sweep (ci=0.95, spp=50, 20 seeds)
+
+BCE's gradient scale is not identical to signed utility's, so the step 6
+best LR (2^-9) is not guaranteed to transfer. Same grid as step 6:
+
+Logged as `step8_lr_sweep_lr={value}`. Best LR feeds into the main
+CI × SPP sweep.
+
+*(Results pending.)*
+
+### Main sweep: CI × SPP (20 seeds, 95% CI, lr=TBD)
+
+Grid: `CI ∈ {0.9, 0.95, 0.99} × SPP ∈ {50, 100, 200, 400}`. Logged as
+`step8_statistical_threshold_ci={v}_spp={v}`.
+
+*(Results pending.)*
+
 ## Scripts
 
 
@@ -757,5 +819,7 @@ Logged as `step7_generation_allocation_method={value}`.
 | `06_statistical_threshold.py` | Step 6: CI × SPP sweep for statistical-confidence threshold pruning              |
 | `07_lr_sweep.py`              | Step 7: LR sweep for demand-driven generation                                    |
 | `07_generation.py`            | Step 7: allocation-method sweep (clipped_linear vs softmax)                      |
+| `08_lr_sweep.py`              | Step 8: LR sweep for statistical-threshold pruning with BCE utility              |
+| `08_statistical_threshold.py` | Step 8: CI × SPP sweep for BCE-utility statistical-threshold pruning             |
 
 
