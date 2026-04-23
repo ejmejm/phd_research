@@ -1,11 +1,12 @@
-"""Step 3 — Mixed Feature Search.
+"""Step 2 — Random Feature Search LR sweep.
 
-Same setup as step 2, but half of newly-generated units use within-column
-connectivity (``column_generate`` — deterministic 128 inputs, within-task
-inputs/outputs) and the other half use random-sparsity (``free_generate``
-with ``random_input_count=True``). This tests whether pairing free feature
-search with a column-aligned subpopulation lifts loss over pure random
-search.
+Starting from the same random-sparsity init as step 1, dynamically prune+gen
+whole hidden units (feature-level) at a fixed ~30k connection budget.
+``normalized_contribution_utility`` drives pruning; ``free_generate`` (with
+``random_input_count=True``) samples n_in ~ U[1, 128] and n_out ~ U[1, 20]
+per new unit.
+
+5 seeds per trial; ``02_main.py`` re-runs the best LR at 20 seeds.
 """
 
 import sys
@@ -20,19 +21,22 @@ from mlflow_sweeper.runner import run_sweep
 from omegaconf import OmegaConf
 
 from common import (
-    LR_GRID, MLFLOW_PROJECT, build_step_2_4_config,
+    BASE_SEED, LR_GRID, MLFLOW_PROJECT, build_step_2_4_config,
     resolve_mlflow_tracking_uri, resolve_optuna_tracking_uri,
 )
 from phd.structure_search.experiments.column_guided_search import run_config
 
 
+SWEEP_SEEDS = list(range(BASE_SEED, BASE_SEED + 5))   # 5 seeds for LR scan
+
+
 SWEEP_CONFIG = {
     'experiment': MLFLOW_PROJECT,
-    'sweep_name': 'step3_mixed_feature_search',
+    'sweep_name': 'step2_lr_sweep',
     'algorithm': 'grid',
     'optuna_storage': resolve_optuna_tracking_uri(),
     'mlflow_storage': resolve_mlflow_tracking_uri(),
-    'output_dir': 'output/step3',
+    'output_dir': 'output/step2_lr_sweep',
     'spec': {
         'direction': 'minimize',
         'metric': 'asymptotic_loss',
@@ -51,8 +55,8 @@ SWEEP_CONFIG = {
 def objective(**params):
     lr = float(params['lr'])
     cfg = build_step_2_4_config(
-        variant='mixed_generation', tracker_mode='unit',
-        lr=lr, random_input_count=True,
+        variant='no_column', tracker_mode='unit',
+        lr=lr, random_input_count=True, seeds=SWEEP_SEEDS,
     )
     return run_config(cfg)
 

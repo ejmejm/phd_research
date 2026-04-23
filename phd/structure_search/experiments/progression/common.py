@@ -36,7 +36,7 @@ INPUT_DIM = 1568
 OUTPUT_DIM = 20
 
 TOTAL_STEPS = 225_000
-LOG_FREQ = 2_000
+LOG_FREQ = 1_000
 PERMUTE_PERIOD = 4_000
 
 N_SEEDS = 20
@@ -233,7 +233,7 @@ def build_step_2_4_config(
         'maturity_threshold': 1,
         'prune_frequency': PRUNE_FREQUENCY,
         'prune_rate': PRUNE_RATE,
-        'max_new_units_per_step': 256,
+        'max_new_units_per_step': 128,
     }
 
     return cfg if isinstance(cfg, DictConfig) else OmegaConf.create(cfg)
