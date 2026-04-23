@@ -784,25 +784,341 @@ term is `(σ(pre_act) − target)·w·x` — no absolute value, bounded
 coefficient in [−1, 1], so the leading `(1 − 2/π)` drops out and
 step 8 uses `K = (1 − β)/(1 + β)`. Everything else (β=0.998,
 normalized MNIST so σ_x=1, 225k steps, convergence on 3 consecutive
-zero-prune events, 20 seeds) matches step 6. **Training loss remains
-softmax CE** — only the pruning signal is BCE.
+zero-prune events, 20 seeds) matches step 6.
 
-### LR sweep (ci=0.95, spp=50, 20 seeds)
+### Two attempts
 
-BCE's gradient scale is not identical to signed utility's, so the step 6
-best LR (2^-9) is not guaranteed to transfer. Same grid as step 6:
+First attempt used **BCE utility with softmax CE training loss**. Every
+LR in the grid `{2^-11 … 2^-5}` collapsed to chance (loss ≈ 2.20 vs the
+log 10 ≈ 2.30 ceiling). Step 9's utility comparison traced this to
+utility/loss mismatch: BCE utility measures a loss the softmax-CE-
+trained network was never optimizing.
 
-Logged as `step8_lr_sweep_lr={value}`. Best LR feeds into the main
-CI × SPP sweep.
+Second attempt **matches BCE utility with BCE training loss**. LR
+re-tuned over `{2^-11 … 2^-3}`. Main CI × SPP sweep at lr=2^-6:
 
-*(Results pending.)*
+| CI   | SPP | Accuracy      | BCE loss      | Alignment      | Budget        | Converge step   |
+| ---- | --- | ------------- | ------------- | -------------- | ------------- | --------------- |
+| 0.90 | 50  | 0.670 ± 0.002 | 8.94 ± 0.12   | 0.474 ± 0.002  | 9,934 ± 114   | 46,388 ± 2,254  |
+| 0.95 | 50  | 0.671 ± 0.002 | 9.11 ± 0.10   | 0.472 ± 0.001  | 10,233 ± 112  | 48,450 ± 2,694  |
+| 0.99 | 50  | 0.671 ± 0.002 | 9.32 ± 0.14   | 0.471 ± 0.002  | 10,638 ± 129  | 54,372 ± 2,729  |
+| 0.95 | 200 | 0.670 ± 0.002 | 8.75 ± 0.10   | 0.456 ± 0.001  | 9,957 ± 102   | 163,240 ± 8,485 |
+| 0.95 | 400 | **0.676 ± 0.001** | 9.07 ± 0.10 | 0.457 ± 0.002 | 10,357 ± 23 | 224,800 ± 0 |
 
-### Main sweep: CI × SPP (20 seeds, 95% CI, lr=TBD)
+Accuracy is flat across the whole CI × SPP grid (all 12 configs within
+1.1% of each other), which replicates step 6's SPP-independence. LR
+sweep and main sweep logged as `step8_bce_lr_sweep_lr={v}` and
+`step8_bce_statistical_threshold_ci={v}_spp={v}`.
 
-Grid: `CI ∈ {0.9, 0.95, 0.99} × SPP ∈ {50, 100, 200, 400}`. Logged as
-`step8_statistical_threshold_ci={v}_spp={v}`.
+### Why these results don't really answer the question
 
-*(Results pending.)*
+The BCE-loss numbers look noisy and the accuracy ceiling (~0.67) is
+below step 9's signed baseline at fixed budget 1500 (0.701). That's
+tempting to read as "BCE utility doesn't work as well," but the
+comparison is bad.
+
+With a 2-hot-of-20 target, the **predict-everything-as-0 strategy** is
+already a strong BCE solution — most output positions want to be 0
+most of the time, so a heavily-pruned, near-zero-output network can
+reduce BCE loss substantially while accuracy collapses. For the same
+reason, BCE loss can be improved by pruning even when the pruning is
+degrading the network's actual classification ability. So BCE **loss**
+is not a discriminating metric here, and accuracy understates BCE
+utility's quality because BCE training wasn't optimizing accuracy
+in the first place. (Separately: our BCE-loss numbers of 8–9 are
+actually *worse* than the all-zero baseline of ~6.93 — the label
+permutations every 4k steps keep shifting which outputs want to be 1,
+so nothing settles. This makes the loss yardstick doubly unreliable.)
+
+**The real intended use case is LTU utility** — assigning per-unit
+credit based on "should this hidden unit have been 1 or 0?". In that
+setting, binary targets are roughly balanced per unit (each unit is 0
+or 1 based on input), the predict-all-zeros shortcut doesn't exist,
+and there are no softmax-style normalization effects. BCE utility is
+the natural fit for that problem. Multi-MNIST classification simply
+isn't a discriminating benchmark for it, so step 8's numbers shouldn't
+be treated as a verdict on the utility.
+
+The step-8 machinery (threshold formula with BCE K, BCE loss threading,
+accuracy tracking) is kept in the codebase for the LTU experiments
+where it belongs. The clean utility comparison on MNIST is step 9.
+
+## Step 9 — Utility function comparison at fixed budgets
+
+**Goal**: do the softmax-CE LOO utility and the BCE utility drive useful
+pruning *at all* under step 3's paradigm (dynamic prune+replace at a
+fixed budget)? Step 8 showed BCE fails under statistical-threshold
+pruning with softmax CE training, but it wasn't clear whether the
+problem was the utility or the utility-loss mismatch. Step 9 pulls
+that apart by running four utility/loss combinations at the same setup
+otherwise, and reports accuracy (argmax correctness, averaged across
+both tasks) alongside the training loss so variants with different
+training losses can be compared on a common yardstick.
+
+### Variants
+
+| Name          | Utility           | Training loss |
+| ------------- | ----------------- | ------------- |
+| `signed`      | signed softmax LOO (step 3 baseline) | softmax CE |
+| `softmax_ce`  | **new**: closed-form softmax-CE LOO per weight | softmax CE |
+| `bce_softmax` | BCE-per-target LOO | softmax CE (mismatched) |
+| `bce_bce`     | BCE-per-target LOO | BCE (matched) |
+
+### New softmax-CE LOO utility (closed form)
+
+Removing a single weight `W[k, j]` changes only logit `k` by
+`d = −x[j]·W[k, j]`. The per-task softmax LOO NLL delta then collapses
+to a scalar expression (no `(OUT, IN, NUM_CLASSES)` blowup):
+
+```
+U[k, j] = −d · 𝟙[k % NUM_CLASSES == y_task(k)]
+          + log(1 + p_k · (exp(d) − 1))
+```
+
+where `p_k` is the per-task softmax probability at output `k`.
+Derivation: expanding `−log_softmax(logits + d·e_k)[y] − (−log_softmax(logits)[y])`
+and using the logsumexp-shift-by-one-position identity
+`logsumexp(L + d·e_k) = logsumexp(L) + log(1 + softmax(L)_k · (exp(d) − 1))`.
+Uses `log1p`/`expm1` for numerical stability at small `d`.
+Verified element-wise against brute-force LOO.
+
+### Setup
+
+Dynamic prune+replace exactly as step 3: SPP=50, 225k steps, EMA γ=0.998,
+20 seeds, raw (un-normalized) MNIST. Budget sweep `{50, 150, 500, 1500}`
+× 4 variants = 16 configs. For every (variant, budget) the LR was chosen
+from a separate 5-seed sweep over
+`{1.56e-4, 6.25e-4, 2.5e-3, 1e-2, 4e-2, 0.16, 0.64, 2.56}`
+(logged as `step9_lr_sweep_full`). Winner by final accuracy:
+
+| Variant       | B=50 | B=150 | B=500 | B=1500 |
+| ------------- | ---- | ----- | ----- | ------ |
+| `signed`      | 0.64 | 0.64  | 0.16  | 0.16   |
+| `softmax_ce`  | 0.64 | 0.64  | 0.64  | 0.64   |
+| `bce_softmax` | 0.16 | 0.04  | 0.04  | 0.04   |
+| `bce_bce`     | 0.64 | 0.64  | 0.64  | 0.64   |
+
+`signed`'s best LR drops 4× between small and large budgets; the other
+variants have a roughly budget-independent optimum.
+
+### Main results (20 seeds, 95% CI)
+
+| Variant       |    B |  lr  | **Accuracy**      | Loss               | Alignment         | Sep-F1            |
+| ------------- | ---: | ---: | ----------------- | ------------------ | ----------------- | ----------------- |
+| `signed`      |   50 | 0.64 | **0.242 ± 0.004** | 2.089 ± 0.007      | 0.781 ± 0.023     | 0.005 ± 0.000     |
+| `softmax_ce`  |   50 | 0.64 | 0.238 ± 0.005     | 2.101 ± 0.009      | 0.748 ± 0.028     | 0.005 ± 0.000     |
+| `bce_softmax` |   50 | 0.16 | 0.152 ± 0.005     | 2.197 ± 0.009      | 0.696 ± 0.020     | 0.004 ± 0.000     |
+| `bce_bce`     |   50 | 0.64 | 0.141 ± 0.006     | 4.064 ± 0.033 (BCE) | 0.497 ± 0.025     | 0.003 ± 0.000     |
+| `signed`      |  150 | 0.64 | **0.391 ± 0.005** | 1.788 ± 0.014      | 0.782 ± 0.014     | 0.015 ± 0.000     |
+| `softmax_ce`  |  150 | 0.64 | 0.366 ± 0.007     | 1.860 ± 0.017      | 0.705 ± 0.012     | 0.013 ± 0.000     |
+| `bce_softmax` |  150 | 0.04 | 0.180 ± 0.006     | 2.180 ± 0.010      | 0.623 ± 0.020     | 0.012 ± 0.000     |
+| `bce_bce`     |  150 | 0.64 | 0.303 ± 0.007     | 3.204 ± 0.022 (BCE) | 0.622 ± 0.013     | 0.012 ± 0.000     |
+| `signed`      |  500 | 0.16 | **0.615 ± 0.005** | 1.217 ± 0.013      | 0.770 ± 0.006     | 0.048 ± 0.000     |
+| `softmax_ce`  |  500 | 0.64 | 0.477 ± 0.006     | 1.848 ± 0.021      | 0.492 ± 0.008     | 0.030 ± 0.000     |
+| `bce_softmax` |  500 | 0.04 | 0.180 ± 0.007     | 2.177 ± 0.010      | 0.587 ± 0.013     | 0.036 ± 0.001     |
+| `bce_bce`     |  500 | 0.64 | 0.493 ± 0.005     | 2.788 ± 0.020 (BCE) | 0.545 ± 0.007     | 0.034 ± 0.000     |
+| `signed`      | 1500 | 0.16 | **0.701 ± 0.002** | 1.038 ± 0.008      | 0.575 ± 0.006     | 0.100 ± 0.001     |
+| `softmax_ce`  | 1500 | 0.64 | 0.481 ± 0.005     | 1.895 ± 0.020      | 0.503 ± 0.004     | 0.088 ± 0.001     |
+| `bce_softmax` | 1500 | 0.04 | 0.180 ± 0.007     | 2.176 ± 0.010      | 0.520 ± 0.006     | 0.091 ± 0.001     |
+| `bce_bce`     | 1500 | 0.64 | 0.524 ± 0.005     | 3.007 ± 0.026 (BCE) | 0.474 ± 0.005     | 0.083 ± 0.001     |
+
+Loss for `bce_bce` is BCE loss and not directly comparable to the other
+three variants (all softmax CE). Accuracy is the common yardstick.
+
+Main-run logged as `step9_main_method={m}_budget={b}`; LR sweep as
+`step9_lr_sweep_full_method={m}_budget={b}_lr={lr}`.
+
+### Interpretation
+
+1. **Signed utility (step 3) wins at every budget**, reaching 0.701 ± 0.002
+   accuracy at B=1500 — the strongest result in the progression's
+   budget-sweep paradigm. It also has the only clearly budget-dependent
+   optimal LR (4× drop between small and large budgets), consistent with
+   the step 1 rationale: larger budget → more active connections → larger
+   summed gradient → smaller LR needed to avoid weight blow-up.
+2. **The closed-form softmax-CE LOO (`softmax_ce`) works, but is
+   noticeably worse than signed** at every budget ≥ 150. At B=1500:
+   0.481 vs 0.701 accuracy, a 22-point gap despite the utility being
+   mathematically exact LOO on the training loss while signed uses the
+   `|e+c| − |e|` approximation. The approximation appears to be doing
+   genuine regularization: the exact softmax LOO saturates more easily
+   (the `log(1 + p_k·(e^d − 1))` term is small when `p_k` is tiny, which
+   is most of the time for non-target classes), so the EMA ends up with
+   a weaker separation between useful and useless connections than
+   signed's absolute-value-based signal.
+3. **`bce_softmax` is broken** — accuracy plateaus at ~0.18 (chance ≈ 0.10)
+   across every budget, training loss stuck at the softmax-CE floor.
+   BCE utility and softmax-CE training cost are measuring different
+   things (BCE cares about absolute logit magnitudes, softmax CE is
+   shift-invariant within a task), so the utility signal drives pruning
+   in a direction the training loss doesn't reward. This is the same
+   pathology step 8 surfaced — now isolated cleanly.
+4. **`bce_bce` works surprisingly well** — 0.524 accuracy at B=1500,
+   comparable to `softmax_ce` and far above `bce_softmax`. Matching the
+   utility to the training loss is what was missing in step 8. BCE
+   utility *can* drive useful pruning; it just needs BCE training. Still
+   noticeably below `signed` (0.701), though — the BCE training loss
+   itself is probably a worse training objective for this
+   non-stationary multi-task setup than softmax CE, independent of the
+   pruning utility.
+5. **Alignment is weakly predictive of accuracy across variants.**
+   `bce_softmax` has alignment 0.52–0.70 — higher than `bce_bce` at
+   B=1500 (0.47) — yet achieves one-third the accuracy. Small-budget
+   alignments near 0.78 for `signed` and `softmax_ce` reflect the
+   budget-pressure effect from step 2 (few slots → task-aligned
+   connections are selected for because cross-task connections bring
+   no signal), not a separation mechanism per se.
+
+**Bottom line**: signed softmax LOO (step 3) remains the best utility
+for this setup. Exact softmax-CE LOO works but underperforms the
+approximation. BCE utility works only when paired with BCE training,
+and even then underperforms softmax-based variants. The step 8 failure
+was driven by utility-loss mismatch, not by a fundamental property of
+BCE utility.
+
+## Step 10 — Statistical-threshold pruning of input weights in a 2-layer LTU network
+
+**Goal**: steps 1–9 were all on a linear model, where every weight was
+one hop from the output. Step 10 introduces a hidden layer and asks:
+what utility should we assign to input → hidden weights — weights
+that aren't directly connected to the output? We freeze each hidden
+unit's input candidate pool to a random 256-of-1568 at init, train
+the whole network with softmax CE, and apply step 6's statistical-
+confidence threshold pruning only to the input → hidden weights.
+Four candidate utilities are compared against a no-prune baseline.
+
+### Architecture
+
+- Input (1568) → **100 LTU hidden units** (hard step at 0, sigmoid-STE
+  via [`ltu()` in `phd/jax_core/models.py`](../../../../jax_core/models.py))
+  → 20 outputs with per-task softmax CE (same 2-task multi-MNIST as
+  the rest of the progression).
+- **Hidden → output is fixed 1-to-1**: unit `i` connects only to output
+  `i // 5` (5 hidden units per output). The scalar on that connection
+  is trainable. This gives each hidden unit a clean task identity,
+  inherited from the output it drives.
+- **Input → hidden fanin is fixed at init**: 256 of 1568 connections per
+  hidden unit, sampled uniformly (≈128 same-task / ≈128 cross-task
+  per unit). Only these 256 slots per unit are candidates for pruning.
+- **W_in** is trained alongside W_out; gradients through W_in are
+  masked by the current M_in.
+
+### Utility variants
+
+All variants share a preamble per step: (1) compute per-hidden-unit
+flip utility under per-task softmax CE (`flip_utility_hidden`);
+(2) derive binary LTU targets `target_h = where(U_flip < 0, 1 − h, h)`;
+(3) compute the `informative_h = (h > 0) | (target_h > 0)` mask.
+
+| Variant | Per-weight utility | K (leading factor) |
+| ------- | ------------------ | ------------------ |
+| `bce_ltu` | BCE remove utility per hidden unit against its binary `target_h`; no gating | 1 |
+| `bce_ltu_informative` | Same as above, gated by `informative_h[:, None]` | 1 |
+| `signed_ltu` | `\|e + c\| − \|e\|` with `e = target_h − σ(z1)`, `c = w·x`. Closest analog to step 3's signed. | 1 − 2/π |
+| `signed_ltu_inf` | Target → ±∞ limit: `u = (2·target_h − 1) · w · x` (target=1 → +c; target=0 → −c) | 1 − 2/π |
+| `no_prune` (reference) | — | — |
+
+Threshold formula unchanged from step 6, K picked per variant as above.
+Statistical-confidence CI fixed at 0.95.
+
+### LR sweep (5 seeds, extended grid)
+
+`{variant} × {2^-11 … 2^0}` (12 LRs) at SPP=50. All optima inside the
+grid. Logged as `step10_lr_sweep_variant={v}_lr={lr}`.
+
+| Variant | Best LR | Accuracy | Loss | Fanin F1 | Budget |
+| ------- | ------- | -------- | ---- | -------- | ------ |
+| `no_prune` | 0.25 | 0.664 | 1.090 | 0.665 | 25,600 |
+| `bce_ltu` | 2^-5 (0.031) | 0.210 | 2.180 | 0.287 | 4,867 |
+| `bce_ltu_informative` | 2^-4 (0.0625) | 0.160 | 2.243 | 0.295 | 4,740 |
+| **`signed_ltu`** | 0.25 | **0.647** | 1.134 | 0.576 | 17,937 |
+| `signed_ltu_inf` | 0.5 | 0.416 | 1.725 | 0.234 | 3,577 |
+
+### Main sweep (20 seeds, 95% CI): variant × SPP
+
+At each variant's best LR, SPP ∈ {50, 100, 200, 400}. 225k total steps
+(n_cycles scales with SPP). Logged as `step10_main_variant={v}_spp={v}`.
+
+Fanin F1 is per-hidden-unit precision/recall on the 256-candidate pool:
+positive = kept, ground-truth positive = same-task input.
+
+| Variant | SPP | Accuracy | Loss | Fanin F1 | Budget | Converge step |
+| ------- | --- | -------- | ---- | -------- | ------ | ------------- |
+| `no_prune` | 50 | 0.657 ± 0.005 | 1.105 ± 0.012 | 0.665 ± 0.001 | 25,600 | 0 |
+| `no_prune` | 100 | 0.656 ± 0.006 | 1.111 ± 0.016 | 0.665 ± 0.001 | 25,600 | 0 |
+| `no_prune` | 200 | 0.662 ± 0.006 | 1.093 ± 0.016 | 0.665 ± 0.001 | 25,600 | 0 |
+| `no_prune` | 400 | 0.662 ± 0.006 | 1.093 ± 0.015 | 0.665 ± 0.001 | 25,600 | 0 |
+| `bce_ltu` | 50 | 0.199 ± 0.015 | 2.185 ± 0.027 | 0.286 ± 0.007 | 4,766 ± 139 | 47,820 ± 2,655 |
+| `bce_ltu` | 100 | 0.136 ± 0.006 | 2.278 ± 0.007 | 0.241 ± 0.005 | 3,967 ± 101 | 71,645 ± 3,542 |
+| `bce_ltu` | 200 | 0.114 ± 0.003 | 2.301 ± 0.004 | 0.207 ± 0.006 | 3,456 ± 83  | 109,870 ± 5,545 |
+| `bce_ltu` | 400 | 0.105 ± 0.001 | 2.308 ± 0.001 | 0.173 ± 0.003 | 2,977 ± 74  | 195,060 ± 8,943 |
+| `bce_ltu_informative` | 50 | 0.161 ± 0.011 | 2.243 ± 0.016 | 0.298 ± 0.007 | 4,778 ± 126 | 31,882 ± 1,782 |
+| `bce_ltu_informative` | 100 | 0.122 ± 0.002 | 2.293 ± 0.003 | 0.261 ± 0.005 | 4,097 ± 76 | 51,720 ± 2,389 |
+| `bce_ltu_informative` | 200 | 0.111 ± 0.003 | 2.306 ± 0.004 | 0.231 ± 0.006 | 3,569 ± 97 | 85,130 ± 6,715 |
+| `bce_ltu_informative` | 400 | 0.104 ± 0.001 | 2.315 ± 0.002 | 0.198 ± 0.004 | 3,045 ± 52 | 146,740 ± 8,236 |
+| **`signed_ltu`** | 50  | 0.637 ± 0.005 | 1.156 ± 0.015 | 0.577 ± 0.003 | 18,002 ± 152 | 17,552 ± 1,440 |
+| **`signed_ltu`** | 100 | 0.642 ± 0.005 | 1.145 ± 0.014 | 0.591 ± 0.002 | 19,295 ± 106 | 32,955 ± 1,786 |
+| **`signed_ltu`** | 200 | 0.651 ± 0.005 | 1.115 ± 0.014 | 0.608 ± 0.001 | 20,839 ± 80  | 58,650 ± 6,109 |
+| **`signed_ltu`** | 400 | **0.656 ± 0.004** | 1.107 ± 0.013 | **0.626 ± 0.002** | 22,365 ± 108 | 118,600 ± 13,030 |
+| `signed_ltu_inf` | 50 | 0.422 ± 0.011 | 1.706 ± 0.027 | 0.240 ± 0.005 | 3,681 ± 82  | 28,670 ± 1,583 |
+| `signed_ltu_inf` | 100 | 0.349 ± 0.010 | 1.879 ± 0.022 | 0.211 ± 0.003 | 3,236 ± 46  | 44,410 ± 1,439 |
+| `signed_ltu_inf` | 200 | 0.315 ± 0.011 | 1.952 ± 0.026 | 0.198 ± 0.003 | 3,047 ± 46  | 63,200 ± 3,161 |
+| `signed_ltu_inf` | 400 | 0.278 ± 0.009 | 2.038 ± 0.017 | 0.185 ± 0.003 | 2,814 ± 41  | 97,080 ± 4,779 |
+
+### Interpretation
+
+1. **`signed_ltu` at SPP=400 matches `no_prune`** on accuracy
+   (0.656 ± 0.004 vs 0.662 ± 0.006) while pruning ~13% of the input
+   connections, with fanin F1 = 0.626 (a random pruner on a 50/50
+   pool would give F1 = 0.665 only by keeping everything; at this
+   F1 with a non-trivial amount pruned, the pruner is selecting
+   against cross-task connections). This is the headline positive
+   result for step 10 — input-layer weights *can* be pruned with a
+   useful utility, and `signed_ltu` is that utility.
+2. **Step 5's SPP trend reverses here.** For the linear-model
+   threshold pipeline, longer SPP reliably helped (step 5). For the
+   2-layer BCE variants longer SPP *hurts* — accuracy drops monotonically
+   from SPP=50 to SPP=400 for both `bce_ltu` (0.199 → 0.105) and
+   `bce_ltu_informative` (0.161 → 0.104), and fanin F1 drops too. The
+   BCE utility's signal doesn't get better with more warmup because the
+   signal is wrong in direction — longer EMA just commits to a worse
+   decision. `signed_ltu_inf` follows the same degenerate pattern
+   (0.422 → 0.278).
+3. **For `signed_ltu` the SPP trend matches step 5's** — longer SPP
+   prunes less aggressively and leaves behind a more task-selective
+   mask (F1 rises 0.577 → 0.626 as SPP grows, budget rises
+   18k → 22k, accuracy rises 0.637 → 0.656). Same shape as step 5's
+   signed-utility behavior, just transported to a 2-layer setup.
+4. **BCE variants are anti-selective.** Fanin F1 never exceeds 0.30
+   for `bce_ltu`/`bce_ltu_informative`, meaning the pruner is dropping
+   same-task connections at a *higher* rate than cross-task. The
+   `informative` mask doesn't rescue this; its numbers are within noise
+   of vanilla `bce_ltu`. Compare to step 9: BCE utility under softmax-
+   CE training also underperformed there, but in the fixed-budget
+   dynamic-prune paradigm it at least tracked chance-level alignment
+   (~0.52) instead of going below it. The statistical-threshold variant
+   in step 10 amplifies the mistake because bad decisions accumulate
+   in the frozen post-convergence state.
+5. **`signed_ltu_inf` loses information relative to `signed_ltu`.**
+   Replacing `σ(z1)` with the binary-target sign (the ±∞-target limit)
+   collapses accuracy from 0.656 to 0.422 at their respective best
+   SPPs, and F1 from 0.626 to 0.240. The finite-target version uses a
+   continuous prediction that encodes how confident the LTU already
+   is in its target; the ±∞ version throws that away and rates every
+   contribution only by whether it points toward the target sign.
+6. **Convergence step correlates strongly with SPP × budget**. SPP=400
+   runs take 90k–200k steps to converge (approaching the 225k total),
+   so those configs have very little post-convergence eval window.
+   Accuracy / F1 measured during active pruning for those; same caveat
+   as step 5's SPP=800 and step 6's SPP=400.
+
+**Bottom line**: `signed_ltu` successfully extends step 6's statistical-
+threshold pruning to the input layer of a 2-layer LTU network, matching
+the no-prune accuracy while prefentially removing cross-task
+connections. BCE utilities do not work in this setting — not because
+statistical threshold pruning is wrong for a hidden layer, but because
+the BCE per-unit signal has no reliable direction-of-loss information
+for an LTU with a binary target derived from a downstream flip utility.
 
 ## Scripts
 
@@ -821,5 +1137,9 @@ Grid: `CI ∈ {0.9, 0.95, 0.99} × SPP ∈ {50, 100, 200, 400}`. Logged as
 | `07_generation.py`            | Step 7: allocation-method sweep (clipped_linear vs softmax)                      |
 | `08_lr_sweep.py`              | Step 8: LR sweep for statistical-threshold pruning with BCE utility              |
 | `08_statistical_threshold.py` | Step 8: CI × SPP sweep for BCE-utility statistical-threshold pruning             |
+| `09_lr_sweep.py`              | Step 9: LR × budget × variant sweep for the utility comparison                   |
+| `09_main.py`                  | Step 9: 20-seed main run at per-(variant, budget) best LRs                       |
+| `10_lr_sweep.py`              | Step 10: variant × LR sweep for 2-layer LTU input-weight pruning                 |
+| `10_main.py`                  | Step 10: 20-seed main run, variant × SPP at per-variant best LR                  |
 
 

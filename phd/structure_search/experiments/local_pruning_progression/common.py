@@ -698,7 +698,8 @@ def get_run_fn_step4(n_seeds, max_cycles=N_CYCLES, spp=SPP):
 
 
 def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
-                            converge_cycles, max_cycles=N_CYCLES, spp=SPP):
+                            converge_cycles, max_cycles=N_CYCLES, spp=SPP,
+                            all_cycle_acc=None):
     all_M = np.asarray(all_M)
     all_cycle_loss = np.asarray(all_cycle_loss)
     all_pruned = np.asarray(all_pruned)
@@ -741,7 +742,7 @@ def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
     # Convergence steps (= converge_cycles * spp) for easier reporting
     converge_steps = converge_cycles.astype(np.float64) * spp
 
-    return dict(
+    out = dict(
         final_losses=final_losses, purities=purs, entropies=ents,
         alignments=aligns, separation_f1s=f1s,
         windowed_loss=windowed, window_steps=window_steps,
@@ -752,6 +753,13 @@ def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
         pruned_windowed=pruned_windowed, active_windowed=active_windowed,
         spp=spp,
     )
+    if all_cycle_acc is not None:
+        all_cycle_acc = np.asarray(all_cycle_acc)
+        out['final_accuracies'] = all_cycle_acc[:, -eval_window_cycles:].mean(axis=1)
+        trimmed_acc = all_cycle_acc[:, :n_trim]
+        out['windowed_acc'] = trimmed_acc.reshape(
+            S, n_windows, window_log_cycles).mean(axis=2)
+    return out
 
 
 def run_threshold_variant(lr, n_seeds=N_SEEDS, spp=SPP,
@@ -848,7 +856,8 @@ def prune_statistical(W, M, U, step, z_alpha, K=STAT_PRUNE_K):
 
 
 def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
-                       spp=SPP, utility_fn='signed'):
+                       spp=SPP, utility_fn='signed',
+                       loss_fn_name='softmax_ce'):
     """Build JIT+vmap run function for step 6 statistical-threshold pruning.
 
     Like step 4 but swaps the U ≤ 0 rule for a per-weight statistical
@@ -858,14 +867,18 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
     Expects `mnist_images` to be pre-normalized (per-pixel std ≈ 1) so
     the formula can assume σ_x = 1 without runtime bookkeeping.
 
-    `utility_fn` selects the per-connection utility used to drive the
-    threshold: 'signed' (default, step 6) or 'bce' (step 8). The threshold
-    constant K is picked accordingly.
+    `utility_fn` selects the per-connection utility; the threshold
+    constant K is picked accordingly. `loss_fn_name` selects the training
+    loss ('softmax_ce' for step 6, 'bce' for step 8's BCE-matched variant).
+    Per-step accuracy is tracked alongside loss for cross-variant
+    comparison.
     """
     assert utility_fn in UTILITY_FNS
     assert utility_fn in UTILITY_K, (
         f"utility_fn {utility_fn!r} has no K defined for the threshold")
+    assert loss_fn_name in LOSS_FNS
     utility_impl = UTILITY_FNS[utility_fn]
+    loss_impl = LOSS_FNS[loss_fn_name]
     K = UTILITY_K[utility_fn]
 
     def make_sample(key):
@@ -893,7 +906,10 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
             data_key, perm_key = inputs
             x, y_raw = make_sample(data_key)
             y = jnp.array([perm0[y_raw[0]], perm1[y_raw[1]]])
-            loss_val, g = jax.value_and_grad(loss_fn)(W, M, x, y)
+            loss_val, g = jax.value_and_grad(loss_impl)(W, M, x, y)
+            logits = forward(W, M, x).reshape(N_TASKS, NUM_CLASSES)
+            acc_val = jnp.mean((jnp.argmax(logits, axis=-1) == y)
+                               .astype(jnp.float32))
             W = W - lr * g * M
             u = utility_impl(W, M, x, y)
             U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
@@ -908,7 +924,7 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
                 should_perm & (which == 0), new_perm, perm0)
             perm1 = jnp.where(
                 should_perm & (which == 1), new_perm, perm1)
-            return (W, M, U, step, perm0, perm1), loss_val
+            return (W, M, U, step, perm0, perm1), (loss_val, acc_val)
 
         def prune_cycle(carry, cycle_idx):
             (W, M, U, step, perm0, perm1, rng,
@@ -916,10 +932,11 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
             rng, tk, pk = jax.random.split(rng, 3)
             data_keys = jax.random.split(tk, spp)
             perm_keys = jax.random.split(pk, spp)
-            (W, M, U, step, perm0, perm1), losses = jax.lax.scan(
+            (W, M, U, step, perm0, perm1), (losses, accs) = jax.lax.scan(
                 train_step, (W, M, U, step, perm0, perm1),
                 (data_keys, perm_keys))
             cycle_loss = losses.mean()
+            cycle_acc = accs.mean()
 
             # Prune (skip if already converged)
             W_p, M_p, U_p, n_pruned = prune_statistical(
@@ -943,20 +960,20 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
             n_active = jnp.sum(M)
             return (W, M, U, step, perm0, perm1, rng,
                     new_consec, converged, converge_cycle), \
-                   (cycle_loss,
+                   (cycle_loss, cycle_acc,
                     n_pruned.astype(jnp.int32),
                     n_active.astype(jnp.int32))
 
         init_carry = (W, M, U, step, perm0, perm1, rng,
                       consecutive_zeros, converged, converge_cycle)
-        final_carry, (per_cycle_loss, per_cycle_pruned,
+        final_carry, (per_cycle_loss, per_cycle_acc, per_cycle_pruned,
                       per_cycle_active) = jax.lax.scan(
             prune_cycle, init_carry,
             jnp.arange(max_cycles, dtype=jnp.int32))
 
         final_M = final_carry[1]
         final_converge_cycle = final_carry[9]
-        return (final_M, per_cycle_loss, per_cycle_pruned,
+        return (final_M, per_cycle_loss, per_cycle_acc, per_cycle_pruned,
                 per_cycle_active, final_converge_cycle)
 
     @jax.jit
@@ -967,17 +984,19 @@ def build_run_fn_step6(mnist_images, mnist_labels, max_cycles=N_CYCLES,
 
 
 def get_run_fn_step6(n_seeds, max_cycles=N_CYCLES, spp=SPP,
-                     utility_fn='signed'):
-    key = ('step6', n_seeds, max_cycles, spp, utility_fn)
+                     utility_fn='signed', loss_fn_name='softmax_ce'):
+    key = ('step6', n_seeds, max_cycles, spp, utility_fn, loss_fn_name)
     if key not in _RUN_FN_CACHE:
         mnist_images, mnist_labels = load_mnist_normalized()
         _RUN_FN_CACHE[key] = build_run_fn_step6(
-            mnist_images, mnist_labels, max_cycles, spp, utility_fn)
+            mnist_images, mnist_labels, max_cycles, spp, utility_fn,
+            loss_fn_name)
     return _RUN_FN_CACHE[key]
 
 
 def run_statistical_variant(lr, z_alpha, n_seeds=N_SEEDS, spp=SPP,
-                            total_steps=TOTAL_STEPS, utility_fn='signed'):
+                            total_steps=TOTAL_STEPS, utility_fn='signed',
+                            loss_fn_name='softmax_ce'):
     """Run step 6 statistical-threshold pruning across seeds.
 
     Holds total training steps constant across SPP values: n_cycles is
@@ -985,17 +1004,20 @@ def run_statistical_variant(lr, z_alpha, n_seeds=N_SEEDS, spp=SPP,
     training.
 
     `utility_fn` selects the per-connection utility ('signed' for step 6,
-    'bce' for step 8).
+    'bce' for step 8). `loss_fn_name` selects the training loss
+    ('softmax_ce' default; 'bce' for step 8's BCE-matched variant).
     """
     max_cycles = total_steps // spp
     rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
-    run_fn = get_run_fn_step6(n_seeds, max_cycles, spp, utility_fn)
+    run_fn = get_run_fn_step6(n_seeds, max_cycles, spp, utility_fn,
+                              loss_fn_name)
     out = run_fn(rngs, jnp.float32(lr), jnp.float32(z_alpha))
-    all_M, all_cycle_loss, all_pruned, all_active, converge_cycles = out
+    (all_M, all_cycle_loss, all_cycle_acc, all_pruned, all_active,
+     converge_cycles) = out
     jax.block_until_ready(out)
     return aggregate_results_step4(
         all_M, all_cycle_loss, all_pruned, all_active,
-        converge_cycles, max_cycles, spp)
+        converge_cycles, max_cycles, spp, all_cycle_acc=all_cycle_acc)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1641,3 +1663,492 @@ def log_result_metrics_step7_diag(results, t0_label='task_0',
                           float(results['active_t0_w'][t]), step=si)
         mlflow.log_metric(f'active_{t1_label}',
                           float(results['active_t1_w'][t]), step=si)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Step 10 — Statistical-threshold pruning of input weights in a 2-layer
+# LTU network. Only the input → hidden weights are pruned; the hidden →
+# output weights are trained but never pruned. Each hidden unit is
+# wired to exactly one output (fixed 1-to-1 routing, 5 units per output)
+# so every unit inherits a task identity from its output, letting us
+# score pruning quality with a per-unit F1 against the unit's initial
+# 256-candidate fanin.
+# ═════════════════════════════════════════════════════════════════════
+
+from phd.jax_core.models import ltu as _ltu  # noqa: E402
+
+N_HIDDEN = 100
+HIDDEN_PER_OUTPUT = N_HIDDEN // OUTPUT_DIM   # 5
+FANIN_BUDGET = 256
+
+# Per-utility K constants: BCE-based utilities use K = (1−β)/(1+β);
+# signed-based utilities (both finite and ±∞ target variants) use
+# K = (1 − 2/π) · (1 − β) / (1 + β).
+STAT_PRUNE_K_SIGNED_BINARY = STAT_PRUNE_K_SIGNED
+STAT_PRUNE_K_BCE_LTU = STAT_PRUNE_K_BCE
+STAT_PRUNE_K_SIGNED_INF = STAT_PRUNE_K_SIGNED
+
+
+def sample_fanin_mask_random(key, n_hidden: int = N_HIDDEN,
+                             input_dim: int = INPUT_DIM,
+                             fanin: int = FANIN_BUDGET) -> jnp.ndarray:
+    """Per-hidden-unit random fanin mask: each row has exactly `fanin`
+    ones sampled uniformly from `input_dim` inputs (no task bias)."""
+    keys = jax.random.split(key, n_hidden)
+
+    def one_row(k):
+        noise = jax.random.uniform(k, (input_dim,))
+        picks = jnp.argsort(noise)[:fanin]
+        row = jnp.zeros(input_dim, dtype=jnp.int32).at[picks].set(1)
+        return row
+
+    return jax.vmap(one_row)(keys)
+
+
+def hidden_to_output_map(n_hidden: int = N_HIDDEN,
+                         hidden_per_output: int = HIDDEN_PER_OUTPUT
+                         ) -> jnp.ndarray:
+    """Fixed sequential routing: unit i → output i // hidden_per_output."""
+    return jnp.arange(n_hidden) // hidden_per_output
+
+
+def hidden_unit_task_ids(n_hidden: int = N_HIDDEN,
+                         hidden_per_output: int = HIDDEN_PER_OUTPUT,
+                         num_classes: int = NUM_CLASSES) -> jnp.ndarray:
+    """Task identity of each hidden unit (derived from its output)."""
+    return (jnp.arange(n_hidden) // hidden_per_output) // num_classes
+
+
+def forward_2layer(W_in, M_in, W_out, x):
+    """2-layer forward pass.
+
+    Returns (logits, h, z1) where z1 is the hidden pre-activation (used
+    by the per-weight utilities) and h is the LTU output (binary 0/1).
+
+    W_in: (N_HIDDEN, INPUT_DIM), M_in: (N_HIDDEN, INPUT_DIM),
+    W_out: (N_HIDDEN, OUTPUT_DIM).
+    """
+    z1 = (W_in * M_in) @ x                             # (N_HIDDEN,)
+    h = _ltu(z1)                                       # (N_HIDDEN,) in {0, 1}
+    logits = h @ W_out                                 # (OUTPUT_DIM,)
+    return logits, h, z1
+
+
+def loss_fn_2layer(W_in, M_in, W_out, x, y):
+    """Softmax CE on the 2-layer forward."""
+    logits, _, _ = forward_2layer(W_in, M_in, W_out, x)
+    logits_task = logits.reshape(N_TASKS, NUM_CLASSES)
+    lp = jax.nn.log_softmax(logits_task, axis=-1)
+    return -jnp.mean(jnp.sum(jax.nn.one_hot(y, NUM_CLASSES) * lp, axis=-1))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Hidden-unit flip utility and target derivation
+# ─────────────────────────────────────────────────────────────────────
+
+def flip_utility_hidden(h, W_out, logits, y):
+    """Per-hidden-unit flip utility under per-task softmax CE.
+
+    For each unit i, compute the softmax-CE NLL delta if we were to flip
+    h[i] from its current binary value to 1 - h[i]. Summed across tasks.
+
+    Returns U_flip: (N_HIDDEN,) — positive means flipping hurts (keep),
+    negative means flipping helps (this unit's current value is wrong).
+    """
+    logits_task = logits.reshape(N_TASKS, NUM_CLASSES)                   # (T, C)
+    # W_out is (N_HIDDEN, OUTPUT_DIM); per-task view (N_HIDDEN, T, C)
+    W_out_task = W_out.reshape(N_HIDDEN, N_TASKS, NUM_CLASSES)
+    flip = 1.0 - 2.0 * h                                                 # (N_HIDDEN,)
+    # New task-logits per hidden unit: (N_HIDDEN, T, C)
+    logits_flip = logits_task[None, :, :] + flip[:, None, None] * W_out_task
+    lp_task = jax.nn.log_softmax(logits_task, axis=-1)                   # (T, C)
+    lp_flip = jax.nn.log_softmax(logits_flip, axis=-1)                   # (H, T, C)
+    task_idx = jnp.arange(N_TASKS)
+    nll = -lp_task[task_idx, y]                                          # (T,)
+    nll_flip = -lp_flip[:, task_idx, y]                                  # (H, T)
+    return (nll_flip - nll[None, :]).sum(axis=-1)                        # (H,)
+
+
+def compute_ltu_targets(h, U_flip):
+    """Derive per-unit binary LTU targets and the `informative` mask.
+
+    target_h = better of {current, flipped} (by loss).
+    informative_h = the unit is either currently active or should be active.
+    """
+    should_flip = U_flip < 0.0
+    target_h = jnp.where(should_flip, 1.0 - h, h)
+    informative_h = (h > 0.0) | (target_h > 0.0)
+    return target_h, informative_h
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-weight input-layer utility functions (4 variants)
+# ─────────────────────────────────────────────────────────────────────
+# All take: W_in (H, D), M_in (H, D), x (D,), target_h (H,), h (H,),
+# informative_h (H,). Sign convention: U > 0 ⇒ removing the weight
+# hurts the per-unit loss ⇒ keep this weight.
+
+def bce_ltu_utility(W_in, M_in, x, target_h, h, informative_h):
+    """Per-weight BCE remove utility on each hidden unit independently.
+
+    `pre_act` is the hidden pre-activation z1. No informative gating.
+    """
+    z1 = (W_in * M_in) @ x                                         # (H,)
+    pre_act_removed = z1[:, None] - x[None, :] * W_in              # (H, D)
+    lp = (target_h * jax.nn.log_sigmoid(z1)
+          + (1.0 - target_h) * jax.nn.log_sigmoid(-z1))            # (H,)
+    lp_removed = (target_h[:, None] * jax.nn.log_sigmoid(pre_act_removed)
+                  + (1.0 - target_h)[:, None]
+                  * jax.nn.log_sigmoid(-pre_act_removed))          # (H, D)
+    u = (-lp_removed) - (-lp[:, None])                             # (H, D)
+    return u * M_in
+
+
+def bce_ltu_utility_informative(W_in, M_in, x, target_h, h, informative_h):
+    """Same as bce_ltu_utility but zeroed on uninformative hidden units."""
+    u = bce_ltu_utility(W_in, M_in, x, target_h, h, informative_h)
+    return u * informative_h[:, None].astype(u.dtype)
+
+
+def signed_ltu_utility(W_in, M_in, x, target_h, h, informative_h):
+    """Signed utility with binary target and continuous (sigmoid) prediction.
+
+    Closest analog to step 3's 1-layer `signed_utility`, replacing the
+    softmax-CE error with (binary LTU target − sigmoid(z1)).
+    """
+    z1 = (W_in * M_in) @ x                                         # (H,)
+    e = target_h - jax.nn.sigmoid(z1)                              # (H,)
+    c = W_in * x[None, :]                                          # (H, D)
+    u = jnp.abs(e[:, None] + c) - jnp.abs(e[:, None])
+    return u * M_in
+
+
+def signed_ltu_utility_inf(W_in, M_in, x, target_h, h, informative_h):
+    """Signed utility in the ±∞-target limit: u = (2·target − 1) · w · x.
+
+    target=1 → contribution c is aligned (+c is "going the right way");
+    target=0 → +|c| contribution hurts ⇒ utility = −c.
+    """
+    c = W_in * x[None, :]                                          # (H, D)
+    u = (2.0 * target_h - 1.0)[:, None] * c
+    return u * M_in
+
+
+LTU_UTILITY_FNS = {
+    'bce_ltu': bce_ltu_utility,
+    'bce_ltu_informative': bce_ltu_utility_informative,
+    'signed_ltu': signed_ltu_utility,
+    'signed_ltu_inf': signed_ltu_utility_inf,
+}
+
+
+LTU_UTILITY_K = {
+    'bce_ltu':             STAT_PRUNE_K_BCE_LTU,
+    'bce_ltu_informative': STAT_PRUNE_K_BCE_LTU,
+    'signed_ltu':          STAT_PRUNE_K_SIGNED_BINARY,
+    'signed_ltu_inf':      STAT_PRUNE_K_SIGNED_INF,
+    'no_prune':            STAT_PRUNE_K_BCE_LTU,  # unused; any value fine
+}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-hidden-unit F1 against the initial fanin candidate pool
+# ─────────────────────────────────────────────────────────────────────
+
+def per_unit_fanin_f1(M_initial: np.ndarray, M_final: np.ndarray,
+                      input_per_task: int = INPUT_PER_TASK,
+                      hidden_per_output: int = HIDDEN_PER_OUTPUT,
+                      num_classes: int = NUM_CLASSES) -> np.ndarray:
+    """Per-hidden-unit F1 on the initial fanin candidate pool.
+
+    For each hidden unit, treat pruning as a binary classifier over its
+    initial-fanin candidates: "keep" = predicted positive, "same-task" =
+    ground-truth positive (task of input matches task of the unit's
+    output). Returns an (N_HIDDEN,)-shape array; uses NaN for units with
+    no same-task candidates (undefined recall).
+    """
+    M_initial = np.asarray(M_initial)
+    M_final = np.asarray(M_final)
+    H, D = M_initial.shape
+    unit_task = (np.arange(H) // hidden_per_output) // num_classes       # (H,)
+    input_task = np.arange(D) // input_per_task                          # (D,)
+    same_task = unit_task[:, None] == input_task[None, :]                # (H, D)
+    init = M_initial > 0
+    final = M_final > 0
+    tp = (final & init & same_task).sum(axis=1)
+    fp = (final & init & ~same_task).sum(axis=1)
+    fn = (~final & init & same_task).sum(axis=1)
+    f1 = np.full(H, np.nan, dtype=np.float64)
+    denom = 2 * tp + fp + fn
+    nz = denom > 0
+    f1[nz] = 2.0 * tp[nz] / denom[nz]
+    return f1
+
+
+def batch_per_unit_fanin_f1(all_M_initial, all_M_final,
+                            input_per_task=INPUT_PER_TASK,
+                            hidden_per_output=HIDDEN_PER_OUTPUT,
+                            num_classes=NUM_CLASSES) -> np.ndarray:
+    """Mean (across hidden units) per-unit fanin F1, per seed. Returns
+    (S,)-shape."""
+    all_M_initial = np.asarray(all_M_initial)
+    all_M_final = np.asarray(all_M_final)
+    S = all_M_initial.shape[0]
+    out = np.zeros(S, dtype=np.float64)
+    for s in range(S):
+        f1 = per_unit_fanin_f1(all_M_initial[s], all_M_final[s],
+                               input_per_task, hidden_per_output, num_classes)
+        out[s] = np.nanmean(f1)
+    return out
+
+
+def batch_per_unit_task_counts(all_M_final,
+                               input_per_task=INPUT_PER_TASK,
+                               hidden_per_output=HIDDEN_PER_OUTPUT,
+                               num_classes=NUM_CLASSES):
+    """Per-seed average (across hidden units) count of kept same-task and
+    cross-task input connections. Returns (avg_same, avg_cross), each
+    (S,)-shape."""
+    all_M_final = np.asarray(all_M_final)
+    S, H, D = all_M_final.shape
+    unit_task = (np.arange(H) // hidden_per_output) // num_classes       # (H,)
+    input_task = np.arange(D) // input_per_task                          # (D,)
+    same_task = unit_task[:, None] == input_task[None, :]                # (H, D)
+    kept = all_M_final > 0                                               # (S, H, D)
+    same = (kept & same_task[None, :, :]).sum(axis=2)                    # (S, H)
+    cross = (kept & ~same_task[None, :, :]).sum(axis=2)                  # (S, H)
+    return same.mean(axis=1).astype(np.float64), cross.mean(axis=1).astype(np.float64)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Step 10 build + run
+# ─────────────────────────────────────────────────────────────────────
+
+def build_run_fn_step10(mnist_images, mnist_labels, max_cycles=N_CYCLES,
+                        spp=SPP, utility_fn='signed_ltu_inf',
+                        prune_enabled=True):
+    """Build JIT+vmap run function for step 10 2-layer pruning.
+
+    Architecture: input (INPUT_DIM=1568) → N_HIDDEN=100 LTU → softmax CE.
+    Each hidden unit starts with FANIN_BUDGET=256 random input candidates.
+    Statistical-threshold pruning operates on W_in only; W_out trains
+    freely and is never pruned.
+
+    `utility_fn` selects the per-weight utility driving the threshold.
+    If `prune_enabled=False`, the whole pruning machinery is skipped
+    (no_prune baseline).
+
+    Expects `mnist_images` to be pre-normalized (σ_x ≈ 1) so the
+    threshold formula can assume σ_x = 1.
+    """
+    assert utility_fn in LTU_UTILITY_FNS
+    utility_impl = LTU_UTILITY_FNS[utility_fn]
+    K = LTU_UTILITY_K[utility_fn]
+
+    def make_sample(key):
+        k1, k2 = jax.random.split(key)
+        idx1 = jax.random.randint(k1, (), 0, mnist_images.shape[0])
+        idx2 = jax.random.randint(k2, (), 0, mnist_images.shape[0])
+        x = jnp.concatenate([mnist_images[idx1], mnist_images[idx2]])
+        y = jnp.array([mnist_labels[idx1], mnist_labels[idx2]])
+        return x, y
+
+    def run_one(rng, lr, z_alpha):
+        rng, mkey, wkey_in, wkey_out = jax.random.split(rng, 4)
+        M_in_init = sample_fanin_mask_random(mkey)                     # (H, D)
+        M_in = M_in_init
+        # Kaiming-like init for W_in over the 256-fanin pool.
+        w_in_bound = jnp.sqrt(3.0 / float(FANIN_BUDGET))
+        W_in = jax.random.uniform(wkey_in, (N_HIDDEN, INPUT_DIM),
+                                  minval=-w_in_bound, maxval=w_in_bound)
+        W_in = W_in * M_in                                             # zero outside fanin
+        # W_out: scalar per hidden unit only into its one target output;
+        # stored as (N_HIDDEN, OUTPUT_DIM) with a fixed routing mask so
+        # gradients only flow to the diagonal-like entries.
+        h2o = hidden_to_output_map()
+        W_out_mask = jax.nn.one_hot(h2o, OUTPUT_DIM)                   # (H, O)
+        w_out_bound = jnp.sqrt(3.0 / float(HIDDEN_PER_OUTPUT))
+        W_out = jax.random.uniform(wkey_out, (N_HIDDEN, OUTPUT_DIM),
+                                   minval=-w_out_bound,
+                                   maxval=w_out_bound) * W_out_mask
+
+        U = jnp.zeros((N_HIDDEN, INPUT_DIM))
+        step = jnp.array(0, dtype=jnp.int32)
+        perm0 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        perm1 = jnp.arange(NUM_CLASSES, dtype=jnp.int32)
+        consecutive_zeros = jnp.array(0, dtype=jnp.int32)
+        converged = jnp.array(not prune_enabled)
+        converge_cycle = jnp.array(0 if not prune_enabled else max_cycles,
+                                   dtype=jnp.int32)
+
+        def train_step(carry, inputs):
+            W_in, M_in, W_out, U, step, perm0, perm1 = carry
+            data_key, perm_key = inputs
+            x, y_raw = make_sample(data_key)
+            y = jnp.array([perm0[y_raw[0]], perm1[y_raw[1]]])
+
+            def loss_both(W_in, W_out):
+                return loss_fn_2layer(W_in, M_in, W_out, x, y)
+
+            loss_val, (gW_in, gW_out) = jax.value_and_grad(
+                loss_both, argnums=(0, 1))(W_in, W_out)
+            # Accuracy from the same forward.
+            logits, h, _ = forward_2layer(W_in, M_in, W_out, x)
+            acc_val = jnp.mean(
+                (jnp.argmax(logits.reshape(N_TASKS, NUM_CLASSES), axis=-1) == y)
+                .astype(jnp.float32))
+
+            W_in = W_in - lr * gW_in * M_in
+            # Only update W_out entries along the fixed 1-to-1 routing.
+            W_out = W_out - lr * gW_out * W_out_mask
+
+            # Per-weight utility. Need h and target_h derived from flip
+            # utility on the output layer.
+            U_flip = flip_utility_hidden(h, W_out, logits, y)
+            target_h, informative_h = compute_ltu_targets(h, U_flip)
+            u = utility_impl(W_in, M_in, x, target_h, h,
+                             informative_h.astype(jnp.float32))
+            U = EMA_DECAY * U + (1.0 - EMA_DECAY) * u
+
+            step = step + 1
+            should_perm = (step >= PERMUTE_PERIOD) & (
+                step % PERMUTE_PERIOD == 0)
+            pk1, pk2 = jax.random.split(perm_key)
+            which = jax.random.randint(pk1, (), 0, N_TASKS)
+            new_perm = jax.random.permutation(
+                pk2, NUM_CLASSES).astype(jnp.int32)
+            perm0 = jnp.where(
+                should_perm & (which == 0), new_perm, perm0)
+            perm1 = jnp.where(
+                should_perm & (which == 1), new_perm, perm1)
+            return (W_in, M_in, W_out, U, step, perm0, perm1), (loss_val,
+                                                                 acc_val)
+
+        def prune_cycle(carry, cycle_idx):
+            (W_in, M_in, W_out, U, step, perm0, perm1, rng,
+             consecutive_zeros, converged, converge_cycle) = carry
+            rng, tk, pk = jax.random.split(rng, 3)
+            data_keys = jax.random.split(tk, spp)
+            perm_keys = jax.random.split(pk, spp)
+            (W_in, M_in, W_out, U, step, perm0,
+             perm1), (losses, accs) = jax.lax.scan(
+                train_step,
+                (W_in, M_in, W_out, U, step, perm0, perm1),
+                (data_keys, perm_keys))
+            cycle_loss = losses.mean()
+            cycle_acc = accs.mean()
+
+            # Prune (only when enabled and not already converged).
+            if prune_enabled:
+                W_in_p, M_in_p, U_p, n_pruned = prune_statistical(
+                    W_in, M_in, U, step, z_alpha, K)
+                W_in = jnp.where(converged, W_in, W_in_p)
+                M_in = jnp.where(converged, M_in, M_in_p)
+                U = jnp.where(converged, U, U_p)
+                n_pruned = jnp.where(converged, 0, n_pruned)
+            else:
+                n_pruned = jnp.int32(0)
+
+            new_consec = jnp.where(
+                n_pruned == 0,
+                consecutive_zeros + 1,
+                jnp.array(0, dtype=jnp.int32))
+            new_consec = jnp.where(converged, consecutive_zeros, new_consec)
+            newly_converged = (~converged) & (new_consec >= 3)
+            converged = converged | newly_converged
+            converge_cycle = jnp.where(
+                newly_converged, cycle_idx, converge_cycle)
+
+            n_active = jnp.sum(M_in)
+            return (W_in, M_in, W_out, U, step, perm0, perm1, rng,
+                    new_consec, converged, converge_cycle), \
+                   (cycle_loss, cycle_acc,
+                    n_pruned.astype(jnp.int32),
+                    n_active.astype(jnp.int32))
+
+        init_carry = (W_in, M_in, W_out, U, step, perm0, perm1, rng,
+                      consecutive_zeros, converged, converge_cycle)
+        final_carry, (per_cycle_loss, per_cycle_acc, per_cycle_pruned,
+                      per_cycle_active) = jax.lax.scan(
+            prune_cycle, init_carry,
+            jnp.arange(max_cycles, dtype=jnp.int32))
+
+        final_M_in = final_carry[1]
+        final_converge_cycle = final_carry[10]
+        return (M_in_init, final_M_in, per_cycle_loss, per_cycle_acc,
+                per_cycle_pruned, per_cycle_active, final_converge_cycle)
+
+    @jax.jit
+    def run_all(rngs, lr, z_alpha):
+        return jax.vmap(lambda r: run_one(r, lr, z_alpha))(rngs)
+
+    return run_all
+
+
+def get_run_fn_step10(n_seeds, max_cycles=N_CYCLES, spp=SPP,
+                      utility_fn='signed_ltu_inf', prune_enabled=True):
+    key = ('step10', n_seeds, max_cycles, spp, utility_fn, prune_enabled)
+    if key not in _RUN_FN_CACHE:
+        mnist_images, mnist_labels = load_mnist_normalized()
+        _RUN_FN_CACHE[key] = build_run_fn_step10(
+            mnist_images, mnist_labels, max_cycles, spp, utility_fn,
+            prune_enabled)
+    return _RUN_FN_CACHE[key]
+
+
+def aggregate_results_step10(M_in_init, M_in_final, all_cycle_loss,
+                             all_cycle_acc, all_pruned, all_active,
+                             converge_cycles, max_cycles=N_CYCLES, spp=SPP):
+    """Wraps aggregate_results_step4's budget/convergence/loss/acc aggregation
+    and adds a per-hidden-unit fanin-F1 metric unique to step 10."""
+    all_M_final = np.asarray(M_in_final)
+    # `aggregate_results_step4` expects an `all_M` for its existing linear
+    # purity/entropy/alignment metrics. Those don't make sense in the
+    # 2-layer fanin setup, but passing the final mask keeps the function
+    # signature happy; we simply ignore those fields downstream.
+    out = aggregate_results_step4(
+        all_M_final, all_cycle_loss, all_pruned, all_active,
+        converge_cycles, max_cycles, spp, all_cycle_acc=all_cycle_acc)
+    out['fanin_f1s'] = batch_per_unit_fanin_f1(M_in_init, M_in_final)
+    same, cross = batch_per_unit_task_counts(M_in_final)
+    out['kept_same_task'] = same
+    out['kept_cross_task'] = cross
+    return out
+
+
+def run_2layer_variant(lr, z_alpha, utility_fn='signed_ltu_inf',
+                       prune_enabled=True, n_seeds=N_SEEDS, spp=SPP,
+                       total_steps=TOTAL_STEPS):
+    """Run step 10 2-layer pruning across seeds.
+
+    If `utility_fn == 'no_prune'`, prune_enabled is forced to False and
+    a dummy utility is used (ignored at runtime).
+    """
+    if utility_fn == 'no_prune':
+        prune_enabled = False
+        utility_fn_for_build = 'signed_ltu_inf'  # unused
+    else:
+        utility_fn_for_build = utility_fn
+    max_cycles = total_steps // spp
+    rngs = jax.random.split(jax.random.key(BASE_SEED), n_seeds)
+    run_fn = get_run_fn_step10(n_seeds, max_cycles, spp,
+                               utility_fn_for_build, prune_enabled)
+    out = run_fn(rngs, jnp.float32(lr), jnp.float32(z_alpha))
+    (all_M_init, all_M_final, all_cycle_loss, all_cycle_acc,
+     all_pruned, all_active, converge_cycles) = out
+    jax.block_until_ready(out)
+    return aggregate_results_step10(
+        all_M_init, all_M_final, all_cycle_loss, all_cycle_acc,
+        all_pruned, all_active, converge_cycles, max_cycles, spp)
+
+
+def log_result_metrics_step10(results):
+    """Like log_result_metrics_step4 plus the fanin-F1 metric and
+    per-hidden-unit average kept-connection counts split by task."""
+    import mlflow
+    log_result_metrics_step4(results)
+    for name, arr in [('fanin_f1', results['fanin_f1s']),
+                      ('kept_same_task', results['kept_same_task']),
+                      ('kept_cross_task', results['kept_cross_task'])]:
+        mlflow.log_metric(name, float(np.mean(arr)))
+        mlflow.log_metric(f'{name}_ci95', ci95(arr))

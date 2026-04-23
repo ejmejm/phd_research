@@ -1,13 +1,19 @@
-"""Step 8 — LR sweep for statistical-threshold pruning with BCE utility.
+"""Step 8 — LR sweep for statistical-threshold pruning with BCE utility
+AND BCE training loss (matched pair).
 
-Same pipeline as step 6 (fully-connected init, per-weight statistical
-confidence threshold, bias-corrected EMA, normalized MNIST, 3-consecutive-
-zero stopping) but swaps the signed softmax-error utility for a per-target
-BCE utility. BCE's gradient scale differs from signed utility's so the
-step 6 best LR (2^-9) is not guaranteed to transfer; this sweep re-tunes
-on the same grid before the main CI × SPP sweep.
+The first attempt at step 8 paired BCE utility with softmax CE training
+loss; that setup collapsed to chance at every LR (see step 8 LR sweep
+history under `step8_lr_sweep` and the step 9 `bce_softmax` variant).
+Step 9 showed that BCE utility *does* drive useful pruning when paired
+with BCE training loss. This sweep re-tunes LR for the BCE-matched pair
+under step 6's fully-connected statistical-threshold pipeline.
 
-Fixed ci=0.95, spp=50, 20 seeds, 225k steps.
+Fixed ci=0.95, spp=50, 20 seeds, 225k steps. Grid extended up to 2^-3
+because BCE-loss gradient magnitude can differ substantially from
+softmax CE's, and the step 9 sparse-init best LR (0.64) scales down
+roughly 20× for a fully-connected net → ≈ 2^-5, so the optimum is
+plausibly higher than step 6's 2^-9. Accuracy is logged alongside loss
+so this can be compared cleanly against step 6.
 """
 
 import scipy.stats
@@ -28,22 +34,23 @@ SPP = 50
 
 SWEEP_CONFIG = {
     "experiment": "local_pruning_progression",
-    "sweep_name": "step8_lr_sweep",
+    "sweep_name": "step8_bce_lr_sweep",
     "algorithm": "grid",
     "optuna_storage": resolve_optuna_tracking_uri(),
     "mlflow_storage": resolve_mlflow_tracking_uri(),
-    "output_dir": "output/step8_lr",
+    "output_dir": "output/step8_bce_lr",
     "spec": {
-        "direction": "minimize",
-        "metric": "final_loss",
+        "direction": "maximize",
+        "metric": "final_accuracy",
     },
     "parameters": {
-        "lr": [2**-11, 2**-10, 2**-9, 2**-8, 2**-7, 2**-6, 2**-5],
+        "lr": [2**-11, 2**-10, 2**-9, 2**-8, 2**-7, 2**-6, 2**-5,
+               2**-4, 2**-3],
     },
     "plots": ["sensitivity", "best_hyperparameters"],
     "plot_params": {
-        "metrics": ["final_loss", "alignment", "separation_f1",
-                    "final_budget", "converge_step"],
+        "metrics": ["final_accuracy", "final_loss", "alignment",
+                    "separation_f1", "final_budget", "converge_step"],
         "sensitivity": {
             "params": ["lr"],
         },
@@ -55,7 +62,7 @@ def objective(**params):
     lr = float(params["lr"])
     z_alpha = float(scipy.stats.norm.ppf(CI))
     r = run_statistical_variant(lr, z_alpha=z_alpha, spp=SPP,
-                                utility_fn='bce')
+                                utility_fn='bce', loss_fn_name='bce')
     log_result_metrics_step4(r)
 
 
