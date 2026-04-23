@@ -163,8 +163,10 @@ python experiments/progression/03_mixed_feature_search.py
 `ConnectionConnectivityManager` drives phase-1 weight pruning by
 `contribution_connection_utility` at `prune_rate=0.0001`, then phase-2
 dead-unit detection removes any unit whose total outgoing connections
-reach zero, then phase-3 generates new units to refill the budget
-(same `free_generate` + `random_input_count=True`).
+reach zero, then phase-3 generates new units to refill the budget via
+`free_generate` with **`random_input_count=False`** — new units get a
+deterministic 128 incoming connections so the input count doesn't
+compound with connection-level pruning's natural fan-in collapse.
 
 Hypothesis: connection-level pruning may drive most surviving units to
 near-zero fan-in. The `layer_0/avg_incoming_conns` metric tracks this
@@ -175,7 +177,8 @@ hypothesis is confirmed.
 
 ```bash
 cd phd/structure_search
-python experiments/progression/04_connection_level.py
+python experiments/progression/04_lr_sweep.py   # 5 LRs × 5 seeds
+python experiments/progression/04_main.py       # single 20-seed run at best LR
 ```
 
 ## Step 5 — Pruned Feature Search (DEFERRED)
@@ -213,13 +216,22 @@ The placeholder script `05_pruned_feature_search.py` raises
 
 ## Scripts
 
+Each step has a companion `_lr_sweep.py` / `_main.py` split: the LR
+sweep scans the grid at **5 seeds** via mlflow-sweeper; the main run
+is a single **20-seed** MLflow run at the winning LR (loaded from the
+sweep's Optuna study, not a sweep trial).
+
 | Script                           | Purpose                                                                    |
 |:---------------------------------|:---------------------------------------------------------------------------|
 | `common.py`                      | Shared constants, MLflow/Optuna URI helpers, DictConfig factories          |
-| `01_static_baselines.py`         | Step 1 LR × variant sweep; calls `train.run_config`                        |
-| `02_random_feature_search.py`    | Step 2 LR sweep; `variant='no_column'`, unit-level pruning                 |
-| `03_mixed_feature_search.py`     | Step 3 LR sweep; `variant='mixed_generation'`                              |
-| `04_connection_level.py`         | Step 4 LR sweep; `tracker_mode='connection'`, `variant='no_column'`        |
+| `01_lr_sweep.py`                 | Step 1 LR × variant sweep over static baselines                            |
+| `01_main.py`                     | Step 1 main — three 20-seed runs at the best LR per variant                |
+| `02_lr_sweep.py`                 | Step 2 LR sweep; `variant='no_column'`, unit-level pruning                 |
+| `02_main.py`                     | Step 2 main — single 20-seed run at best LR                                |
+| `03_lr_sweep.py`                 | Step 3 LR sweep; `variant='mixed_generation'`                              |
+| `03_main.py`                     | Step 3 main — single 20-seed run at best LR                                |
+| `04_lr_sweep.py`                 | Step 4 LR sweep; `tracker_mode='connection'`, `variant='no_column'`        |
+| `04_main.py`                     | Step 4 main — single 20-seed run at best LR                                |
 | `05_pruned_feature_search.py`    | Step 5 stub — raises `NotImplementedError`                                 |
 
 ## Supporting library changes (backwards-compatible)
