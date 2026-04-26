@@ -250,6 +250,27 @@ def batch_task_alignment_linear(all_M, input_per_task=784, n_tasks=2,
     return out
 
 
+def batch_per_output_task_counts_linear(all_M, input_per_task=784,
+                                        n_tasks=2, num_classes=10):
+    """Per-seed averages (across output neurons) of the number of kept
+    input connections of each task type.
+
+    Returns (avg_same, avg_cross), each shape (S,). Mirrors step 10's
+    kept_same_task / kept_cross_task but for the linear 1-layer setup
+    where each output neuron has a task identity from its position in
+    the 20-output vector.
+    """
+    all_M = np.asarray(all_M)
+    S, O, D = all_M.shape
+    out_task = np.arange(O) // num_classes                               # (O,)
+    in_task = np.arange(D) // input_per_task                             # (D,)
+    same_task = out_task[:, None] == in_task[None, :]                    # (O, D)
+    kept = all_M > 0                                                     # (S, O, D)
+    same = (kept & same_task[None, :, :]).sum(axis=2)                    # (S, O)
+    cross = (kept & ~same_task[None, :, :]).sum(axis=2)                  # (S, O)
+    return same.mean(axis=1).astype(np.float64), cross.mean(axis=1).astype(np.float64)
+
+
 def task_separation_f1_linear(M, input_per_task=784, n_tasks=2,
                               num_classes=10):
     """F1 of connectivity as a binary classifier of 'input-task == output-task'.
@@ -733,6 +754,8 @@ def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
         all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
     f1s = batch_task_separation_f1_linear(
         all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
+    same_kept, cross_kept = batch_per_output_task_counts_linear(
+        all_M, INPUT_PER_TASK, N_TASKS, NUM_CLASSES)
 
     # Per-seed final budget (n_active at convergence). For seeds that
     # never converged, converge_cycles == max_cycles, so clip.
@@ -745,6 +768,7 @@ def aggregate_results_step4(all_M, all_cycle_loss, all_pruned, all_active,
     out = dict(
         final_losses=final_losses, purities=purs, entropies=ents,
         alignments=aligns, separation_f1s=f1s,
+        kept_same_task=same_kept, kept_cross_task=cross_kept,
         windowed_loss=windowed, window_steps=window_steps,
         converge_cycles=converge_cycles.astype(np.float64),
         converge_steps=converge_steps,
@@ -788,7 +812,9 @@ def log_result_metrics_step4(results):
 
     for name, arr in [('converge_cycle', results['converge_cycles']),
                       ('converge_step', results['converge_steps']),
-                      ('final_budget', results['final_budgets'])]:
+                      ('final_budget', results['final_budgets']),
+                      ('kept_same_task', results['kept_same_task']),
+                      ('kept_cross_task', results['kept_cross_task'])]:
         mlflow.log_metric(name, float(np.mean(arr)))
         mlflow.log_metric(f'{name}_ci95', ci95(arr))
 

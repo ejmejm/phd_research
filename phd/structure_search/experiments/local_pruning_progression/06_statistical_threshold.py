@@ -39,11 +39,11 @@ LR = 2**-9  # best from 06_lr_sweep on normalized MNIST (see README)
 
 SWEEP_CONFIG = {
     "experiment": "local_pruning_progression",
-    "sweep_name": "step6_statistical_threshold",
+    "sweep_name": "step6_statistical_threshold_v2",
     "algorithm": "grid",
     "optuna_storage": resolve_optuna_tracking_uri(),
     "mlflow_storage": resolve_mlflow_tracking_uri(),
-    "output_dir": "output/step6",
+    "output_dir": "output/step6_v2",
     "spec": {
         "direction": "minimize",
         "metric": "final_loss",
@@ -55,6 +55,7 @@ SWEEP_CONFIG = {
     "plots": ["sensitivity", "best_hyperparameters"],
     "plot_params": {
         "metrics": ["final_loss", "alignment", "separation_f1",
+                    "kept_same_task", "kept_cross_task",
                     "final_budget", "converge_step"],
         "sensitivity": {
             "params": ["spp"],
