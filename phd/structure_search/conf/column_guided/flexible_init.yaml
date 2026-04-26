@@ -1,0 +1,89 @@
+defaults:
+  - stationary
+  - _self_
+
+# 2-MNIST, single hidden layer, frozen connectivity (no pruning, no
+# generation) with flexible per-unit init: each hidden unit's incoming
+# and outgoing connectivity is independently configurable.
+#
+# Incoming/outgoing mode options (set under `model:` below):
+#   'all'    : connect to every input/output.
+#   'random' : connect to N inputs/outputs sampled uniformly across all tasks
+#              (uses incoming_n / outgoing_n).
+#   'column' : connect to N inputs/outputs sampled within the unit's task
+#              column (uses incoming_n / outgoing_n).
+# Hidden units are evenly distributed across tasks (hidden_dim / n_tasks
+# units per column); the column assignment matters only when one of the
+# modes is 'column'.
+
+variant: no_column          # uses normalized_contribution_utility (contribution-based) when pruning is enabled
+init_mode: flexible
+project: column-guided-flexible-init
+
+dataset:
+  name: parallel_mnist
+  n_tasks: 2
+  permute_period: 0
+  permute_stop: 0
+
+model:
+  type: dynamic
+  n_layers: 1
+  hidden_dim: 1             # 100 units per task column
+  max_units_per_layer: 1    # = hidden_dim; raise to leave headroom for unit generation
+  # max_connections_per_unit must be >= incoming_n for 'random'/'column' and
+  # >= input_dim (1568 for 2-MNIST) for incoming_mode='all'.
+  max_connections_per_unit: 1568
+  max_fan_out: 20             # only hidden -> output here; can stay small
+  connect_all_to_output: false
+  activation: leaky_relu
+  init_strategy: linear
+  random_sparsity_init: false
+
+  # ---- Flexible init parameters ----
+  incoming_mode: column       # 'all' | 'random' | 'column'
+  incoming_n: 768             # ignored when incoming_mode == 'all'
+  outgoing_mode: column       # 'all' | 'random' | 'column'
+  outgoing_n: 1               # ignored when outgoing_mode == 'all' (10 = full column for 2-MNIST)
+
+optimizer:
+  name: sgd
+  learning_rate: ${eval:2**-9}
+  weight_decay: 0
+
+train:
+  batch_size: 1
+  loss: cross_entropy
+  total_steps: 200_000
+  log_freq: 2000
+  eval_freq: 0
+
+structure_tracker:
+  # Pruning + generation are both disabled here. The tracker is still
+  # constructed so per-unit / per-connection metrics are tracked, but
+  # `enabled: false` skips the prune/generate step in the training loop.
+  enabled: false
+
+  mode: connection                          # 'unit' or 'connection' (connection-level pruning)
+  connection_utility_fn: contribution # used when mode == 'connection'
+  decay_rate: 0.999
+  maturity_threshold: 0
+  prune_frequency: 200
+  connection_budget: 30_000
+
+  # ---- Pruning ----
+  # To enable pruning: flip enabled -> true and set prune_rate > 0
+  # (e.g. 0.0001). Unit-mode pruning will use the variant's utility
+  # (no_column => normalized_contribution_utility); connection-mode
+  # pruning will use connection_utility_fn (contribution by default).
+  prune_rate: 0.0001
+
+  # ---- Generation ----
+  # To enable unit generation: flip enabled -> true and raise
+  # max_new_units_per_step (e.g. 256). Generation uses the variant's
+  # generate_fn (no_column => free_generate). Also raise
+  # max_units_per_layer above hidden_dim to leave room for new units.
+  max_new_units_per_step: 0
+
+log_task_affinity: false
+seed: 1

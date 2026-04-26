@@ -1774,6 +1774,184 @@ def _column_init(
     return build_outgoing_indices(model)
 
 
+def _flexible_init(
+    model: DynamicNetwork,
+    n_tasks: int,
+    incoming_mode: str,
+    incoming_n: Optional[int],
+    outgoing_mode: str,
+    outgoing_n: Optional[int],
+    key: PRNGKeyArray,
+) -> DynamicNetwork:
+    """Rewire a single-hidden-layer DynamicNetwork with configurable per-unit
+    connectivity patterns for both incoming and outgoing connections.
+
+    Per-unit incoming options:
+      - 'all'    : connect to every input (n_in = input_dim).
+      - 'random' : connect to incoming_n inputs sampled uniformly across
+                   all tasks.
+      - 'column' : connect to incoming_n inputs sampled uniformly within
+                   the unit's task column.
+
+    Per-unit outgoing options (hidden -> output):
+      - 'all'    : feed every output.
+      - 'random' : feed outgoing_n outputs sampled uniformly across tasks.
+      - 'column' : feed outgoing_n outputs sampled uniformly within the
+                   unit's task column.
+
+    Hidden units are evenly distributed across n_tasks columns (used only
+    when an incoming/outgoing mode is 'column'; otherwise column assignment
+    is irrelevant). Assumes max_layers == 1 and hidden_dim divisible by
+    n_tasks.
+    """
+    assert model.max_layers == 1, '_flexible_init assumes a single hidden layer'
+
+    input_dim = model.input_dim
+    output_dim = model.output_dim
+    max_units = model.max_units_per_layer
+    max_conns = model.max_connections_per_unit
+
+    hidden_dim = int(model.unit_mask[0].sum())
+    assert hidden_dim % n_tasks == 0, (
+        f'hidden_dim ({hidden_dim}) must be divisible by n_tasks ({n_tasks})'
+    )
+    units_per_col = hidden_dim // n_tasks
+    assert input_dim % n_tasks == 0
+    assert output_dim % n_tasks == 0
+    input_col_size = input_dim // n_tasks
+    out_col_size = output_dim // n_tasks
+
+    if incoming_mode == 'all':
+        n_in = input_dim
+    elif incoming_mode in ('random', 'column'):
+        assert incoming_n is not None and incoming_n > 0
+        n_in = int(incoming_n)
+    else:
+        raise ValueError(f'Unknown incoming_mode: {incoming_mode}')
+    assert n_in <= max_conns, (
+        f'incoming connections ({n_in}) exceeds '
+        f'max_connections_per_unit ({max_conns})'
+    )
+
+    if outgoing_mode == 'all':
+        n_out = output_dim
+    elif outgoing_mode in ('random', 'column'):
+        assert outgoing_n is not None and outgoing_n > 0
+        n_out = int(outgoing_n)
+    else:
+        raise ValueError(f'Unknown outgoing_mode: {outgoing_mode}')
+    assert n_out <= output_dim
+
+    weights = jnp.zeros_like(model.weights)
+    input_indices = jnp.full_like(model.input_indices, -1)
+    unit_mask = jnp.zeros_like(model.unit_mask)
+    output_mask = jnp.zeros_like(model.output_mask)
+    output_weights = jnp.zeros_like(model.output_weights)
+
+    last_offset = input_dim  # = input_dim + 0 * max_units; single hidden layer
+
+    for c in range(n_tasks):
+        col_start = c * units_per_col
+        col_end = col_start + units_per_col
+        inp_start = c * input_col_size
+        inp_end = inp_start + input_col_size
+        out_start = c * out_col_size
+        out_end = out_start + out_col_size
+
+        # ---- Incoming connections ----
+        if incoming_mode == 'all':
+            sources = jnp.arange(input_dim, dtype=jnp.int32)
+            padded = jnp.full(max_conns, -1, dtype=jnp.int32).at[:n_in].set(sources)
+            layer_indices = jnp.broadcast_to(padded, (units_per_col, max_conns))
+        else:
+            if incoming_mode == 'random':
+                avail = jnp.arange(input_dim, dtype=jnp.int32)
+                n_avail = input_dim
+            else:  # 'column'
+                avail = jnp.arange(inp_start, inp_end, dtype=jnp.int32)
+                n_avail = input_col_size
+            n_c = min(n_in, n_avail)
+
+            key, layer_key = jax.random.split(key)
+            unit_keys = jax.random.split(layer_key, units_per_col)
+
+            def _sample_in(unit_key, _avail=avail, _n_avail=n_avail, _n_c=n_c):
+                perm = jax.random.permutation(unit_key, _n_avail)[:_n_c]
+                src = jnp.sort(_avail[perm])
+                padded = jnp.full(max_conns, -1, dtype=jnp.int32)
+                padded = padded.at[:_n_c].set(src)
+                return padded
+
+            layer_indices = jax.vmap(_sample_in)(unit_keys)
+
+        # Lecun-uniform incoming weights, masked by active slots
+        key, w_key = jax.random.split(key)
+        bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.float32(max(n_in, 1)))
+        w = jax.random.uniform(
+            w_key, (units_per_col, max_conns), minval=-bound, maxval=bound,
+        )
+        conn_mask = (layer_indices >= 0).astype(jnp.float32)
+        w = w * conn_mask
+
+        input_indices = input_indices.at[0, col_start:col_end].set(layer_indices)
+        weights = weights.at[0, col_start:col_end].set(w)
+        unit_mask = unit_mask.at[0, col_start:col_end].set(1)
+
+        # ---- Outgoing connections ----
+        buf_positions = jnp.arange(last_offset + col_start, last_offset + col_end)
+
+        if outgoing_mode == 'all':
+            new_cols = jnp.ones((units_per_col, output_dim), dtype=jnp.int32)
+        else:
+            if outgoing_mode == 'random':
+                out_avail = jnp.arange(output_dim, dtype=jnp.int32)
+                n_out_avail = output_dim
+            else:  # 'column'
+                out_avail = jnp.arange(out_start, out_end, dtype=jnp.int32)
+                n_out_avail = out_col_size
+            n_o = min(n_out, n_out_avail)
+
+            key, o_key = jax.random.split(key)
+            unit_keys = jax.random.split(o_key, units_per_col)
+
+            def _sample_out(unit_key, _avail=out_avail, _n_avail=n_out_avail, _n_o=n_o):
+                perm = jax.random.permutation(unit_key, _n_avail)[:_n_o]
+                chosen = _avail[perm]
+                col = jnp.zeros(output_dim, dtype=jnp.int32).at[chosen].set(1)
+                return col
+
+            new_cols = jax.vmap(_sample_out)(unit_keys)  # (units_per_col, output_dim)
+
+        new_cols_T = new_cols.T  # (output_dim, units_per_col)
+        output_mask = output_mask.at[:, buf_positions].set(new_cols_T)
+
+        # Output weights — fan-in is the expected number of units feeding
+        # each output ('all'/'column' are exact; 'random' is the expectation).
+        if outgoing_mode == 'column':
+            ow_in_dim = units_per_col
+        elif outgoing_mode == 'all':
+            ow_in_dim = hidden_dim
+        else:  # 'random'
+            ow_in_dim = max(1, hidden_dim * n_out // output_dim)
+
+        key, ow_key = jax.random.split(key)
+        ow_bound = jnp.sqrt(3.0) / jnp.sqrt(jnp.float32(max(ow_in_dim, 1)))
+        ow = jax.random.uniform(
+            ow_key, (output_dim, units_per_col),
+            minval=-ow_bound, maxval=ow_bound,
+        )
+        ow = ow * new_cols_T.astype(jnp.float32)
+        output_weights = output_weights.at[:, buf_positions].set(ow)
+
+    model = eqx.tree_at(
+        lambda n: (n.weights, n.input_indices, n.unit_mask,
+                   n.output_mask, n.output_weights),
+        model,
+        (weights, input_indices, unit_mask, output_mask, output_weights),
+    )
+    return build_outgoing_indices(model)
+
+
 # ---------------------------------------------------------------------------
 # Experiment setup
 # ---------------------------------------------------------------------------
@@ -1915,11 +2093,21 @@ def prepare_experiment(cfg: DictConfig, n_tasks: int):
             utility_fn = partial(column_utility, n_tasks=n_tasks)
             generate_fn = partial(column_generate, n_tasks=n_tasks)
 
-        # Column-constrained initialization (works with any variant)
-        if cfg.get('init_mode', 'random') == 'column':
+        # Column-constrained or flexible initialization (works with any variant)
+        init_mode = cfg.get('init_mode', 'random')
+        if init_mode == 'column':
             model = _column_init(
                 model, n_tasks=n_tasks,
                 key=rng_from_string(rng, 'column_init'),
+            )
+        elif init_mode == 'flexible':
+            model = _flexible_init(
+                model, n_tasks=n_tasks,
+                incoming_mode=cfg.model.incoming_mode,
+                incoming_n=cfg.model.get('incoming_n', None),
+                outgoing_mode=cfg.model.outgoing_mode,
+                outgoing_n=cfg.model.get('outgoing_n', None),
+                key=rng_from_string(rng, 'flexible_init'),
             )
 
         tracker_mode = cfg.structure_tracker.get('mode', 'unit')
