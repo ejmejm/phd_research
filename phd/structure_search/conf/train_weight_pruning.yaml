@@ -1,0 +1,57 @@
+project: structure-search-simple
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: false
+wandb: false
+comet_ml: false
+
+# --- Task ---
+task:
+  n_tasks: 2            # number of parallel MNIST sub-tasks (1 = plain MNIST)
+  permute_period: 0     # steps between label permutations (0 = stationary, parallel only)
+  standardize: true     # per-pixel mean-0 var-1 over the dataset
+
+# --- Model (2-layer MLP, padded-dense) ---
+model:
+  initial_hidden_units: 128       # set to 0 for empty network at init
+  max_hidden_units: 512           # padding cap (max units that can ever exist)
+  activation: leaky_relu          # 'relu', 'leaky_relu', or 'ltu'
+
+  # 'dense', 'block_sparse', or 'random_sparse'.
+  init_strategy: random_sparse
+  # Used only when init_strategy == 'random_sparse':
+  init_random_range_in: [128, 128]   # k_in sampled uniformly in [a, b]
+  init_random_range_out: [20, 20]    # k_out sampled uniformly in [a, b]
+
+# --- Optimizer ---
+# Only 'sgd' and 'adam' are supported here.
+optimizer:
+  name: adam
+  learning_rate: 1e-4
+  weight_decay: 0      # must be 0 for adam (otherwise per-weight age reset breaks)
+
+# --- Structure search (connection pruning + unit generation) ---
+structure_search:
+  enabled: true
+  prune_frequency: 500         # prune/generate every N steps
+  prune_count: 128             # connections pruned per prune event
+  decay_rate: 0.998            # EMA decay for contribution utility
+  connection_budget: 15000     # hard cap on total active connections; new units only
+                               # generated while current_connections + worst-case-cost
+                               # <= this value
+
+  # Range of incoming/outgoing connections for newly generated units
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 4       # max units generated per prune event
+
+# --- Training ---
+train:
+  batch_size: 1
+  total_steps: 1_000_000
+  log_freq: 1000
+
+# Seeds: int or list of ints
+seed: [0, 1, 2]
+log_individual_seeds: false
