@@ -44,7 +44,7 @@ structure_search:
   # Range of incoming/outgoing connections for newly generated units
   gen_range_in: [128, 128]
   gen_range_out: [20, 20]
-  max_units_per_event: 4       # max units generated per prune event
+  max_units_per_event: 8       # max units generated per prune event
 
 # --- Training ---
 train:

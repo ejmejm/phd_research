@@ -1,0 +1,35 @@
+experiment: paper-weight-pruning-lr-sweep
+sweep_name: 01_structure_search_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_lr_sweep --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+
+parameters:
+  model.init_strategy: random_sparse      # irrelevant when initial_hidden_units = 0
+  model.initial_hidden_units: 0
+  structure_search.enabled: true
+
+  optimizer.learning_rate:
+    - "${eval:2**-12}"
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+    - "${eval:2**-4}"
+    - "${eval:2**-3}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

@@ -480,11 +480,12 @@ def _structure_diagnostics(model: PaddedMLP, n_tasks: int) -> dict:
 
     Returns a dict whose values are (n_seeds,) jax arrays.
 
-    ``path_purity``: fraction of (output → hidden → input) paths whose endpoints
-    lie in the *same* task block. A path exists for each (out, h, in) triple
-    with ``w2_mask[out, h] = 1`` and ``w1_mask[h, in] = 1``; duplicate inputs
-    (one per path) are counted. 1.0 = perfect task separation, 1/n_tasks =
-    uniform mixing. Trivially 1.0 when n_tasks == 1.
+    ``path_purity``: per-output mean of (#same-task paths) / (#total paths).
+    A path is an (output, hidden, input) triple with active w2 and w1
+    connections; multiple hidden units between the same (output, input)
+    pair count as multiple paths. Outputs with no paths are excluded from
+    the mean. 1.0 = every output's paths land in its own task,
+    1/n_tasks = uniform mixing. Trivially 1.0 when n_tasks == 1.
     """
     unit_active = model.unit_mask                      # (S, max_hidden)
     fan_in_per_unit = model.w1_mask.sum(axis=-1)        # (S, max_hidden)
@@ -499,18 +500,32 @@ def _structure_diagnostics(model: PaddedMLP, n_tasks: int) -> dict:
     }
 
     if n_tasks > 1:
-        # paths[s, o, i] = number of hidden units routing input i → output o
-        paths = model.w2_mask @ model.w1_mask           # (S, output_dim, input_dim)
+        # paths[s, o, i] = #hidden units routing input i → output o
+        # (multiplicity via different hidden units is preserved).
+        paths = model.w2_mask @ model.w1_mask                       # (S, output_dim, input_dim)
         out_per_task = paths.shape[-2] // n_tasks
         in_per_task = paths.shape[-1] // n_tasks
-        # Group rows by output-task and cols by input-task, then sum within blocks.
         grouped = paths.reshape(
             *paths.shape[:-2], n_tasks, out_per_task, n_tasks, in_per_task,
         )
-        task_pair_paths = grouped.sum(axis=(-1, -3))    # (S, n_tasks_out, n_tasks_in)
-        same_task_paths = jnp.diagonal(task_pair_paths, axis1=-2, axis2=-1).sum(axis=-1)
-        total_paths = paths.sum(axis=(-1, -2))
-        stats['path_purity'] = same_task_paths / jnp.maximum(total_paths, 1)
+        # paths_by_task[s, t_out, o_within, t_in] = #paths from output
+        # (t_out, o_within) terminating at any input in task t_in.
+        paths_by_task = grouped.sum(axis=-1)                        # (S, T, out_per_task, T)
+        total_per_output = paths_by_task.sum(axis=-1)               # (S, T, out_per_task)
+        # diagonal over (t_out, t_in): output's own-task path count.
+        # jnp.diagonal appends the diagonal axis at the end.
+        same_per_output = jnp.diagonal(paths_by_task, axis1=-3, axis2=-1)  # (S, out_per_task, T)
+        same_per_output = jnp.swapaxes(same_per_output, -1, -2)            # (S, T, out_per_task)
+
+        output_active = total_per_output > 0
+        purity_per_output = jnp.where(
+            output_active,
+            same_per_output / jnp.maximum(total_per_output, 1),
+            0.0,
+        )
+        sum_purity = purity_per_output.sum(axis=(-1, -2))                   # (S,)
+        n_active_outputs = output_active.sum(axis=(-1, -2)).astype(jnp.float32)
+        stats['path_purity'] = sum_purity / jnp.maximum(n_active_outputs, 1.0)
     else:
         stats['path_purity'] = jnp.ones_like(stats['active_units'], dtype=jnp.float32)
 
