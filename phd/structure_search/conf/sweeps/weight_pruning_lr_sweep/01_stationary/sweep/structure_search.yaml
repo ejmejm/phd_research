@@ -1,5 +1,5 @@
-experiment: paper-weight-pruning-lr-sweep
-sweep_name: 01_random_sparse_lr
+experiment: paper-weight-pruning-sweep
+sweep_name: 01_structure_search_lr
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
@@ -14,11 +14,11 @@ plot_params:
   metrics: [asymptotic_loss, asymptotic_accuracy]
 
 parameters:
-  model.init_strategy: random_sparse
-  model.initial_hidden_units: 68          # 68 * (128.5 + 10.5) ~= 9500 weights
-  model.init_random_range_in: [1, 256]
-  model.init_random_range_out: [1, 20]
-  structure_search.enabled: false
+  model.init_strategy: random_sparse      # irrelevant when initial_hidden_units = 0
+  model.initial_hidden_units: 0
+  model.max_hidden_units: 512
+  structure_search.enabled: true
+  structure_search.connection_budget: 9500
 
   optimizer.learning_rate:
     - "${eval:2**-12}"

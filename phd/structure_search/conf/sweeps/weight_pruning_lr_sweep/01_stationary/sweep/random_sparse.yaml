@@ -1,5 +1,5 @@
-experiment: paper-weight-pruning-lr-sweep
-sweep_name: 01_block_sparse_lr
+experiment: paper-weight-pruning-sweep
+sweep_name: 01_random_sparse_lr
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
@@ -14,8 +14,15 @@ plot_params:
   metrics: [asymptotic_loss, asymptotic_accuracy]
 
 parameters:
-  model.init_strategy: block_sparse
-  model.initial_hidden_units: 12          # 12 * (784 + 10) = 9528 weights
+  model.init_strategy: random_sparse
+  model.initial_hidden_units: 68          # 68 * (128.5 + 10.5) ~= 9500 weights
+  model.max_hidden_units: 68
+  model.init_random_range_in:
+    type: atomic
+    value: [1, 256]
+  model.init_random_range_out:
+    type: atomic
+    value: [1, 20]
   structure_search.enabled: false
 
   optimizer.learning_rate:

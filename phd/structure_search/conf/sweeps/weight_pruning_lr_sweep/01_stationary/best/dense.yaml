@@ -1,5 +1,5 @@
-experiment: paper-weight-pruning-lr-sweep
-sweep_name: 01_dense_lr
+experiment: paper-weight-pruning-best
+sweep_name: 01_dense_best
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
@@ -16,20 +16,11 @@ plot_params:
 parameters:
   model.init_strategy: dense
   model.initial_hidden_units: 6           # 6 * (1568 + 20) = 9528 weights
+  model.max_hidden_units: 6
   structure_search.enabled: false
 
-  optimizer.learning_rate:
-    - "${eval:2**-12}"
-    - "${eval:2**-11}"
-    - "${eval:2**-10}"
-    - "${eval:2**-9}"
-    - "${eval:2**-8}"
-    - "${eval:2**-7}"
-    - "${eval:2**-6}"
-    - "${eval:2**-5}"
-    - "${eval:2**-4}"
-    - "${eval:2**-3}"
+  optimizer.learning_rate: "${eval:2**-10}"
 
   seed:
     type: atomic
-    value: [0, 1, 2, 3, 4]
+    value: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]
