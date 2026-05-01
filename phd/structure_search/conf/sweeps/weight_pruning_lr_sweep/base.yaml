@@ -23,6 +23,11 @@ model:
   init_random_range_in: [1, 256]
   init_random_range_out: [1, 20]
 
+  # Dynamic-network-only fields (ignored by train_weight_pruning.py).
+  # Each variant overrides these in the sweep config.
+  max_connections_per_unit: 1568
+  max_fan_out: 512
+
 # --- Optimizer (SGD; learning_rate is swept). ---
 optimizer:
   name: sgd
