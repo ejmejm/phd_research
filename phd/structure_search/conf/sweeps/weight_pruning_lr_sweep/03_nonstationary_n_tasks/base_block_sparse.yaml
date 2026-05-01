@@ -1,0 +1,46 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+task:
+  n_tasks: 2
+  permute_period: ${eval:20000//${task.n_tasks}}
+  standardize: true
+
+# block_sparse: 6 units per task -> total = 6 * n_tasks units (each with 794
+# weights), so total weights = 794 * 6 * n_tasks scales linearly with budget.
+model:
+  initial_hidden_units: ${eval:6*${task.n_tasks}}
+  max_hidden_units: ${eval:6*${task.n_tasks}}
+  activation: leaky_relu
+
+  init_strategy: block_sparse
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+  weight_decay: 0
+
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: true

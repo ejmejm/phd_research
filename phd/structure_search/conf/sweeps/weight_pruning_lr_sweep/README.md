@@ -19,3 +19,14 @@ mlflow-sweep conf/sweeps/weight_pruning_lr_sweep/01/best/dense.yaml
 mlflow-sweep conf/sweeps/weight_pruning_lr_sweep/01/best/random_sparse.yaml
 mlflow-sweep conf/sweeps/weight_pruning_lr_sweep/01/best/structure_search.yaml
 ```
+
+##### 3. Nonstationary scaling — number-of-tasks sweep
+
+Sweep n_tasks in [2, 4, 8, 16, 32] together with a narrow learning-rate range. Permute period halves with every doubling of n_tasks; static-variant unit count and structure-search budget/event/prune count all scale linearly.
+
+```bash
+mlflow-sweep conf/sweeps/weight_pruning_lr_sweep/03_nonstationary_n_tasks/sweep/block_sparse.yaml
+mlflow-sweep conf/sweeps/weight_pruning_lr_sweep/03_nonstationary_n_tasks/sweep/dense.yaml
+mlflow-sweep conf/sweeps/weight_pruning_lr_sweep/03_nonstationary_n_tasks/sweep/random_sparse.yaml
+mlflow-sweep conf/sweeps/weight_pruning_lr_sweep/03_nonstationary_n_tasks/sweep/structure_search.yaml
+```
