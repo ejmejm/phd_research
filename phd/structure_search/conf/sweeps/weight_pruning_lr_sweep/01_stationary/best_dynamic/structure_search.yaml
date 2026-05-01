@@ -1,0 +1,29 @@
+experiment: paper-weight-pruning-best
+sweep_name: 01_structure_search_best_dynamic
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning_dynamic.py --config-path=../conf/sweeps/weight_pruning_lr_sweep --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+
+parameters:
+  model.init_strategy: random_sparse      # irrelevant when initial_hidden_units = 0
+  model.initial_hidden_units: 0
+  model.max_hidden_units: 512
+  model.max_connections_per_unit: 128     # = structure_search.gen_range_in upper
+  model.max_fan_out: 20
+  structure_search.enabled: true
+  structure_search.connection_budget: 9500
+
+  optimizer.learning_rate: "${eval:2**-5}"
+
+  seed:
+    type: atomic
+    value: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]
