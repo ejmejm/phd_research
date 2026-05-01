@@ -41,7 +41,7 @@ SEED = 42
 # DATA
 # ══════════════════════════════════════════════════════════════════════
 
-def load_mnist():
+def load_mnist1():
     from data import load_dataset
     images, labels, _, _ = load_dataset('mnist', split='train')
     return np.array(images, dtype=np.float32), np.array(labels, dtype=np.int32)

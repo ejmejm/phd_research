@@ -221,7 +221,7 @@ def build_step_2_4_config(
         # headroom (free_generate's half_conns = max_conns // 2 = 128).
         'random_sparsity_init': True,
         'random_sparsity_max_in': 128,
-        'random_sparsity_max_out': 20,
+        'random_sparsity_max_out': 1,
     }
 
     cfg['structure_tracker'] = {
