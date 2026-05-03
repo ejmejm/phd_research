@@ -600,8 +600,10 @@ def train_step(
         outputs, buffers = jax.vmap(model)(images)
         outputs_r = outputs.reshape(-1, n_tasks, num_classes)
         log_probs = jax.nn.log_softmax(outputs_r, axis=-1)
-        loss = -jnp.mean(jnp.sum(one_hot * log_probs, axis=-1))
+        loss_per_task = -jnp.sum(one_hot * log_probs, axis=-1)  # shape (B, K)
+        loss = jnp.mean(jnp.sum(loss_per_task, axis=1))
         return loss, (outputs_r, buffers)
+ 
 
     (loss, (outputs_r, buffers)), grads = eqx.filter_value_and_grad(
         loss_fn, has_aux=True)(state.model)
