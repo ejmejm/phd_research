@@ -1,0 +1,36 @@
+experiment: paper-weight-pruning-sweep
+sweep_name: 02b_dense_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_lr_sweep --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+
+parameters:
+  train.total_steps: 250_000
+  task.permute_period: 2000
+  task.n_tasks: 16
+  log_individual_seeds: false
+
+  model.init_strategy: dense
+  model.initial_hidden_units: 6           # 6 * (1568 + 20) = 9528 weights
+  model.max_hidden_units: 6
+  structure_search.enabled: false
+
+  optimizer.learning_rate:
+    - "${eval:2**-13}"
+    - "${eval:2**-12}"
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2]

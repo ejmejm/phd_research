@@ -38,9 +38,13 @@ structure_search:
   gen_range_out: [20, 20]
   max_units_per_event: ${eval:2*${task.n_tasks}}
 
+  # Dynamic-network-only fields (ignored by train_weight_pruning.py)
+  max_connections_per_unit: 128
+  max_fan_out: 20
+
 train:
   batch_size: 1
-  total_steps: 500_000
+  total_steps: 300_000
   log_freq: 1000
 
 seed: [0, 1, 2, 3, 4]

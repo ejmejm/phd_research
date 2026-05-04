@@ -7,7 +7,7 @@ command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps
 algorithm: grid
 
 spec:
-  metric: asymptotic_loss
+  metric: asymptotic_accuracy
   direction: minimize
 
 plot_params:
@@ -21,10 +21,11 @@ parameters:
 
   # 02_dense_lr best LR was 2**-8 -> use as the highest value here.
   optimizer.learning_rate:
+    - "${eval:2**-13}"
+    - "${eval:2**-12}"
     - "${eval:2**-11}"
     - "${eval:2**-10}"
     - "${eval:2**-9}"
-    - "${eval:2**-8}"
 
   seed:
     type: atomic

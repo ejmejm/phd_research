@@ -3,11 +3,11 @@ sweep_name: 03_random_sparse_n_tasks
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
-command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_lr_sweep/03_nonstationary_n_tasks --config-name=base_random_sparse
+command: python experiments/train_weight_pruning_dynamic.py --config-path=../conf/sweeps/weight_pruning_lr_sweep/03_nonstationary_n_tasks --config-name=base_random_sparse
 algorithm: grid
 
 spec:
-  metric: asymptotic_loss
+  metric: asymptotic_accuracy
   direction: minimize
 
 plot_params:

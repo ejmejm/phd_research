@@ -22,6 +22,10 @@ model:
   init_random_range_in: [1, 256]
   init_random_range_out: [1, 20]
 
+  # Dynamic-network-only fields (ignored by train_weight_pruning.py)
+  max_connections_per_unit: 256
+  max_fan_out: 20
+
 optimizer:
   name: sgd
   learning_rate: 1e-3
@@ -39,7 +43,7 @@ structure_search:
 
 train:
   batch_size: 1
-  total_steps: 500_000
+  total_steps: 300_000
   log_freq: 1000
 
 seed: [0, 1, 2, 3, 4]

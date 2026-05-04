@@ -1,0 +1,48 @@
+experiment: paper-weight-pruning-sweep
+sweep_name: 02b_random_sparse_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning_dynamic.py --config-path=../conf/sweeps/weight_pruning_lr_sweep --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+
+parameters:
+  train.total_steps: 250_000
+  task.permute_period: 2000
+  task.n_tasks: 16
+  log_individual_seeds: false
+
+  model.init_strategy: random_sparse
+  model.initial_hidden_units: 546          # 546 * (128.5 + 10.5) ~= 76,000 weights
+  model.max_hidden_units: 546
+  model.init_random_range_in:
+    type: atomic
+    value: [1, 256]
+  model.init_random_range_out:
+    type: atomic
+    value: [1, 20]
+
+  # Dynamic-network-only fields (ignored by train_weight_pruning.py).
+  # Each variant overrides these in the sweep config.
+  model.max_connections_per_unit: 256
+  model.max_fan_out: 20
+
+  structure_search.enabled: false
+
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2]
