@@ -175,10 +175,12 @@ class ParallelMNISTStream:
         return images, labels
 
     def get_test_batch(self):
-        """Return the full test set formatted for parallel MNIST evaluation.
+        """Return the test pool formatted for parallel MNIST evaluation.
 
-        Each test sample i uses test_images[i] for every sub-task, with
-        per-task label permutations applied.
+        Produces N_test rows. For each row, every sub-task independently samples
+        one test example (with replacement), matching ``sample_batch`` on the
+        train pool. Per-task label permutations are applied to the sampled
+        labels.
 
         Returns:
             images: (N_test, K*784)
@@ -187,13 +189,15 @@ class ParallelMNISTStream:
         assert self.test_images is not None, 'No test data provided'
         n_test = self.test_images.shape[0]
 
-        # Same image for each task (concatenated K times)
-        images = np.tile(self.test_images, (1, self.n_tasks))  # (N_test, K*784)
-
-        # Apply per-task permutations to labels
+        task_images = []
         task_labels = []
         for k in range(self.n_tasks):
-            task_labels.append(self.label_permutations[k][self.test_labels])
-        labels = np.stack(task_labels, axis=-1)  # (N_test, K)
+            indices = self.rng.integers(0, n_test, size=n_test)
+            imgs = self.test_images[indices]
+            lbls = self.label_permutations[k][self.test_labels[indices]]
+            task_images.append(imgs)
+            task_labels.append(lbls)
 
+        images = np.concatenate(task_images, axis=-1)
+        labels = np.stack(task_labels, axis=-1)
         return images, labels
