@@ -1,0 +1,56 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# --- Task ---
+task:
+  n_tasks: 4
+  permute_period: 0
+  standardize: true
+
+# --- Model (2-layer MLP, padded-dense). Per-sweep overrides set
+# initial_hidden_units and init_strategy. ---
+model:
+  initial_hidden_units: 0
+  max_hidden_units: 512
+  activation: leaky_relu
+
+  init_strategy: random_sparse
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+  # Dynamic-network-only fields (ignored by train_weight_pruning.py).
+  # Each variant overrides these in the sweep config.
+  max_connections_per_unit: 3136
+  max_fan_out: 512
+
+# --- Optimizer (SGD; learning_rate is swept). ---
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+  weight_decay: 0
+
+# --- Structure search (disabled by default). ---
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+# --- Training ---
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 10_000
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: true
