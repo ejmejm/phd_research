@@ -1,0 +1,48 @@
+project: structure-search-set
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: false
+wandb: false
+comet_ml: false
+
+# --- Task ---
+task:
+  n_tasks: 2            # number of parallel MNIST sub-tasks (1 = plain MNIST)
+  permute_period: 0     # steps between label permutations (0 = stationary)
+  standardize: true
+
+# --- Model (single hidden layer; width derived from set.connection_budget) ---
+model:
+  activation: leaky_relu
+  fan_in_safety_factor: 2.0   # multiplier on the expected ER row-fan-in to size
+                              # the per-unit sparse-storage cap
+
+# --- Optimizer ---
+# Only 'sgd' and 'adam' are supported here.
+optimizer:
+  name: adam
+  learning_rate: 1e-4
+  weight_decay: 0      # must be 0 for adam (per-weight age reset breaks otherwise)
+
+# --- SET (Sparse Evolutionary Training) ---
+set:
+  enabled: true
+  evolve_frequency: 5000      # steps between prune/regrow events
+  zeta: 0.3                   # paper default; fraction of smallest-positive +
+                              # fraction of largest-negative pruned per layer
+  epsilon: 20                 # paper default; controls Erdos-Renyi sparsity
+  connection_budget: 60000    # target total active connections.
+                              # hidden_units = floor((budget/epsilon - in - out) / 2)
+
+# --- Training ---
+train:
+  batch_size: 1
+  total_steps: 1_000_000
+  log_freq: 5000
+  eval_freq: 0           # steps between test evaluations (0 = disabled)
+  n_test_samples: null   # max test samples per eval (null = full test set)
+
+# Seeds: int or list of ints
+seed: [0, 1, 2]
+log_individual_seeds: false
