@@ -7,7 +7,7 @@ command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps
 algorithm: grid
 
 spec:
-  metric: asymptotic_loss
+  metric: asymptotic_accuracy
   direction: minimize
 
 plot_params:

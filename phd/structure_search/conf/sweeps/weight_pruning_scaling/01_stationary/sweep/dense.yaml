@@ -20,7 +20,7 @@ parameters:
   # max_hidden is fixed at 192 (largest size); smaller initial values are
   # padded — unused slots are masked out by unit_mask in the forward pass.
   model.max_hidden_units: ${model.initial_hidden_units}
-  model.initial_hidden_units: [6, 12, 24, 48, 96, 192]
+  model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
   structure_search.enabled: false
 
   optimizer.learning_rate:
