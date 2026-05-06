@@ -113,9 +113,13 @@ def test_get_test_batch_shapes():
 
 
 def test_get_test_batch_applies_permutations():
-    """get_test_batch should reflect current label permutations."""
+    """get_test_batch should reflect current label permutations.
+
+    Uses a single test example so random resampling does not mask permutation
+    changes (every draw is index 0).
+    """
     train_imgs, train_lbls = _make_fake_mnist(n_samples=100)
-    test_imgs, test_lbls = _make_fake_mnist(n_samples=20)
+    test_imgs, test_lbls = _make_fake_mnist(n_samples=1)
 
     stream = ParallelMNISTStream(
         images=train_imgs, labels=train_lbls,
@@ -134,6 +138,22 @@ def test_get_test_batch_applies_permutations():
     changed = not np.array_equal(lbls_before, lbls_after)
     assert changed, 'Test labels did not change after permutations'
     print('PASS: test_get_test_batch_applies_permutations')
+
+
+def test_get_test_batch_tasks_sample_independently():
+    """Each sub-task should draw its own test indices (not tile one image)."""
+    train_imgs, train_lbls = _make_fake_mnist(n_samples=100)
+    test_imgs, test_lbls = _make_fake_mnist(n_samples=50)
+
+    stream = ParallelMNISTStream(
+        images=train_imgs, labels=train_lbls,
+        n_tasks=2, batch_size=1, seed=123,
+        test_images=test_imgs, test_labels=test_lbls,
+    )
+    t_imgs, _ = stream.get_test_batch()
+    # With random flat [0,1) images, two independent 784-vecs almost surely differ
+    assert not np.allclose(t_imgs[:, :784], t_imgs[:, 784:])
+    print('PASS: test_get_test_batch_tasks_sample_independently')
 
 
 def test_step_counter_advances():
@@ -158,5 +178,6 @@ if __name__ == '__main__':
     test_permutation_only_affects_one_task()
     test_get_test_batch_shapes()
     test_get_test_batch_applies_permutations()
+    test_get_test_batch_tasks_sample_independently()
     test_step_counter_advances()
     print('\nAll ParallelMNISTStream tests passed!')
