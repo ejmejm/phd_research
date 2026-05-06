@@ -150,7 +150,8 @@ def _init_erdos_renyi_structure(
 
 def init_model(
     cfg: DictConfig, input_dim: int, output_dim: int,
-    hidden_units: int, max_conns: int, *, key: PRNGKeyArray,
+    hidden_units: int, max_conns: int, max_fan_out: int,
+    *, key: PRNGKeyArray,
 ) -> StructureModel:
     activation = cfg.model.activation
     epsilon = float(cfg.set.epsilon)
@@ -162,7 +163,7 @@ def init_model(
         max_units_per_layer=hidden_units,
         max_connections_per_unit=max_conns,
         activations=(activation,),
-        max_fan_out=hidden_units,
+        max_fan_out=max_fan_out,
         init_strategy='empty',
         key=key,
     )
@@ -548,8 +549,8 @@ def evaluate_test(batched_model, test_images, test_labels,
 # ---------------------------------------------------------------------------
 
 def _derive_sizes(cfg: DictConfig, input_dim: int, output_dim: int):
-    """Derive ``hidden_units`` and ``max_connections_per_unit`` from the
-    SET budget configuration."""
+    """Derive ``hidden_units``, ``max_connections_per_unit``, and
+    ``max_fan_out`` from the SET budget configuration."""
     epsilon = float(cfg.set.epsilon)
     budget = float(cfg.set.connection_budget)
     hidden = int(np.floor(
@@ -561,10 +562,21 @@ def _derive_sizes(cfg: DictConfig, input_dim: int, output_dim: int):
             f'input_dim={input_dim}, output_dim={output_dim} yields '
             f'hidden_units={hidden}; budget too small.',
         )
-    expected_w1_fan_in = epsilon * (input_dim + hidden) / hidden
     safety = float(cfg.model.fan_in_safety_factor)
+    expected_w1_fan_in = epsilon * (input_dim + hidden) / hidden
     max_conns = int(min(input_dim, max(1, np.ceil(safety * expected_w1_fan_in))))
-    return hidden, max_conns
+    # max_fan_out caps the per-buffer-position outgoing array used by the
+    # backward pass through the hidden layer. With one hidden layer it's
+    # bounded by W1's expected column fan-in, ε(input+hidden)/input. We
+    # require at least 2x headroom over the expected mean so SET has room
+    # for the column degree distribution to grow (binomial → power-law).
+    expected_w1_col_fan = epsilon * (input_dim + hidden) / input_dim
+    fan_out_factor = max(2.0, safety)
+    max_fan_out = int(min(
+        hidden,
+        max(8, np.ceil(fan_out_factor * expected_w1_col_fan) + 4),
+    ))
+    return hidden, max_conns, max_fan_out
 
 
 def prepare_experiment(cfg: DictConfig):
@@ -586,14 +598,15 @@ def prepare_experiment(cfg: DictConfig):
     input_dim = n_tasks * input_dim_per_task
     output_dim = n_tasks * num_classes
 
-    hidden_units, max_conns = _derive_sizes(cfg, input_dim, output_dim)
+    hidden_units, max_conns, max_fan_out = _derive_sizes(cfg, input_dim, output_dim)
     epsilon = float(cfg.set.epsilon)
     expected_w1 = epsilon * (input_dim + hidden_units)
     expected_w2 = epsilon * (output_dim + hidden_units)
     print(
         f'SET sizing: epsilon={epsilon}, budget={cfg.set.connection_budget}, '
         f'input_dim={input_dim}, output_dim={output_dim} -> '
-        f'hidden_units={hidden_units}, max_connections_per_unit={max_conns} '
+        f'hidden_units={hidden_units}, max_connections_per_unit={max_conns}, '
+        f'max_fan_out={max_fan_out} '
         f'(expected ER active conns: W1~{expected_w1:.0f}, W2~{expected_w2:.0f}, '
         f'total~{expected_w1 + expected_w2:.0f})'
     )
@@ -609,7 +622,7 @@ def prepare_experiment(cfg: DictConfig):
         ))
 
         model = init_model(
-            cfg, input_dim, output_dim, hidden_units, max_conns,
+            cfg, input_dim, output_dim, hidden_units, max_conns, max_fan_out,
             key=rng_from_string(rng, 'model'),
         )
         optimizer = prepare_optimizer(
