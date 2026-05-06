@@ -432,10 +432,17 @@ def prepare_experiment(cfg: DictConfig):
     n_tasks = int(cfg.task.n_tasks)
     permute_period = int(cfg.task.permute_period)
     standardize = bool(cfg.task.get('standardize', False))
+    eval_freq = int(cfg.train.get('eval_freq', 0))
 
-    images, labels, num_classes, input_dim_per_task = load_dataset('mnist', split='train')
-    if standardize:
-        images = _standardize(images)
+    raw_train_images, labels, num_classes, input_dim_per_task = load_dataset('mnist', split='train')
+    images = _standardize(raw_train_images) if standardize else raw_train_images
+
+    test_images = test_labels = None
+    if eval_freq > 0:
+        test_images, test_labels, _, _ = load_dataset('mnist', split='test')
+        if standardize:
+            test_images = _standardize(test_images, ref=raw_train_images)
+
     input_dim = n_tasks * input_dim_per_task
     output_dim = n_tasks * num_classes
 
@@ -446,6 +453,7 @@ def prepare_experiment(cfg: DictConfig):
             images=images, labels=labels, n_tasks=n_tasks,
             batch_size=cfg.train.batch_size, seed=seed,
             permute_period=permute_period,
+            test_images=test_images, test_labels=test_labels,
         ))
 
         model = init_model(
@@ -534,6 +542,43 @@ def _structure_diagnostics(model: PaddedMLP, n_tasks: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Test evaluation
+# ---------------------------------------------------------------------------
+
+def _eval_forward(model, images, labels, num_classes, n_tasks):
+    outputs, _ = jax.vmap(model)(images)
+    one_hot = jax.nn.one_hot(labels, num_classes)
+    outputs_r = outputs.reshape(-1, n_tasks, num_classes)
+    log_probs = jax.nn.log_softmax(outputs_r, axis=-1)
+    loss = jnp.mean(jnp.sum(-jnp.sum(one_hot * log_probs, axis=-1), axis=1))
+    correct = (jnp.argmax(outputs_r, axis=-1) == labels).astype(jnp.float32).mean()
+    return loss, correct
+
+
+def evaluate_test(batched_model, test_images, test_labels,
+                  num_classes: int, n_tasks: int, batch_size: int = 512):
+    """Evaluate batched (vmapped-over-seeds) model on a test set, chunked."""
+    @jax.jit
+    def _eval_chunk(model, imgs, lbls):
+        return jax.vmap(
+            lambda m: _eval_forward(m, imgs, lbls, num_classes, n_tasks),
+        )(model)
+
+    n_test = test_images.shape[0]
+    total_loss = total_acc = None
+    n_chunks = 0
+    for start in range(0, n_test, batch_size):
+        end = min(start + batch_size, n_test)
+        chunk_imgs = jnp.array(test_images[start:end])
+        chunk_lbls = jnp.array(test_labels[start:end])
+        cl, ca = _eval_chunk(batched_model, chunk_imgs, chunk_lbls)
+        total_loss = cl if total_loss is None else total_loss + cl
+        total_acc = ca if total_acc is None else total_acc + ca
+        n_chunks += 1
+    return total_loss / n_chunks, total_acc / n_chunks
+
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
@@ -543,6 +588,9 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
     num_log_periods = int(cfg.train.total_steps) // log_freq
     structure_search_enabled = bool(cfg.structure_search.enabled)
     prune_freq = int(cfg.structure_search.prune_frequency) if structure_search_enabled else log_freq
+    eval_freq = int(cfg.train.get('eval_freq', 0))
+    n_test_samples_cfg = cfg.train.get('n_test_samples', None)
+    n_test_samples = int(n_test_samples_cfg) if n_test_samples_cfg is not None else None
 
     train_step_fn = partial(
         train_step, num_classes=num_classes, n_tasks=n_tasks,
@@ -581,6 +629,7 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
     vmapped_scan = jax.jit(jax.vmap(scan_log_period))
 
     all_losses, all_accs, all_per_seed_losses, all_per_seed_accs = [], [], [], []
+    all_test_losses, all_test_accs = [], []
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
     log_executor = ThreadPoolExecutor(max_workers=1)
     log_futures = []
@@ -613,11 +662,29 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
             structure_metrics['cumulative_pruned'] = cumulative_pruned
             structure_metrics['cumulative_generated'] = cumulative_generated
 
+        test_metrics_dict = {}
+        if eval_freq > 0 and step % eval_freq == 0:
+            t_imgs, t_lbls = streams[0].get_test_batch()
+            if n_test_samples is not None and n_test_samples < t_imgs.shape[0]:
+                t_imgs = t_imgs[:n_test_samples]
+                t_lbls = t_lbls[:n_test_samples]
+            test_loss, test_acc = evaluate_test(
+                train_state.model, t_imgs, t_lbls, num_classes, n_tasks,
+            )
+            mean_test_loss = float(test_loss.mean())
+            mean_test_acc = float(test_acc.mean())
+            all_test_losses.append(mean_test_loss)
+            all_test_accs.append(mean_test_acc)
+            test_metrics_dict = {
+                'test_loss': mean_test_loss,
+                'test_accuracy': mean_test_acc,
+            }
+
         if logging_active:
             log_futures.append(log_executor.submit(
                 _bg_log, mean_loss, std_loss, mean_acc, std_acc,
                 per_seed_loss.tolist(), per_seed_acc.tolist(),
-                structure_metrics, cfg, step,
+                structure_metrics, test_metrics_dict, cfg, step,
             ))
 
         all_losses.append(mean_loss)
@@ -626,24 +693,33 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
         all_per_seed_accs.append(np.array(per_seed_acc))
 
         pbar.update(log_freq)
-        pbar.set_postfix(loss=f'{mean_loss:.4f}', acc=f'{mean_acc:.4f}',
-                         units=f'{structure_metrics["active_units"]:.0f}',
-                         conn=f'{structure_metrics["active_connections"]:.0f}')
+        postfix = {
+            'loss': f'{mean_loss:.4f}', 'acc': f'{mean_acc:.4f}',
+            'units': f'{structure_metrics["active_units"]:.0f}',
+            'conn': f'{structure_metrics["active_connections"]:.0f}',
+        }
+        if test_metrics_dict:
+            postfix['t_acc'] = f'{test_metrics_dict["test_accuracy"]:.4f}'
+        pbar.set_postfix(postfix)
 
     for f in log_futures:
         f.result()
     log_executor.shutdown(wait=False)
     pbar.close()
-    return train_state, all_losses, all_accs, all_per_seed_losses, all_per_seed_accs
+    return (train_state, all_losses, all_accs,
+            all_per_seed_losses, all_per_seed_accs,
+            all_test_losses, all_test_accs)
 
 
 def _bg_log(mean_loss, std_loss, mean_acc, std_acc,
-            per_seed_loss, per_seed_acc, structure_metrics, cfg, step):
+            per_seed_loss, per_seed_acc, structure_metrics,
+            test_metrics_dict, cfg, step):
     metrics = {
         'loss': mean_loss, 'loss_std': std_loss,
         'accuracy': mean_acc, 'accuracy_std': std_acc,
     }
     metrics.update(structure_metrics)
+    metrics.update(test_metrics_dict)
     log_metrics(metrics, cfg, step=step)
     log_child_metrics(
         {'loss': per_seed_loss, 'accuracy': per_seed_acc}, cfg, step=step,
@@ -673,7 +749,8 @@ def run_config(cfg: DictConfig) -> dict:
     init_child_runs(cfg.seed, cfg)
 
     train_state, streams, num_classes, n_tasks = prepare_experiment(cfg)
-    train_state, all_losses, all_accs, all_per_seed_losses, all_per_seed_accs = run_experiment(
+    (train_state, all_losses, all_accs, all_per_seed_losses, all_per_seed_accs,
+     all_test_losses, all_test_accs) = run_experiment(
         cfg, train_state, streams, num_classes, n_tasks,
     )
 
@@ -688,9 +765,16 @@ def run_config(cfg: DictConfig) -> dict:
              + train_state.model.w2_mask.sum(axis=(-1, -2))).mean()
         ),
     }
+    if all_test_losses:
+        n_test_tail = max(1, len(all_test_losses) // 10)
+        summary['asymptotic_test_loss'] = float(np.mean(all_test_losses[-n_test_tail:]))
+        summary['asymptotic_test_accuracy'] = float(np.mean(all_test_accs[-n_test_tail:]))
     print(f'Average loss: {summary["average_loss"]:.4f} | '
           f'Asymptotic loss: {summary["asymptotic_loss"]:.4f} | '
           f'Asymptotic acc: {summary["asymptotic_accuracy"]:.4f}')
+    if all_test_losses:
+        print(f'Asymptotic test loss: {summary["asymptotic_test_loss"]:.4f} | '
+              f'Asymptotic test acc: {summary["asymptotic_test_accuracy"]:.4f}')
     log_metrics(summary, cfg)
 
     if all_per_seed_losses:

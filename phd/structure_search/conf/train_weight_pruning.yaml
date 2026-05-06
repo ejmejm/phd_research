@@ -51,6 +51,8 @@ train:
   batch_size: 1
   total_steps: 1_000_000
   log_freq: 1000
+  eval_freq: 0           # steps between test evaluations (0 = disabled)
+  n_test_samples: null   # max test samples per eval (null = full test set)
 
 # Seeds: int or list of ints
 seed: [0, 1, 2]
