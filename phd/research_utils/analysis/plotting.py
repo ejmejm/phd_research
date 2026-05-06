@@ -26,6 +26,7 @@ def plot_param_sensitivity(
         pow_2_x_axis: bool = False,
         pow_2_legend: bool = False,
         nan_policy: str = 'propagate', # {'propagate', 'omit'}
+        palette: Optional[dict] = None,  # {hue_value: color}; None = seaborn 'deep'
     ):
     # Drop entire runs that have any NaN in the metric column if nan_policy is 'omit'
     if nan_policy == 'omit':
@@ -97,8 +98,11 @@ def plot_param_sensitivity(
             hue_values = sorted(hue_unique, key=lambda x: float(x))
         except Exception:
             hue_values = sorted(hue_unique)
-        palette = sns.color_palette('deep', n_colors=len(hue_values))
-        color_map = dict(zip(hue_values, palette))
+        if palette is not None:
+            color_map = {v: palette[v] for v in hue_values}
+        else:
+            sns_palette = sns.color_palette('deep', n_colors=len(hue_values))
+            color_map = dict(zip(hue_values, sns_palette))
     else:
         color_map = None
 
@@ -173,6 +177,7 @@ def plot_learning_curves(
         show_ci = False,
         show_individual_lines = False,
         line_alpha = 0.3,
+        palette: Optional[dict] = None,  # {hue_value: color}; None = seaborn 'deep'
     ):
     """Creates subplots of learning curves for different values of a variable.
     
@@ -246,8 +251,11 @@ def plot_learning_curves(
     # Create color mapping for consistent colors across subplots
     if hue_col is not None:
         hue_values = sorted(plot_df[hue_col].unique())
-        palette = sns.color_palette('deep', n_colors=len(hue_values))
-        color_map = dict(zip(hue_values, palette))
+        if palette is not None:
+            color_map = {v: palette[v] for v in hue_values}
+        else:
+            sns_palette = sns.color_palette('deep', n_colors=len(hue_values))
+            color_map = dict(zip(hue_values, sns_palette))
     
     # Create style mapping for consistent line styles across subplots
     dashes_map = None

@@ -68,6 +68,15 @@ COLOR_PALETTE = [
     '#e67e22', '#34495e', '#1abc9c'
 ]
 
+# Vibrant color-blind-safe palette (deuteranopia / protanopia / tritanopia
+# friendly). Same slot order as COLOR_PALETTE: blue, red, green, purple/magenta,
+# orange, cyan, grey. Magenta replaces straight purple so it stays distinct
+# from blue under red-green deficiency.
+COLOR_PALETTE_CB = [
+    '#0077BB', '#CC3311', '#009988', '#EE3377',
+    '#EE7733', '#33BBEE', '#BBBBBB',
+]
+
 
 DEFAULT_COLOR_IDS = {
     'real': 0,
@@ -76,48 +85,57 @@ DEFAULT_COLOR_IDS = {
     'adam + random recycling': 1,
     'non-zero weight init': 1,
     'no distractors': 2,
+    # Weight-pruning paper methods.
+    'structure search': 0,   # blue   (#0086DA)
+    'dense': 1,              # red    (#CA3720)
+    'block-sparse': 2,       # green  (#2BAF2A)
+    'random-sparse': 3,      # purple (#9923DC)
 }
 
 
-def get_color_palette(classes=None, n=None):
+def get_color_palette(classes=None, n=None, cb=False):
     """
     With no arguments, return the default color palette.
     With a list of classes, return a dict mapping each class to a color.
     With an integer n, return a list of n colors.
+
+    Set ``cb=True`` to use the color-blind-safe variant (same slot ordering,
+    so DEFAULT_COLOR_IDS continues to map to the correct hue).
     """
-    
+    palette = COLOR_PALETTE_CB if cb else COLOR_PALETTE
+
     if classes is not None:
-        if len(classes) > len(COLOR_PALETTE):
+        if len(classes) > len(palette):
             raise ValueError(
-                f'Only {len(COLOR_PALETTE)} colors available, but {len(classes)} '
+                f'Only {len(palette)} colors available, but {len(classes)} '
                 'classes were requested.'
             )
         # First set ids for classes in DEFAULT_COLOR_IDS
         # then do the rest alphabetically
-        
+
         color_map = {}
         for c in classes:
             if c.lower() in DEFAULT_COLOR_IDS:
                 color_map[c] = DEFAULT_COLOR_IDS[c.lower()]
 
-        remaining_ids = [i for i in range(len(COLOR_PALETTE)) \
+        remaining_ids = [i for i in range(len(palette)) \
             if i not in color_map.values()]
         for c in sorted(classes, key=lambda x: x.lower()):
             if c not in color_map:
                 color_map[c] = remaining_ids.pop(0)
 
-        color_map = {c: COLOR_PALETTE[i] for c, i in color_map.items()}
-        
+        color_map = {c: palette[i] for c, i in color_map.items()}
+
         return color_map
 
     elif n is not None:
-        if n > len(COLOR_PALETTE):
+        if n > len(palette):
             raise ValueError(
-                f'Only {len(COLOR_PALETTE)} colors available, but {n} were requested.'
+                f'Only {len(palette)} colors available, but {n} were requested.'
             )
-        return COLOR_PALETTE[:n]
-    
-    return COLOR_PALETTE
+        return palette[:n]
+
+    return palette
     
     
 def standardize_env_name(name):
