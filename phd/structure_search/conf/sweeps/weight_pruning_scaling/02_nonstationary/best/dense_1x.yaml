@@ -7,14 +7,15 @@ command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps
 algorithm: grid
 
 spec:
-  metric: asymptotic_test_loss
+  metric: asymptotic_loss
   direction: minimize
 
 plot_params:
-  metrics: [asymptotic_test_loss, asymptotic_test_accuracy]
+  metrics: [asymptotic_loss, asymptotic_accuracy]
 
 parameters:
   task.permute_period: 4000
+  train.eval_freq: 0
 
   model.init_strategy: dense
   model.initial_hidden_units: 6           # 6 * (3136 + 40) = 19056 weights (1x base)
