@@ -1,0 +1,44 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+task:
+  n_tasks: 2
+  permute_period: ${eval:20000//${task.n_tasks}}
+  standardize: true
+
+# SET: hidden_units is derived from set.connection_budget and set.epsilon as
+#   hidden = floor((budget/epsilon - input_dim - output_dim) / 2)
+# With budget = 4750*n_tasks (matching the other 03_ sweeps' total active
+# connections) and epsilon=5, we get ~78 hidden units per task with ~55
+# incoming and ~6 outgoing connections per hidden unit on average -- a
+# per-unit profile close to the paper's MNIST setup. Note: the paper's
+# default epsilon=20 cannot fit at this budget on this multi-task problem
+# (it would yield negative hidden_units).
+model:
+  activation: leaky_relu
+  fan_in_safety_factor: 2.0
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+  weight_decay: 0
+
+set:
+  enabled: true
+  evolve_frequency: 500
+  zeta: 0.3
+  epsilon: 5
+  connection_budget: ${eval:4750*${task.n_tasks}}
+
+train:
+  batch_size: 1
+  total_steps: 300_000
+  log_freq: 1000
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: true
