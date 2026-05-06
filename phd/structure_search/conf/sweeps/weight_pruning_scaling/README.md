@@ -29,3 +29,26 @@ mlflow-sweep conf/sweeps/weight_pruning_scaling/01_stationary/best/dense_8x.yaml
 mlflow-sweep conf/sweeps/weight_pruning_scaling/01_stationary/best/dense_16x.yaml
 mlflow-sweep conf/sweeps/weight_pruning_scaling/01_stationary/best/dense_32x.yaml
 ```
+
+##### 2. Nonstationary 4-task: block-sparse vs dense scaling
+
+Same setup as (1) but with `task.permute_period: 4000` (inputs are permuted
+every 4000 steps).
+
+```bash
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/sweep/block_sparse.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/sweep/dense.yaml
+```
+
+After identifying the best LR per variant, update the corresponding `best/`
+config and run the fixed-LR follow-ups (30 seeds each):
+
+```bash
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/best/block_sparse.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/best/dense_1x.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/best/dense_2x.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/best/dense_4x.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/best/dense_8x.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/best/dense_16x.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/02_nonstationary/best/dense_32x.yaml
+```
