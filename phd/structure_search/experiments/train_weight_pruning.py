@@ -122,6 +122,38 @@ def init_model(
             W2 = W2.at[:, :initial].set(W2_init * block_w2_mask)
             w1_mask = w1_mask.at[:initial].set(block_w1_mask)
             w2_mask = w2_mask.at[:, :initial].set(block_w2_mask)
+        elif strategy == 'single_output_block_sparse':
+            # Like block_sparse on the input side (each unit sees all
+            # input_dim_per_task inputs of its task), but each unit fans out
+            # to exactly one output, with units split evenly across the
+            # output_dim_per_task outputs within each task.
+            assert n_tasks > 1, 'single_output_block_sparse init requires n_tasks > 1 (parallel_mnist)'
+            assert initial % n_tasks == 0, 'initial_hidden_units must be divisible by n_tasks'
+            input_dim_per_task = input_dim // n_tasks
+            output_dim_per_task = output_dim // n_tasks
+            units_per_task = initial // n_tasks
+            assert units_per_task % output_dim_per_task == 0, (
+                'initial_hidden_units / n_tasks must be divisible by output_dim_per_task '
+                'so units distribute evenly across outputs'
+            )
+            units_per_output = units_per_task // output_dim_per_task
+            W1_init = _lecun_uniform(kw1, (initial, input_dim), input_dim_per_task)
+            W2_init = _lecun_uniform(kw2, (output_dim, initial), units_per_output)
+            block_w1_mask = jnp.zeros((initial, input_dim), dtype=jnp.float32)
+            block_w2_mask = jnp.zeros((output_dim, initial), dtype=jnp.float32)
+            for t in range(n_tasks):
+                ut0 = t * units_per_task
+                i0, i1 = t * input_dim_per_task, (t + 1) * input_dim_per_task
+                o0 = t * output_dim_per_task
+                block_w1_mask = block_w1_mask.at[ut0:ut0 + units_per_task, i0:i1].set(1.0)
+                for o in range(output_dim_per_task):
+                    u0 = ut0 + o * units_per_output
+                    u1 = u0 + units_per_output
+                    block_w2_mask = block_w2_mask.at[o0 + o, u0:u1].set(1.0)
+            W1 = W1.at[:initial].set(W1_init * block_w1_mask)
+            W2 = W2.at[:, :initial].set(W2_init * block_w2_mask)
+            w1_mask = w1_mask.at[:initial].set(block_w1_mask)
+            w2_mask = w2_mask.at[:, :initial].set(block_w2_mask)
         elif strategy == 'random_sparse':
             range_in = tuple(cfg.model.init_random_range_in)
             range_out = tuple(cfg.model.init_random_range_out)

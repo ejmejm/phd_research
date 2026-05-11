@@ -1,0 +1,28 @@
+experiment: paper-weight-pruning-best
+sweep_name: 02_single_output_block_sparse_best
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_lr_sweep --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+
+parameters:
+  task.permute_period: 10000
+
+  model.init_strategy: single_output_block_sparse
+  model.initial_hidden_units: 120         # 120 * (784 + 1) = 94200 weights; 6 units per output (matches block_sparse W2 fan-in)
+  model.max_hidden_units: 120
+  structure_search.enabled: false
+
+  optimizer.learning_rate: "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]
