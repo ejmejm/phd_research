@@ -14,7 +14,7 @@ plot_params:
   metrics: [asymptotic_loss, asymptotic_accuracy]
 
 parameters:
-  task.permute_period: 800
+  task.permute_period: 4000
   train.eval_freq: 0
   log_individual_seeds: false
 
@@ -28,6 +28,7 @@ parameters:
     - "${eval:2**-8}"
     - "${eval:2**-7}"
     - "${eval:2**-6}"
+    - "${eval:2**-5}"
 
   seed:
     type: atomic
