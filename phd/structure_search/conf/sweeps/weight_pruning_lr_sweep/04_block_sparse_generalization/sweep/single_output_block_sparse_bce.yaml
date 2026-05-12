@@ -1,5 +1,5 @@
-experiment: paper-weight-pruning-best
-sweep_name: 02_single_output_block_sparse_best
+experiment: paper-weight-pruning-sweep
+sweep_name: 04_single_output_block_sparse_bce_lr
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
@@ -7,7 +7,7 @@ command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps
 algorithm: grid
 
 spec:
-  metric: asymptotic_accuracy
+  metric: asymptotic_loss
   direction: minimize
 
 plot_params:
@@ -21,8 +21,15 @@ parameters:
   model.max_hidden_units: 120
   structure_search.enabled: false
 
-  optimizer.learning_rate: "${eval:2**-8}"
+  train.loss: sigmoid_bce
+
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
 
   seed:
     type: atomic
-    value: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]
+    value: [0, 1, 2, 3, 4]

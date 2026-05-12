@@ -590,8 +590,27 @@ def restructure(
 # Step
 # ---------------------------------------------------------------------------
 
+def _per_task_loss(outputs_r: jax.Array, one_hot: jax.Array, loss_type: str) -> jax.Array:
+    """Per-example per-task loss, shape (B, K).
+
+    ``softmax_ce``: softmax + categorical cross-entropy over the
+    ``num_classes`` outputs of each task. ``sigmoid_bce``: independent
+    sigmoid + binary cross-entropy per output, summed over the
+    ``num_classes`` outputs.
+    """
+    if loss_type == 'softmax_ce':
+        log_probs = jax.nn.log_softmax(outputs_r, axis=-1)
+        return -jnp.sum(one_hot * log_probs, axis=-1)
+    if loss_type == 'sigmoid_bce':
+        z = outputs_r
+        per_class = jnp.maximum(z, 0) - z * one_hot + jnp.log1p(jnp.exp(-jnp.abs(z)))
+        return jnp.sum(per_class, axis=-1)
+    raise ValueError(f'Unknown loss: {loss_type}')
+
+
 def train_step(
     state: TrainState, data, *, num_classes: int, n_tasks: int, decay: float,
+    loss_type: str,
 ):
     images, labels = data                          # labels: (B, K), images: (B, K*C_in)
     one_hot = jax.nn.one_hot(labels, num_classes)   # (B, K, C)
@@ -599,8 +618,7 @@ def train_step(
     def loss_fn(model):
         outputs, buffers = jax.vmap(model)(images)
         outputs_r = outputs.reshape(-1, n_tasks, num_classes)
-        log_probs = jax.nn.log_softmax(outputs_r, axis=-1)
-        loss_per_task = -jnp.sum(one_hot * log_probs, axis=-1)  # shape (B, K)
+        loss_per_task = _per_task_loss(outputs_r, one_hot, loss_type)  # (B, K)
         loss = jnp.mean(jnp.sum(loss_per_task, axis=1))
         return loss, (outputs_r, buffers)
  
@@ -789,23 +807,23 @@ def _structure_diagnostics(model: StructureModel, n_tasks: int) -> dict:
 # Test evaluation
 # ---------------------------------------------------------------------------
 
-def _eval_forward(model, images, labels, num_classes, n_tasks):
+def _eval_forward(model, images, labels, num_classes, n_tasks, loss_type):
     outputs, _ = jax.vmap(model)(images)
     one_hot = jax.nn.one_hot(labels, num_classes)
     outputs_r = outputs.reshape(-1, n_tasks, num_classes)
-    log_probs = jax.nn.log_softmax(outputs_r, axis=-1)
-    loss = jnp.mean(jnp.sum(-jnp.sum(one_hot * log_probs, axis=-1), axis=1))
+    loss = jnp.mean(jnp.sum(_per_task_loss(outputs_r, one_hot, loss_type), axis=1))
     correct = (jnp.argmax(outputs_r, axis=-1) == labels).astype(jnp.float32).mean()
     return loss, correct
 
 
 def evaluate_test(batched_model, test_images, test_labels,
-                  num_classes: int, n_tasks: int, batch_size: int = 512):
+                  num_classes: int, n_tasks: int, loss_type: str,
+                  batch_size: int = 512):
     """Evaluate batched (vmapped-over-seeds) model on a test set, chunked."""
     @jax.jit
     def _eval_chunk(model, imgs, lbls):
         return jax.vmap(
-            lambda m: _eval_forward(m, imgs, lbls, num_classes, n_tasks),
+            lambda m: _eval_forward(m, imgs, lbls, num_classes, n_tasks, loss_type),
         )(model)
 
     n_test = test_images.shape[0]
@@ -835,10 +853,12 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
     eval_freq = int(cfg.train.get('eval_freq', 0))
     n_test_samples_cfg = cfg.train.get('n_test_samples', None)
     n_test_samples = int(n_test_samples_cfg) if n_test_samples_cfg is not None else None
+    loss_type = str(cfg.train.get('loss', 'softmax_ce'))
 
     train_step_fn = partial(
         train_step, num_classes=num_classes, n_tasks=n_tasks,
         decay=float(cfg.structure_search.decay_rate),
+        loss_type=loss_type,
     )
 
     if structure_search_enabled:
@@ -912,7 +932,7 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
                 t_imgs = t_imgs[:n_test_samples]
                 t_lbls = t_lbls[:n_test_samples]
             test_loss, test_acc = evaluate_test(
-                train_state.model, t_imgs, t_lbls, num_classes, n_tasks,
+                train_state.model, t_imgs, t_lbls, num_classes, n_tasks, loss_type,
             )
             mean_test_loss = float(test_loss.mean())
             mean_test_acc = float(test_acc.mean())

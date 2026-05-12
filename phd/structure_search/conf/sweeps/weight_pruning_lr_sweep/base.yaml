@@ -50,6 +50,7 @@ train:
   batch_size: 1
   total_steps: 500_000
   log_freq: 1000
+  loss: softmax_ce
 
 seed: [0, 1, 2, 3, 4]
 log_individual_seeds: true
