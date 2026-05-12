@@ -12,17 +12,20 @@ spec:
 
 plot_params:
   metrics: [asymptotic_test_loss, asymptotic_test_accuracy]
+  sensitivity:
+    hue: [optimizer.learning_rate]
 
 parameters:
   model.init_strategy: dense
   # Per-unit dense weights (4 tasks): 3136 + 40 = 3176.
-  # Budgets: 1x=6 units (~19k weights), 2x=12, 4x=24, 8x=48, 16x=96, 32x=192.
-  # max_hidden is fixed at 192 (largest size); smaller initial values are
+  # Budgets: 1x=6 units (~19k weights), 2x=12, 4x=24, 8x=48, 16x=96, 32x=192, 64x=384.
+  # max_hidden is fixed at 384 (largest size); smaller initial values are
   # padded — unused slots are masked out by unit_mask in the forward pass.
   model.max_hidden_units: ${model.initial_hidden_units}
   model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
   structure_search.enabled: false
 
+  # 2^-11 best for all hidden unit counts
   optimizer.learning_rate:
     - "${eval:2**-14}"
     - "${eval:2**-13}"

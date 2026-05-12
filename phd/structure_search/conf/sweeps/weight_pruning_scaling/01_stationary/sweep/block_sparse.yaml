@@ -19,6 +19,7 @@ parameters:
   model.max_hidden_units: 24
   structure_search.enabled: false
 
+  # 2^-10 is the best
   optimizer.learning_rate:
     - "${eval:2**-11}"
     - "${eval:2**-10}"

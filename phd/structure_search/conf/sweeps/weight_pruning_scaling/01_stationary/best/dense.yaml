@@ -1,5 +1,5 @@
 experiment: paper-weight-pruning-scaling-best
-sweep_name: 02_dense_4task_32x_best
+sweep_name: 01_dense_scaling_4task_best
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
@@ -15,12 +15,15 @@ plot_params:
 
 parameters:
   model.init_strategy: dense
-  model.initial_hidden_units: 192         # 192 * (3136 + 40) = 609792 weights (32x)
-  model.max_hidden_units: 192
+  # Per-unit dense weights (4 tasks): 3136 + 40 = 3176.
+  # Budgets: 1x=6 units (~19k weights), 2x=12, 4x=24, 8x=48, 16x=96, 32x=192, 64x=384.
+  # max_hidden is fixed at 384 (largest size); smaller initial values are
+  # padded — unused slots are masked out by unit_mask in the forward pass.
+  model.max_hidden_units: ${model.initial_hidden_units}
+  model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
   structure_search.enabled: false
 
-  # TODO: replace with the best LR found by the 32x sweep.
-  optimizer.learning_rate: "${eval:2**-10}"
+  optimizer.learning_rate: "${eval:2**-11}"
 
   seed:
     type: atomic

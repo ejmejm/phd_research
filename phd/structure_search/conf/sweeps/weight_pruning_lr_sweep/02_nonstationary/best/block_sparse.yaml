@@ -21,7 +21,7 @@ parameters:
   model.max_hidden_units: 12
   structure_search.enabled: false
 
-  optimizer.learning_rate: "${eval:2**-7}"
+  optimizer.learning_rate: "${eval:2**-8}"
 
   seed:
     type: atomic
