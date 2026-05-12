@@ -1,0 +1,46 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 02_random_sparse_4task_nonstationary_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [model.initial_hidden_units]
+
+parameters:
+  task.permute_period: 800
+  train.eval_freq: 0
+  log_individual_seeds: false
+
+  model.init_strategy: random_sparse
+  # Sweep over sparsity by varying the unit count while holding total weights
+  # ~constant at the 2x base budget (19056). Outputs per unit are fixed at 20,
+  # so avg inputs per unit = 19056/n - 20 and init_random_range_in is
+  # [1, 2*avg - 1]. More units = sparser per-unit input connectivity.
+  model.initial_hidden_units: [48, 96, 192, 384]
+  model.max_hidden_units: ${model.initial_hidden_units}
+  model.init_random_range_in:
+    type: atomic
+    value: [1, "${eval:int(2 * (19056 / ${model.initial_hidden_units} - 20) - 1)}"]
+  model.init_random_range_out:
+    type: atomic
+    value: [20, 20]
+  structure_search.enabled: false
+
+  optimizer.learning_rate:
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

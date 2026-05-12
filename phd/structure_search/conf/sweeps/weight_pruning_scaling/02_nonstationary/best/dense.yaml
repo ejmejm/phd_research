@@ -1,0 +1,36 @@
+experiment: paper-weight-pruning-scaling-best
+sweep_name: 02_dense_scaling_4task_nonstationary_best
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [model.initial_hidden_units]
+
+parameters:
+  task.permute_period: 800
+  train.eval_freq: 0
+  log_individual_seeds: false
+
+  model.init_strategy: dense
+  # Per-unit dense weights (4 tasks): 3136 + 40 = 3176.
+  # Budgets: 1x=6 units (~19k weights), 2x=12, 4x=24, 8x=48, 16x=96, 32x=192, 64x=384.
+  # max_hidden tracks initial; smaller initial values are padded — unused
+  # slots are masked out by unit_mask in the forward pass.
+  model.max_hidden_units: ${model.initial_hidden_units}
+  model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
+  structure_search.enabled: false
+
+  # TODO: replace with the best LR found by the sweep above.
+  optimizer.learning_rate: ???
+
+  seed:
+    type: atomic
+    value: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]
