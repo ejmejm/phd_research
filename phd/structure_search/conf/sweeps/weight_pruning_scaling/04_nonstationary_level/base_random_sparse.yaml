@@ -1,0 +1,53 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+task:
+  n_tasks: 4
+  permute_period: 800
+  standardize: true
+
+# random_sparse: placeholder unit count. Replace with the per-task count
+# that won 02_nonstationary/sweep/random_sparse.yaml (sparsity × LR grid
+# at the matching n_tasks=4, permute_period=800 setup), and update
+# init_random_range_in accordingly. Outputs per unit are fixed at 20 and
+# avg inputs per unit = 19056/n - 20, so range_in top = 2*avg_in - 1.
+model:
+  initial_hidden_units: 96
+  max_hidden_units: 96
+  activation: leaky_relu
+
+  init_strategy: random_sparse
+  init_random_range_in: [1, 356]          # 2 * (19056/96 - 20) - 1
+  init_random_range_out: [1, 20]
+
+  max_connections_per_unit: 800           # must be >= init_random_range_in upper for any candidate per-task count
+  max_fan_out: 20
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+  weight_decay: 0
+
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: false

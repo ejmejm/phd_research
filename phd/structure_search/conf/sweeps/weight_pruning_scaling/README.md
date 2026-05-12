@@ -1,6 +1,6 @@
 ## Replication
 
-Three experiments at 4× the per-task parameter budget of
+Four experiments at 4× the per-task parameter budget of
 `weight_pruning_lr_sweep` (so block-sparse and dense both target ~19056
 total weights at n_tasks=4). All commands run from `phd/structure_search/`.
 
@@ -11,6 +11,27 @@ The general workflow for each numbered experiment is:
 3. Fill in the `???` placeholder under `best/<method>.yaml`'s
    `optimizer.learning_rate` field with that LR.
 4. Run the fixed-LR follow-up under `best/` (30 seeds, 101–130).
+
+#### Per-value best LRs via the `switch` resolver
+
+When a `best/` config sweeps over an inner axis (e.g. dense
+`initial_hidden_units` in (1)/(2), or `task.n_tasks` in (3),
+`task.permute_period` in (4)) and different values of that axis have
+different best LRs, **do not split the config into one file per value**.
+Use the `switch` resolver instead — it's registered in
+`phd/feature_search/jax_core/experiment_helpers.py` and looks up a value
+by exact-string match against a (key, value, key, value, …) list:
+
+```yaml
+parameters:
+  model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
+  optimizer.learning_rate: "${eval:2**${switch:${model.initial_hidden_units}, 6, -11, 12, -10, 24, -10, 48, -9, 96, -9, 192, -8, 384, -8}}"
+```
+
+Each grid combination picks the matching LR for that budget. Keys are
+matched as strings, so list scalar integers/floats without quotes; if a
+value has spaces, wrap the whole interpolation in quotes. This keeps one
+`best/<method>.yaml` per method instead of one per budget.
 
 ### 1. Stationary, 4 tasks: block-sparse vs dense scaling
 
@@ -92,3 +113,32 @@ mlflow-sweep conf/sweeps/weight_pruning_scaling/03_nonstationary_n_tasks/sweep/s
 
 No `best/` follow-ups for (3) — the sweep itself reports the per-method,
 per-n_tasks asymptotic accuracy/loss curves.
+
+### 4. Nonstationary, scaling permute period: all four methods
+
+Same nonstationary 4-task setup as (2), but sweeps `task.permute_period ∈
+{200, 400, 800, 1600, 3200, 6400}` to vary the level of non-stationarity
+while holding `n_tasks=4` and per-task capacity constant. Base configs
+match (2)'s n=4 resolution: block-sparse uses 24 units; dense uses 6
+units; structure-search uses max_hidden=800, budget=19000, prune=256,
+units_per_event=8.
+
+For `random_sparse`, reuse the per-task unit count that won
+`02_nonstationary/sweep/random_sparse.yaml` — there is no separate
+sparsity search in (4). Update `base_random_sparse.yaml` accordingly:
+
+- Set `model.initial_hidden_units` / `max_hidden_units` to the winning
+  total unit count (one of {48, 96, 192, 384}).
+- Set `model.init_random_range_in` to
+  `[1, int(2 * (19056 / <units> - 20) - 1)]`.
+- Confirm `model.max_connections_per_unit` ≥ the new `range_in` upper.
+
+```bash
+mlflow-sweep conf/sweeps/weight_pruning_scaling/04_nonstationary_level/sweep/block_sparse.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/04_nonstationary_level/sweep/dense.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/04_nonstationary_level/sweep/random_sparse.yaml
+mlflow-sweep conf/sweeps/weight_pruning_scaling/04_nonstationary_level/sweep/structure_search.yaml
+```
+
+No `best/` follow-ups for (4) — the sweep itself reports the per-method,
+per-permute-period asymptotic accuracy/loss curves.
