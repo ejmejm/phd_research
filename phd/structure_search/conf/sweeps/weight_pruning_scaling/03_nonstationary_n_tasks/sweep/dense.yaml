@@ -1,0 +1,36 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 03_dense_n_tasks_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling/03_nonstationary_n_tasks --config-name=base_dense
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    params: [task.n_tasks]
+    hue: [optimizer.learning_rate]
+
+parameters:
+  task.n_tasks: [2, 4, 8, 16, 32]
+
+  # Range matches 02_dense_scaling_4task_nonstationary_lr scaling sweep,
+  # extended downward since 6 dense units across more tasks may need a
+  # smaller LR than at the 4-task / 6-unit baseline.
+  optimizer.learning_rate:
+    - "${eval:2**-16}"
+    - "${eval:2**-14}"
+    - "${eval:2**-12}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+    - "${eval:2**-5}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

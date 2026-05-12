@@ -1,0 +1,31 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 03_structure_search_n_tasks_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning_dynamic.py --config-path=../conf/sweeps/weight_pruning_scaling/03_nonstationary_n_tasks --config-name=base_structure_search
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    params: [task.n_tasks]
+    hue: [optimizer.learning_rate]
+
+parameters:
+  task.n_tasks: [2, 4, 8, 16, 32]
+
+  # Range matches 02_structure_search_4task_nonstationary_lr scaling sweep.
+  optimizer.learning_rate:
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+    - "${eval:2**-4}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

@@ -1,0 +1,51 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# --- Task. permute_period halves with each doubling of n_tasks. ---
+task:
+  n_tasks: 2
+  permute_period: ${eval:5000//${task.n_tasks}}
+  standardize: true
+
+# --- Model: dense init, 6 units regardless of n_tasks (per-unit cost
+# already grows linearly with n_tasks since each unit is fully connected). ---
+model:
+  initial_hidden_units: 6
+  max_hidden_units: 6
+  activation: leaky_relu
+
+  init_strategy: dense
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+# --- Optimizer (sweep overrides learning_rate). ---
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+  weight_decay: 0
+
+# --- Structure search disabled. ---
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+# --- Training ---
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: false

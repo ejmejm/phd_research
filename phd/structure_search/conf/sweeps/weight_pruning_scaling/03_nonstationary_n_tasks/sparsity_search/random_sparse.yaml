@@ -1,0 +1,46 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 03_random_sparse_n_tasks_sparsity_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning_dynamic.py --config-path=../conf/sweeps/weight_pruning_scaling/03_nonstationary_n_tasks --config-name=base_random_sparse
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  sensitivity:
+    params: [model.initial_hidden_units]
+    hue: [optimizer.learning_rate]
+
+parameters:
+  task.n_tasks: 32
+
+  # Sweep over sparsity at the max task count to pick the per-task unit count
+  # that base_random_sparse will use for the full n_tasks sweep. Total budget
+  # = 6 * n_tasks * (784 + 10) = 152448 weights (block_sparse equivalent at
+  # n=32). Outputs per unit fixed at 20; avg_in = 152448/n - 20; range_in top
+  # = 2*avg_in - 1. The unit counts below are 12, 24, 48, 96 per task —
+  # mirroring 02_random_sparse's per-task sparsity grid at n=4.
+  model.initial_hidden_units: [384, 768, 1536, 3072]
+  model.max_hidden_units: ${model.initial_hidden_units}
+  model.init_random_range_in:
+    type: atomic
+    value: [1, "${eval:int(2 * (152000 / ${model.initial_hidden_units} - 20) - 1)}"]
+  model.init_random_range_out:
+    type: atomic
+    value: [20, 20]
+
+  # Range matches sweep/random_sparse.yaml.
+  optimizer.learning_rate:
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

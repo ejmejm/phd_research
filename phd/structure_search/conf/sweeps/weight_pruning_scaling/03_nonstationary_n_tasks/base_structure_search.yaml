@@ -1,0 +1,52 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+task:
+  n_tasks: 2
+  permute_period: ${eval:5000//${task.n_tasks}}
+  standardize: true
+
+# structure_search: starts at 0 units; max_hidden, connection_budget,
+# max_units_per_event, and prune_count all scale linearly with n_tasks.
+# n=2: max=400, budget=9500, units_per_event=4, prune=128.
+model:
+  initial_hidden_units: 0
+  max_hidden_units: ${eval:200*${task.n_tasks}}
+  activation: leaky_relu
+
+  init_strategy: random_sparse        # irrelevant when initial_hidden_units = 0
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+  # Dynamic-network-only fields (ignored by train_weight_pruning.py)
+  max_connections_per_unit: 128
+  max_fan_out: 20
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+  weight_decay: 0
+
+structure_search:
+  enabled: true
+  prune_frequency: 500
+  prune_count: ${eval:64*${task.n_tasks}}
+  decay_rate: 0.998
+  connection_budget: ${eval:4750*${task.n_tasks}}
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: ${eval:2*${task.n_tasks}}
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: false
