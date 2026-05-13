@@ -16,7 +16,7 @@ plot_params:
 parameters:
   task.permute_period: 800
   train.eval_freq: 0
-  log_individual_seeds: false
+  log_individual_seeds: true
 
   model.init_strategy: block_sparse
   model.initial_hidden_units: 24          # 24 * (784 + 10) = 19056 weights (2x base)

@@ -17,7 +17,7 @@ plot_params:
 parameters:
   task.permute_period: 800
   train.eval_freq: 0
-  log_individual_seeds: false
+  log_individual_seeds: true
 
   model.init_strategy: random_sparse
   # Sweep over sparsity by varying unit count while holding total weights
