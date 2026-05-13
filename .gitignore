@@ -31,6 +31,8 @@ discovery.egg-info/
 *.pbz2
 *.png
 *.lock
+*.svg
+*.pdf
 
 phd/sandbox/nethack_benchmarking/data/nld-nao/
 phd/sandbox/atari_prediction_generalization/data/
