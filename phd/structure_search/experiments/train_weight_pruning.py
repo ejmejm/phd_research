@@ -682,6 +682,7 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
 
     all_losses, all_accs, all_per_seed_losses, all_per_seed_accs = [], [], [], []
     all_test_losses, all_test_accs = [], []
+    all_per_seed_test_losses, all_per_seed_test_accs = [], []
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
     log_executor = ThreadPoolExecutor(max_workers=1)
     log_futures = []
@@ -715,6 +716,7 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
             structure_metrics['cumulative_generated'] = cumulative_generated
 
         test_metrics_dict = {}
+        per_seed_test_metrics_dict = {}
         if eval_freq > 0 and step % eval_freq == 0:
             t_imgs, t_lbls = streams[0].get_test_batch()
             if n_test_samples is not None and n_test_samples < t_imgs.shape[0]:
@@ -723,20 +725,29 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
             test_loss, test_acc = evaluate_test(
                 train_state.model, t_imgs, t_lbls, num_classes, n_tasks, loss_type,
             )
-            mean_test_loss = float(test_loss.mean())
-            mean_test_acc = float(test_acc.mean())
+            per_seed_test_loss = np.array(test_loss)
+            per_seed_test_acc = np.array(test_acc)
+            mean_test_loss = float(per_seed_test_loss.mean())
+            mean_test_acc = float(per_seed_test_acc.mean())
             all_test_losses.append(mean_test_loss)
             all_test_accs.append(mean_test_acc)
+            all_per_seed_test_losses.append(per_seed_test_loss)
+            all_per_seed_test_accs.append(per_seed_test_acc)
             test_metrics_dict = {
                 'test_loss': mean_test_loss,
                 'test_accuracy': mean_test_acc,
+            }
+            per_seed_test_metrics_dict = {
+                'test_loss': per_seed_test_loss.tolist(),
+                'test_accuracy': per_seed_test_acc.tolist(),
             }
 
         if logging_active:
             log_futures.append(log_executor.submit(
                 _bg_log, mean_loss, std_loss, mean_acc, std_acc,
                 per_seed_loss.tolist(), per_seed_acc.tolist(),
-                structure_metrics, test_metrics_dict, cfg, step,
+                structure_metrics, test_metrics_dict,
+                per_seed_test_metrics_dict, cfg, step,
             ))
 
         all_losses.append(mean_loss)
@@ -760,12 +771,13 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
     pbar.close()
     return (train_state, all_losses, all_accs,
             all_per_seed_losses, all_per_seed_accs,
-            all_test_losses, all_test_accs)
+            all_test_losses, all_test_accs,
+            all_per_seed_test_losses, all_per_seed_test_accs)
 
 
 def _bg_log(mean_loss, std_loss, mean_acc, std_acc,
             per_seed_loss, per_seed_acc, structure_metrics,
-            test_metrics_dict, cfg, step):
+            test_metrics_dict, per_seed_test_metrics_dict, cfg, step):
     metrics = {
         'loss': mean_loss, 'loss_std': std_loss,
         'accuracy': mean_acc, 'accuracy_std': std_acc,
@@ -773,9 +785,9 @@ def _bg_log(mean_loss, std_loss, mean_acc, std_acc,
     metrics.update(structure_metrics)
     metrics.update(test_metrics_dict)
     log_metrics(metrics, cfg, step=step)
-    log_child_metrics(
-        {'loss': per_seed_loss, 'accuracy': per_seed_acc}, cfg, step=step,
-    )
+    child_metrics = {'loss': per_seed_loss, 'accuracy': per_seed_acc}
+    child_metrics.update(per_seed_test_metrics_dict)
+    log_child_metrics(child_metrics, cfg, step=step)
 
 
 # ---------------------------------------------------------------------------
@@ -802,7 +814,8 @@ def run_config(cfg: DictConfig) -> dict:
 
     train_state, streams, num_classes, n_tasks = prepare_experiment(cfg)
     (train_state, all_losses, all_accs, all_per_seed_losses, all_per_seed_accs,
-     all_test_losses, all_test_accs) = run_experiment(
+     all_test_losses, all_test_accs,
+     all_per_seed_test_losses, all_per_seed_test_accs) = run_experiment(
         cfg, train_state, streams, num_classes, n_tasks,
     )
 
@@ -832,11 +845,22 @@ def run_config(cfg: DictConfig) -> dict:
     if all_per_seed_losses:
         per_seed_losses = np.stack(all_per_seed_losses)
         per_seed_accs = np.stack(all_per_seed_accs)
-        log_child_metrics({
+        child_summary = {
             'average_loss': per_seed_losses.mean(axis=0).tolist(),
             'asymptotic_loss': per_seed_losses[-n_tail:].mean(axis=0).tolist(),
             'asymptotic_accuracy': per_seed_accs[-n_tail:].mean(axis=0).tolist(),
-        }, cfg)
+        }
+        if all_per_seed_test_losses:
+            per_seed_test_losses = np.stack(all_per_seed_test_losses)
+            per_seed_test_accs = np.stack(all_per_seed_test_accs)
+            n_test_tail = max(1, len(all_per_seed_test_losses) // 10)
+            child_summary['asymptotic_test_loss'] = (
+                per_seed_test_losses[-n_test_tail:].mean(axis=0).tolist()
+            )
+            child_summary['asymptotic_test_accuracy'] = (
+                per_seed_test_accs[-n_test_tail:].mean(axis=0).tolist()
+            )
+        log_child_metrics(child_summary, cfg)
 
     finish_child_runs(cfg)
     return summary
