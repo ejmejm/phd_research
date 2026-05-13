@@ -86,9 +86,9 @@ DEFAULT_COLOR_IDS = {
     'non-zero weight init': 1,
     'no distractors': 2,
     # Weight-pruning paper methods.
-    'structure search': 0,   # blue   (#0086DA)
+    'block-sparse': 0,       # blue  (#2BAF2A)
     'dense': 1,              # red    (#CA3720)
-    'block-sparse': 2,       # green  (#2BAF2A)
+    'structure search': 2,   # green   (#0086DA)
     'random-sparse': 3,      # purple (#9923DC)
 }
 
@@ -215,6 +215,19 @@ def set_matplotlib_style(style='default'):
             'xtick.labelsize': 20,
             'ytick.labelsize': 20,
             'lines.linewidth': 2.7
+        })
+    elif style == '2-row':
+        # Paper-sized text for 2-up layouts.
+        plt.rcParams.update({
+            'figure.figsize': (7, 5),
+            'axes.labelsize': 20,
+            'axes.titlesize': 22,
+            'axes.titlepad': 18,
+            'xtick.labelsize': 18,
+            'ytick.labelsize': 18,
+            'legend.fontsize': 15,
+            'legend.title_fontsize': 16,
+            'lines.linewidth': 3.1
         })
     else:
         raise ValueError(f'Unknown style {style}')
