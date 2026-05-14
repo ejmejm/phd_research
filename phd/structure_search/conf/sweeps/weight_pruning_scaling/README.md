@@ -25,13 +25,15 @@ by exact-string match against a (key, value, key, value, …) list:
 ```yaml
 parameters:
   model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
-  optimizer.learning_rate: "${eval:2**${switch:${model.initial_hidden_units}, 6, -11, 12, -10, 24, -10, 48, -9, 96, -9, 192, -8, 384, -8}}"
+  optimizer.learning_rate: "${eval:'2**${switch:${model.initial_hidden_units}, 6, -11, 12, -10, 24, -10, 48, -9, 96, -9, 192, -8, 384, -8}'}"
 ```
 
 Each grid combination picks the matching LR for that budget. Keys are
-matched as strings, so list scalar integers/floats without quotes; if a
-value has spaces, wrap the whole interpolation in quotes. This keeps one
-`best/<method>.yaml` per method instead of one per budget.
+matched as strings, so list scalar integers/floats without quotes. The
+`eval` body must be wrapped in single quotes because Hydra's CLI
+override parser otherwise chokes on the commas/braces inside the nested
+`${switch:...}`. This keeps one `best/<method>.yaml` per method instead
+of one per budget.
 
 ### 1. Stationary, 4 tasks: block-sparse vs dense scaling
 

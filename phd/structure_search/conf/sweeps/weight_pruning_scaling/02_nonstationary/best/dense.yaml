@@ -29,7 +29,7 @@ parameters:
   structure_search.enabled: false
 
   # Best LRs from 02_dense_scaling_4task_nonstationary_lr per budget.
-  optimizer.learning_rate: "${eval:2**${switch:${model.initial_hidden_units}, 6, -9, 12, -9, 24, -9, 48, -9, 96, -9, 192, -10, 384, -10}}"
+  optimizer.learning_rate: "${eval:'2**${switch:${model.initial_hidden_units}, 6, -9, 12, -9, 24, -9, 48, -9, 96, -9, 192, -10, 384, -10}'}"
 
   seed:
     type: atomic

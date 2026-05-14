@@ -12,7 +12,6 @@ spec:
 
 plot_params:
   metrics: [asymptotic_loss, asymptotic_accuracy]
-  split_by: [model.initial_hidden_units]
 
 parameters:
   task.permute_period: 800
@@ -20,21 +19,19 @@ parameters:
   log_individual_seeds: true
 
   model.init_strategy: random_sparse
-  # Sweep over sparsity by varying unit count while holding total weights
-  # ~constant at the 2x base budget (19056). Outputs per unit fixed at 20;
-  # avg inputs per unit = 19056/n - 20, init_random_range_in = [1, 2*avg - 1].
-  model.initial_hidden_units: [48, 96, 192, 384]
-  model.max_hidden_units: ${model.initial_hidden_units}
+  # 96 total units (= 24 per task at n=4) was the sparsity-search winner;
+  # per-unit budget = 19056/96 = 198.5, avg_in = 178.5, range_in upper = 356.
+  model.initial_hidden_units: 96
+  model.max_hidden_units: 96
   model.init_random_range_in:
     type: atomic
-    value: [1, "${eval:'int(2 * (19056 / ${model.initial_hidden_units} - 20) - 1)'}"]
+    value: [1, 356]
   model.init_random_range_out:
     type: atomic
     value: [20, 20]
   structure_search.enabled: false
 
-  # Best LRs from 02_random_sparse_4task_nonstationary_lr per sparsity.
-  optimizer.learning_rate: "${eval:2**${switch:${model.initial_hidden_units}, 48, -8, 96, -7, 192, -7, 384, -6}}"
+  optimizer.learning_rate: "${eval:2**-7}"
 
   seed:
     type: atomic
