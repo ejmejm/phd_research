@@ -11,19 +11,22 @@ task:
   permute_period: ${eval:5000//${task.n_tasks}}
   standardize: true
 
-# random_sparse: avg per-unit cost ~= 139, so 34 * n_tasks units gives
-# ~9500 weights at n=2, scaling linearly with n_tasks.
+# random_sparse: 96 units per task (winner of sparsity_search at n=32).
+# Per-task budget = 96 * (avg_in + avg_out) = 96 * (29.625 + 20) = 4764 weights.
+# avg_in = 4764/96 - 20 = 29.625 -> init_random_range_in upper = 2*avg_in - 1 = 58.
 model:
-  initial_hidden_units: ${eval:34*${task.n_tasks}}
-  max_hidden_units: ${eval:34*${task.n_tasks}}
+  initial_hidden_units: ${eval:96*${task.n_tasks}}
+  max_hidden_units: ${eval:96*${task.n_tasks}}
   activation: leaky_relu
 
   init_strategy: random_sparse
-  init_random_range_in: [1, 256]
-  init_random_range_out: [1, 20]
+  init_random_range_in: [1, 58]
+  init_random_range_out: [20, 20]
 
-  # Dynamic-network-only fields (ignored by train_weight_pruning.py)
-  max_connections_per_unit: 800           # must be >= init_random_range_in upper for any sparsity candidate
+  # Dynamic-network-only fields. max_connections_per_unit is tightened to
+  # match range_in upper so the dynamic-network forward pass doesn't pay
+  # for unused slots.
+  max_connections_per_unit: 58
   max_fan_out: 20
 
 optimizer:

@@ -11,21 +11,22 @@ task:
   permute_period: 800
   standardize: true
 
-# random_sparse: placeholder unit count. Replace with the per-task count
-# that won 02_nonstationary/sweep/random_sparse.yaml (sparsity × LR grid
-# at the matching n_tasks=4, permute_period=800 setup), and update
-# init_random_range_in accordingly. Outputs per unit are fixed at 20 and
-# avg inputs per unit = 19056/n - 20, so range_in top = 2*avg_in - 1.
+# random_sparse: 96 total units (= 24 per task at n=4) was the winner of
+# 02_nonstationary/sweep/random_sparse.yaml. Per-unit weights: avg_in + 20
+# = 19056/96 = 198.5, so avg_in = 178.5 and init_random_range_in upper =
+# 2 * 178.5 - 1 = 356.
 model:
   initial_hidden_units: 96
   max_hidden_units: 96
   activation: leaky_relu
 
   init_strategy: random_sparse
-  init_random_range_in: [1, 356]          # 2 * (19056/96 - 20) - 1
-  init_random_range_out: [1, 20]
+  init_random_range_in: [1, 356]
+  init_random_range_out: [20, 20]
 
-  max_connections_per_unit: 800           # must be >= init_random_range_in upper for any candidate per-task count
+  # Tightened to range_in upper so the dynamic-network forward pass doesn't
+  # pay for unused slots.
+  max_connections_per_unit: 356
   max_fan_out: 20
 
 optimizer:
