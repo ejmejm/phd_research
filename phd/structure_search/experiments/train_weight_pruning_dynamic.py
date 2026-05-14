@@ -46,6 +46,7 @@ from phd.structure_search.dynamic_network import (
 
 SCAN_UNROLL = 4
 HIDDEN_LAYER = 0  # this script uses a single hidden layer (max_layers=1)
+DIVERGENCE_LOSS_THRESHOLD = 1e6  # stop training early if train loss exceeds this (or NaN/inf)
 
 
 def _lecun_uniform_dyn(key, shape, fan_in):
@@ -965,6 +966,11 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
             postfix['t_acc'] = f'{test_metrics_dict["test_accuracy"]:.4f}'
         pbar.set_postfix(postfix)
 
+        if not np.isfinite(all_losses[-1]) or all_losses[-1] > DIVERGENCE_LOSS_THRESHOLD:
+            print(f'\n[diverged] train loss {all_losses[-1]:.4g} exceeded threshold '
+                  f'{DIVERGENCE_LOSS_THRESHOLD:.4g} at step {step}; stopping early.')
+            break
+
     for f in log_futures:
         f.result()
     log_executor.shutdown(wait=False)
@@ -1017,6 +1023,11 @@ def run_config(cfg: DictConfig) -> dict:
         cfg, train_state, streams, num_classes, n_tasks,
     )
 
+    diverged = bool(
+        all_losses
+        and (not np.isfinite(all_losses[-1]) or all_losses[-1] > DIVERGENCE_LOSS_THRESHOLD)
+    )
+
     n_tail = max(1, len(all_losses) // 10)
     final_network = train_state.model.network
     summary = {
@@ -1030,6 +1041,7 @@ def run_config(cfg: DictConfig) -> dict:
             ((final_network.input_indices >= 0).sum(axis=(-1, -2, -3))
              + final_network.output_mask.sum(axis=(-1, -2))).mean()
         ),
+        'diverged': float(diverged),
     }
     if all_test_losses:
         n_test_tail = max(1, len(all_test_losses) // 10)
