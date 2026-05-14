@@ -24,8 +24,7 @@ parameters:
   structure_search.enabled: true
   structure_search.connection_budget: 19056   # 2x base (matches block_sparse 24 * 794)
 
-  # TODO: replace with the best LR found by the sweep above.
-  optimizer.learning_rate: ???
+  optimizer.learning_rate: "${eval:2**-6}"
 
   seed:
     type: atomic
