@@ -3,7 +3,7 @@ sweep_name: 02_dense_scaling_4task_nonstationary_best
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
-command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling --config-name=base
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling/02_nonstationary --config-name=base_dense_best
 algorithm: grid
 
 spec:
@@ -15,21 +15,10 @@ plot_params:
   split_by: [model.initial_hidden_units]
 
 parameters:
-  task.permute_period: 800
-  train.eval_freq: 0
-  log_individual_seeds: true
-
-  model.init_strategy: dense
   # Per-unit dense weights (4 tasks): 3136 + 40 = 3176.
   # Budgets: 1x=6 units (~19k weights), 2x=12, 4x=24, 8x=48, 16x=96, 32x=192, 64x=384.
-  # max_hidden tracks initial; smaller initial values are padded — unused
-  # slots are masked out by unit_mask in the forward pass.
-  model.max_hidden_units: ${model.initial_hidden_units}
+  # LR per budget is set in base_dense_best.yaml via the switch resolver.
   model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
-  structure_search.enabled: false
-
-  # Best LRs from 02_dense_scaling_4task_nonstationary_lr per budget.
-  optimizer.learning_rate: "${eval:'2**${switch:${model.initial_hidden_units}, 6, -9, 12, -9, 24, -9, 48, -9, 96, -9, 192, -10, 384, -10}'}"
 
   seed:
     type: atomic
