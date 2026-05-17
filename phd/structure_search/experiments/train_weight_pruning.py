@@ -40,6 +40,7 @@ from phd.structure_search.data import load_dataset, ParallelMNISTStream
 
 
 SCAN_UNROLL = 4
+DIVERGENCE_LOSS_THRESHOLD = 1e6  # stop training early if train loss exceeds this (or NaN/inf)
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +766,11 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
             postfix['t_acc'] = f'{test_metrics_dict["test_accuracy"]:.4f}'
         pbar.set_postfix(postfix)
 
+        if not np.isfinite(all_losses[-1]) or all_losses[-1] > DIVERGENCE_LOSS_THRESHOLD:
+            print(f'\n[diverged] train loss {all_losses[-1]:.4g} exceeded threshold '
+                  f'{DIVERGENCE_LOSS_THRESHOLD:.4g} at step {step}; stopping early.')
+            break
+
     for f in log_futures:
         f.result()
     log_executor.shutdown(wait=False)
@@ -819,6 +825,11 @@ def run_config(cfg: DictConfig) -> dict:
         cfg, train_state, streams, num_classes, n_tasks,
     )
 
+    diverged = bool(
+        all_losses
+        and (not np.isfinite(all_losses[-1]) or all_losses[-1] > DIVERGENCE_LOSS_THRESHOLD)
+    )
+
     n_tail = max(1, len(all_losses) // 10)
     summary = {
         'average_loss': float(np.mean(all_losses)),
@@ -829,6 +840,7 @@ def run_config(cfg: DictConfig) -> dict:
             (train_state.model.w1_mask.sum(axis=(-1, -2))
              + train_state.model.w2_mask.sum(axis=(-1, -2))).mean()
         ),
+        'diverged': float(diverged),
     }
     if all_test_losses:
         n_test_tail = max(1, len(all_test_losses) // 10)
