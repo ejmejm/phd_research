@@ -1,0 +1,48 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+task:
+  n_tasks: 4
+  permute_period: 800
+  standardize: true
+
+# dense: per-unit cost = 4*784 + 4*10 = 3176 weights at n_tasks=4.
+# Budgets: 1x=6 units (=19056 weights), 2x=12, ..., 64x=384.
+# max_hidden tracks initial; smaller initial values are padded.
+model:
+  initial_hidden_units: 6           # overridden by sweep
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+  init_strategy: dense
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+  weight_decay: 0
+
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: false

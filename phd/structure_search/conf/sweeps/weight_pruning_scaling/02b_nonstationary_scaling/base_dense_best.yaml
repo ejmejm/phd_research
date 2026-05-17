@@ -1,0 +1,51 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+task:
+  n_tasks: 4
+  permute_period: 800
+  standardize: true
+
+model:
+  initial_hidden_units: 6           # overridden by sweep
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+  init_strategy: dense
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+  max_connections_per_unit: 3136
+  max_fan_out: 512
+
+# LR per budget from 02_dense_scaling_4task_nonstationary_lr. Kept in this
+# base config because Hydra's CLI override parser can't handle the commas
+# inside the nested ${...} when sent as an override.
+optimizer:
+  name: sgd
+  learning_rate: "${eval:'2**${switch:${model.initial_hidden_units}, 6, -9, 12, -9, 24, -9, 48, -9, 96, -9, 192, -10, 384, -10}'}"
+  weight_decay: 0
+
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: true

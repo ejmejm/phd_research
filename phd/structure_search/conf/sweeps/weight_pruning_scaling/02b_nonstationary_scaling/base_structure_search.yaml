@@ -1,0 +1,55 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+task:
+  n_tasks: 4
+  permute_period: 800
+  standardize: true
+
+# structure_search: starts at 0 units. connection_budget is the swept axis;
+# max_hidden_units, prune_count, and max_units_per_event scale linearly with
+# it, anchored at the 1x base (budget=19056 -> max_hidden=800, prune=256,
+# units_per_event=8 — matching 03's n_tasks=4 resolution).
+model:
+  initial_hidden_units: 0
+  max_hidden_units: ${eval:800*${structure_search.connection_budget}//19056}
+  activation: leaky_relu
+
+  init_strategy: random_sparse      # irrelevant when initial_hidden_units = 0
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+  # Dynamic-network-only fields. max_connections_per_unit / max_fan_out cap
+  # the per-unit buffer; with gen_range_in=[128,128] and gen_range_out=[20,20]
+  # each generated unit has fan-in=128 and fan-out=20.
+  max_connections_per_unit: 128
+  max_fan_out: 20
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3
+  weight_decay: 0
+
+structure_search:
+  enabled: true
+  prune_frequency: 500
+  prune_count: ${eval:256*${structure_search.connection_budget}//19056}
+  decay_rate: 0.998
+  connection_budget: 19056          # overridden by sweep (1x=19056, ..., 64x=1219584)
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: ${eval:8*${structure_search.connection_budget}//19056}
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: false

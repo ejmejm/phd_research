@@ -1,0 +1,33 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 02b_structure_search_scaling_4task_nonstationary_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning_dynamic.py --config-path=../conf/sweeps/weight_pruning_scaling/02b_nonstationary_scaling --config-name=base_structure_search
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [structure_search.connection_budget]
+
+parameters:
+  # Budgets 1x..64x. Base file derives max_hidden_units, prune_count, and
+  # max_units_per_event from connection_budget so the dynamic-network buffers
+  # scale with the budget.
+  structure_search.connection_budget: [19056, 38112, 76224, 152448, 304896, 609792, 1219584]
+
+  # Compressed from 02's 5-LR grid based on prior bests (best at 1x was -6;
+  # -5 and -4 diverged).
+  optimizer.learning_rate:
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]
