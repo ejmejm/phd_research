@@ -21,11 +21,15 @@ parameters:
   model.initial_hidden_units: [384, 768, 1536, 3072, 6144, 12288, 24576]
 
   # Compressed from 02's 5-LR grid based on prior bests (best at 1x was -8..-6).
+  # Widened up by two values after the first pass found 2^-6 best at 384 units
+  # (upper-edge); -5/-4 covers the possible peak for smaller sparsity-level sizes.
   optimizer.learning_rate:
     - "${eval:2**-9}"
     - "${eval:2**-8}"
     - "${eval:2**-7}"
     - "${eval:2**-6}"
+    - "${eval:2**-5}"
+    - "${eval:2**-4}"
 
   seed:
     type: atomic
