@@ -23,14 +23,11 @@ model:
   max_connections_per_unit: 58
   max_fan_out: 20
 
-# TODO: fill in the best LRs found by 02b_random_sparse_scaling_4task_nonstationary_lr.
-# If LR is the same across all sizes, just set a single value. Otherwise use the
-# switch resolver — commas inside the nested ${...} have to live in this base
-# file. Example template:
-#   learning_rate: "${eval:'2**${switch:${model.initial_hidden_units}, 384, -8, 768, -7, 1536, -7, 3072, -7, 6144, -7, 12288, -7, 24576, -7}'}"
+# Best LRs per size from 02b_random_sparse_scaling_4task_nonstationary_lr:
+# 384 -> 2^-6, all larger sizes -> 2^-7.
 optimizer:
   name: sgd
-  learning_rate: ???
+  learning_rate: "${eval:'2**${switch:${model.initial_hidden_units}, 384, -6, 768, -7, 1536, -7, 3072, -7, 6144, -7, 12288, -7, 24576, -7}'}"
   weight_decay: 0
 
 structure_search:

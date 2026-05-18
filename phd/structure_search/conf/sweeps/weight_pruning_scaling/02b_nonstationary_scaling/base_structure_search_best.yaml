@@ -23,14 +23,11 @@ model:
   max_connections_per_unit: 128
   max_fan_out: 20
 
-# TODO: fill in the best LRs found by 02b_structure_search_scaling_4task_nonstationary_lr.
-# If LR is the same across all budgets, just set a single value. Otherwise use the
-# switch resolver keyed on structure_search.connection_budget — commas inside
-# the nested ${...} have to live in this base file. Example template:
-#   learning_rate: "${eval:'2**${switch:${structure_search.connection_budget}, 19056, -6, 38112, -6, 76224, -6, 152448, -7, 304896, -7, 609792, -7, 1219584, -7}'}"
+# Best LRs per budget from 02b_structure_search_scaling_4task_nonstationary_lr:
+# small budgets (<=76224) -> 2^-6, larger -> 2^-7.
 optimizer:
   name: sgd
-  learning_rate: ???
+  learning_rate: "${eval:'2**${switch:${structure_search.connection_budget}, 19056, -6, 38112, -6, 76224, -6, 152448, -7, 304896, -7, 609792, -7, 1219584, -7}'}"
   weight_decay: 0
 
 structure_search:

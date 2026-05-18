@@ -20,14 +20,11 @@ model:
   init_random_range_in: [1, 256]
   init_random_range_out: [1, 20]
 
-# TODO: fill in the best LRs found by 02b_block_sparse_scaling_4task_nonstationary_lr.
-# If LR is the same across all sizes, just set a single value. Otherwise use the
-# switch resolver (commas inside the nested ${...} have to live in this base
-# file — they can't be passed as Hydra CLI overrides). Example:
-#   learning_rate: "${eval:'2**${switch:${model.initial_hidden_units}, 24, -9, 48, -9, 96, -8, 192, -8, 384, -8, 768, -8, 1536, -8}'}"
+# Best LR was uniformly 2^-8 across all sizes (from
+# 02b_block_sparse_scaling_4task_nonstationary_lr).
 optimizer:
   name: sgd
-  learning_rate: ???
+  learning_rate: "${eval:2**-8}"
   weight_decay: 0
 
 structure_search:
