@@ -1,0 +1,41 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 00_dense_n_task_scaling_lr_v2
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/n_task_scaling --config-name=base_dense
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [model.initial_hidden_units, task.n_tasks]
+  sensitivity:
+    hue: [optimizer.learning_rate]
+
+parameters:
+  # Joint scan over n_tasks AND hidden units. Dense per-unit fan-in is
+  # 784*n_tasks (varies 16x across the n_tasks axis), so LR may shift with
+  # n_tasks even at fixed hidden_units.
+  task.n_tasks: [2, 4, 8, 16, 32]
+
+  # Base unit count 4, scaled up to 128x (4 → 512). At 02b (n=4) the best
+  # was 2**-9 for hidden in {6..96} and 2**-10 for {192, 384}; the new sweep
+  # extends both n_tasks and hidden axes, so LR may need to shift.
+  model.initial_hidden_units: [4, 8, 16, 32, 64, 128, 256, 512]
+
+  # 4 LRs spanning 2**-13 .. 2**-7 (64x range) -- wide enough to cover
+  # potential per-(n_tasks, hidden) drift while staying within the 4-LR
+  # budget per config requested by the user.
+  optimizer.learning_rate:
+    - "${eval:2**-13}"
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0]

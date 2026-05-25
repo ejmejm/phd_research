@@ -64,6 +64,7 @@ from phd.structure_search.dynamic_network import (
 
 SCAN_UNROLL = 4
 HIDDEN_LAYER = 0  # single hidden layer (max_layers=1)
+DIVERGENCE_LOSS_THRESHOLD = 1e6  # stop training early if train loss exceeds this (or NaN/inf)
 
 
 # ---------------------------------------------------------------------------
@@ -91,15 +92,17 @@ def _model_filter_spec(model: StructureModel):
 # ---------------------------------------------------------------------------
 
 def _init_erdos_renyi_structure(
-    network, key, hidden, input_dim, output_dim, max_conns, epsilon,
+    network, key, hidden, input_dim, output_dim, max_conns, p_w1, p_w2,
 ):
-    """Build the initial sparse topology for both bipartite layers."""
+    """Build the initial sparse topology for both bipartite layers.
+
+    `p_w1` and `p_w2` are the (pre-clipped) per-edge inclusion probabilities
+    for each bipartite layer. Clipped to [0, 1] before sampling.
+    """
     k_w1_mask, k_w1_w, k_w2_mask, k_w2_w = jax.random.split(key, 4)
 
     # --- W1 (input -> hidden) ---
-    p_w1 = jnp.minimum(
-        epsilon * (hidden + input_dim) / (hidden * input_dim), 1.0,
-    )
+    p_w1 = jnp.minimum(jnp.asarray(p_w1, dtype=jnp.float32), 1.0)
     mask_w1 = jax.random.bernoulli(k_w1_mask, p_w1, (hidden, input_dim))
 
     # Per row, pack active column indices into the leading slots; pad with -1.
@@ -124,9 +127,7 @@ def _init_erdos_renyi_structure(
     new_unit_mask = network.unit_mask.at[HIDDEN_LAYER, :hidden].set(1)
 
     # --- W2 (hidden -> output) ---
-    p_w2 = jnp.minimum(
-        epsilon * (output_dim + hidden) / (output_dim * hidden), 1.0,
-    )
+    p_w2 = jnp.minimum(jnp.asarray(p_w2, dtype=jnp.float32), 1.0)
     mask_w2 = jax.random.bernoulli(k_w2_mask, p_w2, (output_dim, hidden))
     fan_in_w2 = mask_w2.sum(axis=-1).astype(jnp.float32)
     raw_w2 = jax.random.uniform(k_w2_w, (output_dim, hidden), minval=-1.0, maxval=1.0)
@@ -151,10 +152,10 @@ def _init_erdos_renyi_structure(
 def init_model(
     cfg: DictConfig, input_dim: int, output_dim: int,
     hidden_units: int, max_conns: int, max_fan_out: int,
+    p_w1: float, p_w2: float,
     *, key: PRNGKeyArray,
 ) -> StructureModel:
     activation = cfg.model.activation
-    epsilon = float(cfg.set.epsilon)
 
     network = DynamicNetwork(
         input_dim=input_dim,
@@ -169,7 +170,7 @@ def init_model(
     )
 
     network = _init_erdos_renyi_structure(
-        network, key, hidden_units, input_dim, output_dim, max_conns, epsilon,
+        network, key, hidden_units, input_dim, output_dim, max_conns, p_w1, p_w2,
     )
     network = build_outgoing_indices(network)
     return StructureModel(network=network)
@@ -184,6 +185,15 @@ class TrainState(eqx.Module):
     optimizer: EqxOptimizer
     step: jax.Array
     rng: PRNGKeyArray
+    # Contribution-utility traces (EMA of |source_activation| * |weight|) and
+    # per-weight step counters for Adam-style bias correction. Always present
+    # and updated; only consulted by the prune step when `set.prune_metric ==
+    # 'utility'`. For 'magnitude' (default) the prune step ignores them and
+    # behavior is bit-equivalent to the original SET implementation.
+    util_w1: jax.Array       # same shape as model.network.weights
+    util_w2: jax.Array       # same shape as model.network.output_weights
+    util_step_w1: jax.Array  # int32, same shape as util_w1
+    util_step_w2: jax.Array  # int32, same shape as util_w2
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +271,36 @@ def _signed_prune_threshold(weights, active, zeta):
     return (prune_pos_flat | prune_neg_flat).reshape(weights.shape)
 
 
-def _set_evolve_w1(network, optimizer, rng, zeta):
-    """Sign-aware prune + per-row random regrow on W1."""
+def _utility_prune_threshold(score, active, zeta):
+    """Prune the smallest-utility zeta fraction of active weights, sign-agnostic.
+
+    Used when `set.prune_metric == 'utility'`. The score is the bias-corrected
+    EMA `|source_activation| * |weight|` (already non-negative).
+    """
+    flat = score.reshape(-1)
+    flat_active = active.reshape(-1)
+
+    n_active = jnp.sum(flat_active)
+    n_prune = (zeta * n_active.astype(jnp.float32)).astype(jnp.int32)
+
+    masked_score = jnp.where(flat_active, flat, jnp.inf)
+    sorted_score = jnp.sort(masked_score)
+    threshold = sorted_score[jnp.maximum(n_prune - 1, 0)]
+    prune_flat = flat_active & (flat <= threshold) & (n_prune > 0)
+    return prune_flat.reshape(score.shape)
+
+
+def _bias_corrected_utility(util, step, decay):
+    """Adam-style bias correction: u / (1 - decay**step), with a floor on the
+    denominator so freshly-regrown weights (step=0) don't divide by zero."""
+    step_f = jnp.maximum(step.astype(jnp.float32), 1.0)
+    correction = jnp.maximum(1.0 - jnp.power(decay, step_f), 1e-12)
+    return util / correction
+
+
+def _set_evolve_w1(network, optimizer, util_w1, util_step_w1, rng, zeta, *,
+                   prune_metric, utility_decay):
+    """Prune + per-row random regrow on W1."""
     weights = network.weights[HIDDEN_LAYER]            # (U, C)
     idx = network.input_indices[HIDDEN_LAYER]          # (U, C)
     active = idx >= 0
@@ -271,7 +309,13 @@ def _set_evolve_w1(network, optimizer, rng, zeta):
 
     fan_in_pre = active.sum(axis=-1).astype(jnp.float32)  # (U,)
 
-    prune_mask = _signed_prune_threshold(weights, active, zeta)
+    if prune_metric == 'utility':
+        score = _bias_corrected_utility(
+            util_w1[HIDDEN_LAYER], util_step_w1[HIDDEN_LAYER], utility_decay,
+        )
+        prune_mask = _utility_prune_threshold(score, active, zeta)
+    else:
+        prune_mask = _signed_prune_threshold(weights, active, zeta)
 
     weights_after = jnp.where(prune_mask, 0.0, weights)
     idx_after = jnp.where(prune_mask, jnp.int32(-1), idx)
@@ -325,13 +369,24 @@ def _set_evolve_w1(network, optimizer, rng, zeta):
         optimizer, weights_reset,
         jnp.zeros_like(network.output_weights, dtype=bool),
     )
-    return (new_network, new_optimizer,
+
+    # Reset utility trace + per-weight step counter at every modified slot.
+    modified = prune_mask | regrow_mask  # (U, C)
+    new_util_w1 = util_w1.at[HIDDEN_LAYER].set(
+        jnp.where(modified, jnp.float32(0.0), util_w1[HIDDEN_LAYER])
+    )
+    new_util_step_w1 = util_step_w1.at[HIDDEN_LAYER].set(
+        jnp.where(modified, jnp.int32(0), util_step_w1[HIDDEN_LAYER])
+    )
+
+    return (new_network, new_optimizer, new_util_w1, new_util_step_w1,
             prune_mask.sum().astype(jnp.int32),
             regrow_mask.sum().astype(jnp.int32))
 
 
-def _set_evolve_w2(network, optimizer, rng, zeta):
-    """Sign-aware prune + per-row random regrow on W2."""
+def _set_evolve_w2(network, optimizer, util_w2, util_step_w2, rng, zeta, *,
+                   prune_metric, utility_decay):
+    """Prune + per-row random regrow on W2."""
     input_dim = network.input_dim
     U = network.max_units_per_layer
     s, e = input_dim, input_dim + U
@@ -343,7 +398,13 @@ def _set_evolve_w2(network, optimizer, rng, zeta):
 
     fan_in_pre = active.sum(axis=-1).astype(jnp.float32)  # (O,)
 
-    prune_mask = _signed_prune_threshold(weights, active, zeta)
+    if prune_metric == 'utility':
+        util_slice = util_w2[:, s:e]
+        step_slice = util_step_w2[:, s:e]
+        score = _bias_corrected_utility(util_slice, step_slice, utility_decay)
+        prune_mask = _utility_prune_threshold(score, active, zeta)
+    else:
+        prune_mask = _signed_prune_threshold(weights, active, zeta)
 
     weights_after = jnp.where(prune_mask, 0.0, weights)
     active_after = active & ~prune_mask
@@ -383,20 +444,36 @@ def _set_evolve_w2(network, optimizer, rng, zeta):
     new_optimizer = _reset_optimizer_at(
         optimizer, jnp.zeros_like(network.weights, dtype=bool), ow_reset,
     )
-    return (new_network, new_optimizer,
+
+    # Reset utility trace + per-weight step counter at every modified slot
+    # within the hidden slice. Outside that slice the values stay at 0 anyway.
+    modified_slice = prune_mask | regrow_mask  # (O, U)
+    new_util_w2 = util_w2.at[:, s:e].set(
+        jnp.where(modified_slice, jnp.float32(0.0), util_w2[:, s:e])
+    )
+    new_util_step_w2 = util_step_w2.at[:, s:e].set(
+        jnp.where(modified_slice, jnp.int32(0), util_step_w2[:, s:e])
+    )
+
+    return (new_network, new_optimizer, new_util_w2, new_util_step_w2,
             prune_mask.sum().astype(jnp.int32),
             regrow_mask.sum().astype(jnp.int32))
 
 
-def set_evolve(state: TrainState, *, zeta: float):
+def set_evolve(state: TrainState, *, zeta: float, prune_metric: str,
+               utility_decay: float):
     """One SET prune-and-regrow event over both bipartite layers."""
     next_rng, k_w1, k_w2 = jax.random.split(state.rng, 3)
 
-    network, optimizer, n_p1, n_r1 = _set_evolve_w1(
-        state.model.network, state.optimizer, k_w1, zeta,
+    network, optimizer, util_w1, util_step_w1, n_p1, n_r1 = _set_evolve_w1(
+        state.model.network, state.optimizer, state.util_w1, state.util_step_w1,
+        k_w1, zeta,
+        prune_metric=prune_metric, utility_decay=utility_decay,
     )
-    network, optimizer, n_p2, n_r2 = _set_evolve_w2(
-        network, optimizer, k_w2, zeta,
+    network, optimizer, util_w2, util_step_w2, n_p2, n_r2 = _set_evolve_w2(
+        network, optimizer, state.util_w2, state.util_step_w2,
+        k_w2, zeta,
+        prune_metric=prune_metric, utility_decay=utility_decay,
     )
     network = build_outgoing_indices(network)
 
@@ -405,6 +482,8 @@ def set_evolve(state: TrainState, *, zeta: float):
         model=tree_replace(state.model, network=network),
         optimizer=optimizer,
         rng=next_rng,
+        util_w1=util_w1, util_w2=util_w2,
+        util_step_w1=util_step_w1, util_step_w2=util_step_w2,
     )
     return new_state, n_p1, n_r1, n_p2, n_r2
 
@@ -413,21 +492,62 @@ def set_evolve(state: TrainState, *, zeta: float):
 # Step
 # ---------------------------------------------------------------------------
 
-def train_step(state: TrainState, data, *, num_classes: int, n_tasks: int):
+def train_step(state: TrainState, data, *, num_classes: int, n_tasks: int,
+               utility_decay: float):
     images, labels = data
     one_hot = jax.nn.one_hot(labels, num_classes)
 
     def loss_fn(model):
-        outputs, _ = jax.vmap(model)(images)
+        outputs, buffer = jax.vmap(model)(images)
         outputs_r = outputs.reshape(-1, n_tasks, num_classes)
         log_probs = jax.nn.log_softmax(outputs_r, axis=-1)
         loss_per_task = -jnp.sum(one_hot * log_probs, axis=-1)
         loss = jnp.mean(jnp.sum(loss_per_task, axis=1))
-        return loss, outputs_r
+        return loss, (outputs_r, buffer)
 
-    (loss, outputs_r), grads = eqx.filter_value_and_grad(
+    (loss, (outputs_r, buffer)), grads = eqx.filter_value_and_grad(
         loss_fn, has_aux=True)(state.model)
     correct = (jnp.argmax(outputs_r, axis=-1) == labels).astype(jnp.float32).mean()
+
+    # ---- Utility trace EMA update (pre-step weights, current activations) ----
+    # Done before the SGD apply so the trace uses |w| at the same state that
+    # produced these activations. Inactive slots stay at 0 because either |w|=0
+    # or the gather/mask zeros the source contribution.
+    network = state.model.network
+    input_dim = network.input_dim
+    max_units = network.max_units_per_layer
+
+    # W1 contribution: |x_i| * |w_{u,c}| where i = input_indices[u, c].
+    input_indices = network.input_indices[HIDDEN_LAYER]                # (U, C)
+    active_w1 = input_indices >= 0
+    safe_idx = jnp.where(active_w1, input_indices, 0)
+    x_per_slot = images[:, safe_idx]                                   # (B, U, C)
+    x_per_slot_abs = jnp.where(active_w1, jnp.abs(x_per_slot), 0.0)
+    x_mag = jnp.mean(x_per_slot_abs, axis=0)                           # (U, C)
+    w1_abs = jnp.abs(network.weights[HIDDEN_LAYER])                    # (U, C)
+    contrib_w1 = x_mag * w1_abs
+    new_util_w1 = state.util_w1.at[HIDDEN_LAYER].set(
+        utility_decay * state.util_w1[HIDDEN_LAYER]
+        + (1.0 - utility_decay) * contrib_w1
+    )
+    new_util_step_w1 = state.util_step_w1.at[HIDDEN_LAYER].set(
+        state.util_step_w1[HIDDEN_LAYER] + 1
+    )
+
+    # W2 contribution: |h_j| * |w_{k,j}| where h_j is the post-activation hidden
+    # value at unit j. buffer is shape (B, buffer_size) with the hidden slice
+    # at [:, input_dim:input_dim+max_units].
+    s, e = input_dim, input_dim + max_units
+    h_mag = jnp.mean(jnp.abs(buffer[:, s:e]), axis=0)                  # (U,)
+    w2_hidden_abs = jnp.abs(state.model.network.output_weights[:, s:e])  # (O, U)
+    contrib_w2 = h_mag[None, :] * w2_hidden_abs
+    new_util_w2 = state.util_w2.at[:, s:e].set(
+        utility_decay * state.util_w2[:, s:e]
+        + (1.0 - utility_decay) * contrib_w2
+    )
+    new_util_step_w2 = state.util_step_w2.at[:, s:e].set(
+        state.util_step_w2[:, s:e] + 1
+    )
 
     updates, new_optimizer = state.optimizer.with_update(grads, state.model)
     new_model = eqx.apply_updates(state.model, updates)
@@ -438,6 +558,8 @@ def train_step(state: TrainState, data, *, num_classes: int, n_tasks: int):
 
     new_state = tree_replace(
         state, model=new_model, optimizer=new_optimizer, step=state.step + 1,
+        util_w1=new_util_w1, util_w2=new_util_w2,
+        util_step_w1=new_util_step_w1, util_step_w2=new_util_step_w2,
     )
     return new_state, jnp.stack([loss, correct])
 
@@ -549,34 +671,79 @@ def evaluate_test(batched_model, test_images, test_labels,
 # ---------------------------------------------------------------------------
 
 def _derive_sizes(cfg: DictConfig, input_dim: int, output_dim: int):
-    """Derive ``hidden_units``, ``max_connections_per_unit``, and
-    ``max_fan_out`` from the SET budget configuration."""
-    epsilon = float(cfg.set.epsilon)
+    """Derive ``hidden_units``, ``max_connections_per_unit``, ``max_fan_out``,
+    and the per-layer edge probabilities ``(p_w1, p_w2)`` from the SET budget
+    configuration.
+
+    Two init modes are supported (selected by ``cfg.set.init_mode``):
+
+    - ``epsilon`` (default, original SET): user provides ``set.epsilon`` and
+      ``set.connection_budget``; hidden width is derived as
+      ``floor((budget/ε - input_dim - output_dim) / 2)``. Per-layer edge
+      probabilities follow the Erdős-Rényi formula
+      ``p_layer = ε(n+m)/(n·m)``, which gives *different* densities for W1
+      and W2 when (n, m) are asymmetric (the typical case here).
+
+    - ``uniform_p``: both bipartite layers share a single edge probability
+      ``p = budget / ((input_dim + output_dim) · hidden_units)``. Hidden width
+      is taken directly from ``target_hidden_units``. ``ε`` is not consulted.
+      This keeps W1 and W2 at the *same* density at every scale, and yields
+      constant per-hidden-unit W1 fan-in (``p·input_dim``) when budget and H
+      are scaled proportionally.
+    """
+    init_mode = str(cfg.set.get('init_mode', 'epsilon'))
     budget = float(cfg.set.connection_budget)
-    hidden = int(np.floor(
-        (budget / epsilon - input_dim - output_dim) / 2.0,
-    ))
-    if hidden < 1:
+
+    if init_mode == 'uniform_p':
+        hidden = int(cfg.target_hidden_units)
+        if hidden < 1:
+            raise ValueError(
+                f'target_hidden_units must be >= 1, got {hidden}'
+            )
+        p = budget / ((input_dim + output_dim) * hidden)
+        if p > 1.0:
+            raise ValueError(
+                f'uniform_p init: budget={budget} requires p={p:.4f} > 1 at '
+                f'hidden={hidden}, input={input_dim}, output={output_dim}. '
+                f'Reduce budget or increase hidden_units.'
+            )
+        p_w1 = p
+        p_w2 = p
+        expected_w1_fan_in = p * input_dim
+        expected_w1_col_fan = p * hidden
+    elif init_mode == 'epsilon':
+        epsilon = float(cfg.set.epsilon)
+        hidden = int(np.floor(
+            (budget / epsilon - input_dim - output_dim) / 2.0,
+        ))
+        if hidden < 1:
+            raise ValueError(
+                f'connection_budget={budget} with epsilon={epsilon}, '
+                f'input_dim={input_dim}, output_dim={output_dim} yields '
+                f'hidden_units={hidden}; budget too small.',
+            )
+        p_w1 = min(1.0, epsilon * (input_dim + hidden) / (input_dim * hidden))
+        p_w2 = min(1.0, epsilon * (output_dim + hidden) / (output_dim * hidden))
+        expected_w1_fan_in = epsilon * (input_dim + hidden) / hidden
+        expected_w1_col_fan = epsilon * (input_dim + hidden) / input_dim
+    else:
         raise ValueError(
-            f'connection_budget={budget} with epsilon={epsilon}, '
-            f'input_dim={input_dim}, output_dim={output_dim} yields '
-            f'hidden_units={hidden}; budget too small.',
+            f"set.init_mode must be 'epsilon' or 'uniform_p', got {init_mode!r}"
         )
+
     safety = float(cfg.model.fan_in_safety_factor)
-    expected_w1_fan_in = epsilon * (input_dim + hidden) / hidden
     max_conns = int(min(input_dim, max(1, np.ceil(safety * expected_w1_fan_in))))
     # max_fan_out caps the per-buffer-position outgoing array used by the
     # backward pass through the hidden layer. With one hidden layer it's
-    # bounded by W1's expected column fan-in, ε(input+hidden)/input. We
-    # require at least 2x headroom over the expected mean so SET has room
-    # for the column degree distribution to grow (binomial → power-law).
-    expected_w1_col_fan = epsilon * (input_dim + hidden) / input_dim
+    # bounded by W1's expected column fan-in. We require at least 2x headroom
+    # over the expected mean so SET has room for the column degree distribution
+    # to grow (binomial → power-law).
     fan_out_factor = max(2.0, safety)
     max_fan_out = int(min(
         hidden,
         max(8, np.ceil(fan_out_factor * expected_w1_col_fan) + 4),
     ))
-    return hidden, max_conns, max_fan_out
+    return hidden, max_conns, max_fan_out, p_w1, p_w2
 
 
 def prepare_experiment(cfg: DictConfig):
@@ -598,16 +765,24 @@ def prepare_experiment(cfg: DictConfig):
     input_dim = n_tasks * input_dim_per_task
     output_dim = n_tasks * num_classes
 
-    hidden_units, max_conns, max_fan_out = _derive_sizes(cfg, input_dim, output_dim)
-    epsilon = float(cfg.set.epsilon)
-    expected_w1 = epsilon * (input_dim + hidden_units)
-    expected_w2 = epsilon * (output_dim + hidden_units)
+    hidden_units, max_conns, max_fan_out, p_w1, p_w2 = _derive_sizes(
+        cfg, input_dim, output_dim,
+    )
+    init_mode = str(cfg.set.get('init_mode', 'epsilon'))
+    expected_w1 = p_w1 * input_dim * hidden_units
+    expected_w2 = p_w2 * output_dim * hidden_units
+    sizing_extra = (
+        f'epsilon={float(cfg.set.epsilon):.4f}, '
+        if init_mode == 'epsilon' else ''
+    )
     print(
-        f'SET sizing: epsilon={epsilon}, budget={cfg.set.connection_budget}, '
+        f'SET sizing [init_mode={init_mode}]: {sizing_extra}'
+        f'budget={cfg.set.connection_budget}, '
         f'input_dim={input_dim}, output_dim={output_dim} -> '
-        f'hidden_units={hidden_units}, max_connections_per_unit={max_conns}, '
-        f'max_fan_out={max_fan_out} '
-        f'(expected ER active conns: W1~{expected_w1:.0f}, W2~{expected_w2:.0f}, '
+        f'hidden_units={hidden_units}, '
+        f'p_w1={p_w1:.4f}, p_w2={p_w2:.4f}, '
+        f'max_connections_per_unit={max_conns}, max_fan_out={max_fan_out} '
+        f'(expected active conns: W1~{expected_w1:.0f}, W2~{expected_w2:.0f}, '
         f'total~{expected_w1 + expected_w2:.0f})'
     )
 
@@ -623,6 +798,7 @@ def prepare_experiment(cfg: DictConfig):
 
         model = init_model(
             cfg, input_dim, output_dim, hidden_units, max_conns, max_fan_out,
+            p_w1, p_w2,
             key=rng_from_string(rng, 'model'),
         )
         optimizer = prepare_optimizer(
@@ -633,6 +809,10 @@ def prepare_experiment(cfg: DictConfig):
             model=model, optimizer=optimizer,
             step=jnp.array(0),
             rng=rng_from_string(rng, 'train'),
+            util_w1=jnp.zeros_like(model.network.weights),
+            util_w2=jnp.zeros_like(model.network.output_weights),
+            util_step_w1=jnp.zeros_like(model.network.weights, dtype=jnp.int32),
+            util_step_w2=jnp.zeros_like(model.network.output_weights, dtype=jnp.int32),
         ))
 
     n_params = count_params(train_states[0].model)
@@ -662,14 +842,28 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
     n_test_samples_cfg = cfg.train.get('n_test_samples', None)
     n_test_samples = int(n_test_samples_cfg) if n_test_samples_cfg is not None else None
 
-    train_step_fn = partial(train_step, num_classes=num_classes, n_tasks=n_tasks)
+    prune_metric = str(cfg.set.get('prune_metric', 'magnitude'))
+    if prune_metric not in ('magnitude', 'utility'):
+        raise ValueError(
+            f"set.prune_metric must be 'magnitude' or 'utility', got {prune_metric!r}"
+        )
+    utility_decay = float(cfg.set.get('utility_decay', 0.999))
+    print(f'SET pruning: metric={prune_metric}, utility_decay={utility_decay}')
+
+    train_step_fn = partial(
+        train_step, num_classes=num_classes, n_tasks=n_tasks,
+        utility_decay=utility_decay,
+    )
 
     if set_enabled:
         assert log_freq % evolve_freq == 0, (
             f'log_freq={log_freq} must be divisible by evolve_frequency={evolve_freq}'
         )
         evolve_cycles_per_log = log_freq // evolve_freq
-        evolve_fn = partial(set_evolve, zeta=float(cfg.set.zeta))
+        evolve_fn = partial(
+            set_evolve, zeta=float(cfg.set.zeta),
+            prune_metric=prune_metric, utility_decay=utility_decay,
+        )
 
         def evolve_cycle(state, cycle_data):
             state, metrics = jax.lax.scan(train_step_fn, state, cycle_data, unroll=SCAN_UNROLL)
@@ -762,6 +956,11 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
             postfix['t_acc'] = f'{test_metrics_dict["test_accuracy"]:.4f}'
         pbar.set_postfix(postfix)
 
+        if not np.isfinite(all_losses[-1]) or all_losses[-1] > DIVERGENCE_LOSS_THRESHOLD:
+            print(f'\n[diverged] train loss {all_losses[-1]:.4g} exceeded threshold '
+                  f'{DIVERGENCE_LOSS_THRESHOLD:.4g} at step {step}; stopping early.')
+            break
+
     for f in log_futures:
         f.result()
     log_executor.shutdown(wait=False)
@@ -814,6 +1013,11 @@ def run_config(cfg: DictConfig) -> dict:
         cfg, train_state, streams, num_classes, n_tasks,
     )
 
+    diverged = bool(
+        all_losses
+        and (not np.isfinite(all_losses[-1]) or all_losses[-1] > DIVERGENCE_LOSS_THRESHOLD)
+    )
+
     n_tail = max(1, len(all_losses) // 10)
     final_network = train_state.model.network
     summary = {
@@ -827,11 +1031,18 @@ def run_config(cfg: DictConfig) -> dict:
             ((final_network.input_indices >= 0).sum(axis=(-1, -2, -3))
              + final_network.output_mask.sum(axis=(-1, -2))).mean()
         ),
+        'diverged': float(diverged),
     }
+    eval_freq = int(cfg.train.get('eval_freq', 0))
     if all_test_losses:
         n_test_tail = max(1, len(all_test_losses) // 10)
         summary['asymptotic_test_loss'] = float(np.mean(all_test_losses[-n_test_tail:]))
         summary['asymptotic_test_accuracy'] = float(np.mean(all_test_accs[-n_test_tail:]))
+    elif eval_freq > 0:
+        # Diverged before the first test eval -- emit NaN so downstream tools
+        # (mlflow-sweeper's Optuna metric lookup) still find the key.
+        summary['asymptotic_test_loss'] = float('nan')
+        summary['asymptotic_test_accuracy'] = float('nan')
     print(f'Average loss: {summary["average_loss"]:.4f} | '
           f'Asymptotic loss: {summary["asymptotic_loss"]:.4f} | '
           f'Asymptotic acc: {summary["asymptotic_accuracy"]:.4f}')

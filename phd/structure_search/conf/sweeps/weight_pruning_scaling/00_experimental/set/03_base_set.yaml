@@ -1,0 +1,55 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# Stage 03: n_tasks sweep. Per-task budget held fixed at ~4764 weights, total
+# budget scales linearly with n_tasks (matches 03/base_structure_search). H
+# scales as 48 per task, so at n=4 we get H=192 (same as 02). With per-task
+# budget and per-task H both held fixed, ε stays constant across n_tasks
+# (~5.35 throughout).
+#
+# permute_period scales inversely with n_tasks so total task-presentation
+# budget per run is fixed (5000 / n_tasks: n=2 -> 2500, n=4 -> 1250, etc.).
+# Mirrors 03/base_structure_search's permute_period formula.
+task:
+  n_tasks: 4               # overridden by sweep
+  permute_period: ${eval:5000//${task.n_tasks}}
+  standardize: true
+
+target_hidden_units: ${eval:48*${task.n_tasks}}
+
+model:
+  activation: leaky_relu
+  fan_in_safety_factor: 2.0
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3      # overridden by sweep
+  weight_decay: 0
+
+set:
+  enabled: true
+  evolve_frequency: 500
+  zeta: 0.3
+  # Per-task budget 4764 (so n=4 -> 19056, n=32 -> 152448).
+  connection_budget: ${eval:4764*${task.n_tasks}}
+  # init_mode 'epsilon' (default) uses ER p = ε(n+m)/(n·m) per layer;
+  # 'uniform_p' uses a single p = budget / ((I+O)·H) shared by both layers.
+  init_mode: epsilon
+  epsilon: "${eval:'${set.connection_budget} / (2*${target_hidden_units} + 0.5 + ${task.n_tasks}*794)'}"
+
+  prune_metric: utility
+  utility_decay: 0.999
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: false

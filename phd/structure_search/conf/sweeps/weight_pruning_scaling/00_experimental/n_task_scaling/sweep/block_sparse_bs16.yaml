@@ -1,0 +1,39 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 00_block_sparse_n_task_scaling_lr_bs8
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+# Same as block_sparse.yaml but with batch_size=8 (vs 1). At fixed
+# total_steps=500k this means 8x more samples seen, same number of
+# optimizer updates. The permute_period is in *steps*, not samples, so
+# the per-task permutation rate (1 event per 2000 steps per task) is
+# unchanged.
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/n_task_scaling --config-name=base_block_sparse
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [model.initial_hidden_units, task.n_tasks]
+  sensitivity:
+    hue: [optimizer.learning_rate]
+
+parameters:
+  train.batch_size: 16
+
+  # Same grid as block_sparse.yaml (no axis added; batch_size fixed in command).
+  task.n_tasks: [2, 4, 8, 16, 32]
+  model.initial_hidden_units: [4, 8, 16, 32, 64, 128, 256]
+
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0]

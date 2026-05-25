@@ -1,0 +1,57 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# Stage 02b: nonstationary scaling. Scale total connection budget 1x..64x and
+# scale target_hidden_units proportionally (192 at 1x → 12288 at 64x). At
+# n=4, 1x → H=192, matching the 02b structure_search pattern of deriving
+# sizes from connection_budget.
+#
+# Note: with n_tasks fixed (input_dim+output_dim=3176 constant) and budget+H
+# scaling together, ε is NOT held constant -- it climbs from ~5.4 at 1x to
+# ~25 at 16x (and asymptotes to budget/(2H) = 49.6 at large k). Per-unit W1
+# fan-in stays in the ~75-95 range across the swept budgets, so the network
+# is comparably-sparse-per-unit at every scale even though ε drifts. This
+# matches what `02b/base_structure_search` does: scale total weights, let the
+# per-event hyperparameters derive.
+task:
+  n_tasks: 4
+  permute_period: 800
+  standardize: true
+
+target_hidden_units: ${eval:192*${set.connection_budget}//19056}
+
+model:
+  activation: leaky_relu
+  fan_in_safety_factor: 2.0
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3       # overridden by sweep
+  weight_decay: 0
+
+set:
+  enabled: true
+  evolve_frequency: 500
+  zeta: 0.3
+  connection_budget: 19056  # overridden by sweep
+  # init_mode 'epsilon' (default) uses ER p = ε(n+m)/(n·m) per layer;
+  # 'uniform_p' uses a single p = budget / ((I+O)·H) shared by both layers.
+  init_mode: epsilon
+  epsilon: "${eval:'${set.connection_budget} / (2*${target_hidden_units} + 0.5 + ${task.n_tasks}*794)'}"
+
+  prune_metric: utility
+  utility_decay: 0.999
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: false

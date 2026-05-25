@@ -1,0 +1,48 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 01_set_uniform_p_4task_scaling_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_set.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/set --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_test_loss, asymptotic_test_accuracy]
+  sensitivity:
+    params: [target_hidden_units]
+    hue: [optimizer.learning_rate]
+
+parameters:
+  # Switch to uniform-p init: both W1 and W2 share a single edge probability
+  #   p = budget / ((input_dim + output_dim) · target_hidden_units)
+  # derived automatically inside _derive_sizes from target_hidden_units and
+  # connection_budget (19056 at this stage). At fixed budget, larger H gives
+  # smaller p -- so target_hidden_units IS the sparsity axis.
+  set.init_mode: uniform_p
+
+  # H values mirror the original epsilon-based sweep (and the modified set.yaml)
+  # so results are directly comparable. At budget=19056:
+  #   H=12  -> p=0.500  (50% dense -- essentially dense)
+  #   H=24  -> p=0.250
+  #   H=48  -> p=0.125
+  #   H=96  -> p=0.063
+  #   H=192 -> p=0.031  (3% dense)
+  # Lower bound: H >= 6 (otherwise p > 1 and init fails cleanly).
+  target_hidden_units: [12, 24, 48, 96, 192]
+
+  # Same LR range as the modified set.yaml (the magnitude/epsilon variant of
+  # the same sweep), so the two are directly comparable on the (H, LR) grid.
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

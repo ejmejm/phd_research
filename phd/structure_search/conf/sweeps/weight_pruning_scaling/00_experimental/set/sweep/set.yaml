@@ -1,0 +1,43 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 01_set_4task_scaling_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_set.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/set --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_test_loss, asymptotic_test_accuracy]
+  sensitivity:
+    params: [target_hidden_units]
+    hue: [optimizer.learning_rate]
+
+parameters:
+  # Sweep hidden-unit count at FIXED total connection budget (19056 weights,
+  # = 1x base, same as block_sparse 24-unit point). Larger hidden = lower
+  # per-unit fan-in = sparser. epsilon is derived from target_hidden_units
+  # in base_set.yaml so the realized hidden matches exactly.
+  #
+  # Upper bound 192 chosen because at this budget W2's edge probability
+  # epsilon*(O+H)/(O*H) saturates to 1 (W2 becomes dense) somewhere around
+  # H=256; SET's W2 evolution becomes a no-op past that point.
+  target_hidden_units: [12, 24, 48, 96, 192]
+
+  # No paper-default reference for LR at this regime -- starting wide. SET's
+  # per-unit fan-in at the swept range is ~93 (H=192) to ~778 (H=24), which
+  # straddles dense (3176/unit) and random_sparse (~30/unit). LR will likely
+  # depend on hidden -- expect a switch resolver in the best/ follow-up.
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

@@ -1,0 +1,36 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 01_set_4task_h192_utility_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_set.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/set --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_test_loss, asymptotic_test_accuracy]
+  sensitivity:
+    hue: [optimizer.learning_rate]
+
+parameters:
+  # Pin to the size that won the magnitude-pruning sweep (H=192, ε≈5.35).
+  target_hidden_units: 192
+
+  # Opt into contribution-utility pruning (EMA of |source_act| * |w|, bias-
+  # corrected). Default behavior preserved everywhere else.
+  set.prune_metric: utility
+
+  # Magnitude-prune best at H=192 was LR=2^-9 (test acc 87.97%). Centering
+  # this grid around that point in case the utility score shifts the optimum.
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

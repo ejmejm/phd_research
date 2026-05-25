@@ -1,0 +1,73 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+task:
+  n_tasks: 4
+  permute_period: 0       # stationary -- matches the other 01_stationary sweeps
+  standardize: true
+
+# SET sizing is *derived* inside train_set.py:
+#   hidden = floor((budget / epsilon - input_dim - output_dim) / 2)
+# To get a target hidden width at a fixed total connection budget, we invert
+# this and pick epsilon accordingly. `target_hidden_units` is overridden by
+# the sweep; epsilon falls out from it so the derived hidden matches.
+#
+# (input_dim + output_dim) = n_tasks * (784 + 10) = n_tasks * 794.
+# The +0.5 in the denominator absorbs the floor() in _derive_sizes so the
+# realized hidden_units lands exactly on the target (no off-by-one from
+# float precision).
+target_hidden_units: 96   # overridden by sweep
+
+model:
+  activation: leaky_relu
+  fan_in_safety_factor: 2.0
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3     # overridden by sweep
+  weight_decay: 0
+
+set:
+  enabled: true
+  evolve_frequency: 500
+  zeta: 0.3
+  # 1x base budget: 19056 weights (same as block_sparse's 24-unit point and
+  # dense's 6-unit point at n=4).
+  connection_budget: 19056
+
+  # Init mode for the bipartite ER graphs (see train_set.py:_derive_sizes):
+  #   'epsilon' (default, original SET): p_layer = ε(n+m)/(n·m). Same ε across
+  #     both layers gives same per-NODE-on-the-larger-side degree, but different
+  #     DENSITIES for W1 vs W2 when (input_dim, output_dim) are asymmetric --
+  #     which is our case (3136 vs 40), so W2 is much denser than W1 here.
+  #   'uniform_p': p_w1 = p_w2 = budget / ((input_dim+output_dim)·hidden). Both
+  #     layers at the SAME density. ε is unused and need not be resolvable.
+  init_mode: epsilon
+
+  # Only used when init_mode == 'epsilon'; derived from target_hidden_units +
+  # connection_budget so the realized hidden_units matches target_hidden_units.
+  epsilon: "${eval:'${set.connection_budget} / (2*${target_hidden_units} + 0.5 + ${task.n_tasks}*794)'}"
+
+  # Pruning score for the SET evolve step:
+  #   'magnitude' (default, original SET): drop the zeta fraction with smallest
+  #     signed magnitude, sign-aware (separate pos/neg thresholds).
+  #   'utility': drop the zeta fraction with smallest bias-corrected EMA of
+  #     |source_activation| * |weight|. Source activation = input x_i for W1,
+  #     hidden activation h_j for W2. Sign-agnostic.
+  prune_metric: magnitude
+  # EMA decay for the utility trace; used only when prune_metric == 'utility'.
+  utility_decay: 0.999
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 10_000
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: true

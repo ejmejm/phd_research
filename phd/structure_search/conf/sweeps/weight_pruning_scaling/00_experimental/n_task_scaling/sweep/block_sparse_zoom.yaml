@@ -1,0 +1,36 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 00b_block_sparse_n_task_scaling_lr_v2
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/n_task_scaling --config-name=base_block_sparse
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [model.initial_hidden_units, task.n_tasks]
+  sensitivity:
+    hue: [optimizer.learning_rate]
+
+parameters:
+  # Zoom-in variant of 00_block_sparse_n_task_scaling_lr: only the 2- and
+  # 8-task slices, hidden swept over 2**3..2**7 (= {8, 16, 32, 64, 128}).
+  task.n_tasks: [2, 8]
+
+  # 2**3 = 8 ... 2**7 = 128.
+  model.initial_hidden_units: [8, 16, 32, 64, 128]
+
+  # Same 4 LRs as 00_block_sparse_n_task_scaling_lr.
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [101, 102, 103]

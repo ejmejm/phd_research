@@ -1,0 +1,53 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# Nonstationary regime where the per-task re-permutation rate is held
+# constant at one re-permutation every 2000 steps on average. Each event
+# permutes exactly one randomly-chosen task, so the expected steps between
+# re-permutations of a given task is permute_period * n_tasks; we set
+# permute_period = 2000 // n_tasks to make that quantity equal to 2000
+# regardless of n_tasks.
+task:
+  n_tasks: 4               # overridden by sweep
+  permute_period: ${eval:2000 // ${task.n_tasks}}
+  standardize: true
+
+# dense: per-unit cost = (784 + 10) * n_tasks weights. Both n_tasks and
+# initial_hidden_units are sweep axes.
+model:
+  initial_hidden_units: 4           # overridden by sweep
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+  init_strategy: dense
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3       # overridden by sweep
+  weight_decay: 0
+
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0]
+log_individual_seeds: false

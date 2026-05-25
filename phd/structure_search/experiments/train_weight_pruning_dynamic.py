@@ -1043,10 +1043,16 @@ def run_config(cfg: DictConfig) -> dict:
         ),
         'diverged': float(diverged),
     }
+    eval_freq = int(cfg.train.get('eval_freq', 0))
     if all_test_losses:
         n_test_tail = max(1, len(all_test_losses) // 10)
         summary['asymptotic_test_loss'] = float(np.mean(all_test_losses[-n_test_tail:]))
         summary['asymptotic_test_accuracy'] = float(np.mean(all_test_accs[-n_test_tail:]))
+    elif eval_freq > 0:
+        # Diverged before the first test eval -- emit NaN so downstream tools
+        # (mlflow-sweeper's Optuna metric lookup) still find the key.
+        summary['asymptotic_test_loss'] = float('nan')
+        summary['asymptotic_test_accuracy'] = float('nan')
     print(f'Average loss: {summary["average_loss"]:.4f} | '
           f'Asymptotic loss: {summary["asymptotic_loss"]:.4f} | '
           f'Asymptotic acc: {summary["asymptotic_accuracy"]:.4f}')

@@ -105,22 +105,54 @@ def init_model(
             w2_mask = w2_mask.at[:, :initial].set(1.0)
         elif strategy == 'block_sparse':
             assert n_tasks > 1, 'block_sparse init requires n_tasks > 1 (parallel_mnist)'
-            assert initial % n_tasks == 0, 'initial_hidden_units must be divisible by n_tasks'
+            assert initial >= n_tasks, (
+                f'block_sparse init requires initial_hidden_units ({initial}) >= n_tasks '
+                f'({n_tasks}) so each task gets at least one unit'
+            )
             input_dim_per_task = input_dim // n_tasks
             output_dim_per_task = output_dim // n_tasks
-            units_per_task = initial // n_tasks
-            W1_init = _lecun_uniform(kw1, (initial, input_dim), input_dim_per_task)
-            W2_init = _lecun_uniform(kw2, (output_dim, initial), units_per_task)
+            base_units = initial // n_tasks
+            extra_units = initial % n_tasks
             block_w1_mask = jnp.zeros((initial, input_dim), dtype=jnp.float32)
             block_w2_mask = jnp.zeros((output_dim, initial), dtype=jnp.float32)
-            for t in range(n_tasks):
-                u0, u1 = t * units_per_task, (t + 1) * units_per_task
-                i0, i1 = t * input_dim_per_task, (t + 1) * input_dim_per_task
-                o0, o1 = t * output_dim_per_task, (t + 1) * output_dim_per_task
-                block_w1_mask = block_w1_mask.at[u0:u1, i0:i1].set(1.0)
-                block_w2_mask = block_w2_mask.at[o0:o1, u0:u1].set(1.0)
-            W1 = W1.at[:initial].set(W1_init * block_w1_mask)
-            W2 = W2.at[:, :initial].set(W2_init * block_w2_mask)
+            if extra_units == 0:
+                W1_init = _lecun_uniform(kw1, (initial, input_dim), input_dim_per_task)
+                W2_init = _lecun_uniform(kw2, (output_dim, initial), base_units)
+                for t in range(n_tasks):
+                    u0, u1 = t * base_units, (t + 1) * base_units
+                    i0, i1 = t * input_dim_per_task, (t + 1) * input_dim_per_task
+                    o0, o1 = t * output_dim_per_task, (t + 1) * output_dim_per_task
+                    block_w1_mask = block_w1_mask.at[u0:u1, i0:i1].set(1.0)
+                    block_w2_mask = block_w2_mask.at[o0:o1, u0:u1].set(1.0)
+                W1 = W1.at[:initial].set(W1_init * block_w1_mask)
+                W2 = W2.at[:, :initial].set(W2_init * block_w2_mask)
+            else:
+                import warnings
+                warnings.warn(
+                    f'block_sparse: initial_hidden_units ({initial}) not divisible by '
+                    f'n_tasks ({n_tasks}); first {extra_units} task(s) receive '
+                    f'{base_units + 1} units, remaining receive {base_units}',
+                    stacklevel=2,
+                )
+                W1_full = jnp.zeros((initial, input_dim), dtype=jnp.float32)
+                W2_full = jnp.zeros((output_dim, initial), dtype=jnp.float32)
+                kw1_tasks = jax.random.split(kw1, n_tasks)
+                kw2_tasks = jax.random.split(kw2, n_tasks)
+                u_off = 0
+                for t in range(n_tasks):
+                    upt = base_units + (1 if t < extra_units else 0)
+                    u0, u1 = u_off, u_off + upt
+                    u_off = u1
+                    i0, i1 = t * input_dim_per_task, (t + 1) * input_dim_per_task
+                    o0, o1 = t * output_dim_per_task, (t + 1) * output_dim_per_task
+                    W1_block = _lecun_uniform(kw1_tasks[t], (upt, input_dim_per_task), input_dim_per_task)
+                    W2_block = _lecun_uniform(kw2_tasks[t], (output_dim_per_task, upt), upt)
+                    W1_full = W1_full.at[u0:u1, i0:i1].set(W1_block)
+                    W2_full = W2_full.at[o0:o1, u0:u1].set(W2_block)
+                    block_w1_mask = block_w1_mask.at[u0:u1, i0:i1].set(1.0)
+                    block_w2_mask = block_w2_mask.at[o0:o1, u0:u1].set(1.0)
+                W1 = W1.at[:initial].set(W1_full)
+                W2 = W2.at[:, :initial].set(W2_full)
             w1_mask = w1_mask.at[:initial].set(block_w1_mask)
             w2_mask = w2_mask.at[:, :initial].set(block_w2_mask)
         elif strategy == 'single_output_block_sparse':
@@ -842,10 +874,16 @@ def run_config(cfg: DictConfig) -> dict:
         ),
         'diverged': float(diverged),
     }
+    eval_freq = int(cfg.train.get('eval_freq', 0))
     if all_test_losses:
         n_test_tail = max(1, len(all_test_losses) // 10)
         summary['asymptotic_test_loss'] = float(np.mean(all_test_losses[-n_test_tail:]))
         summary['asymptotic_test_accuracy'] = float(np.mean(all_test_accs[-n_test_tail:]))
+    elif eval_freq > 0:
+        # Diverged before the first test eval -- emit NaN so downstream tools
+        # (mlflow-sweeper's Optuna metric lookup) still find the key.
+        summary['asymptotic_test_loss'] = float('nan')
+        summary['asymptotic_test_accuracy'] = float('nan')
     print(f'Average loss: {summary["average_loss"]:.4f} | '
           f'Asymptotic loss: {summary["asymptotic_loss"]:.4f} | '
           f'Asymptotic acc: {summary["asymptotic_accuracy"]:.4f}')

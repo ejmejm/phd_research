@@ -1,0 +1,37 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 03_set_utility_n_tasks_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_set.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/set --config-name=03_base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [set.init_mode]
+  sensitivity:
+    params: [task.n_tasks]
+    hue: [optimizer.learning_rate]
+
+parameters:
+  # Compare both init formulations on every n_tasks point.
+  set.init_mode: [epsilon, uniform_p]
+
+  task.n_tasks: [2, 4, 8, 16, 32]
+
+  # Same LR grid as 02 and 02b. Per-task budget is held fixed across n_tasks,
+  # so the best LR should roughly carry across this axis.
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]

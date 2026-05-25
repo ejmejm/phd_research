@@ -1,0 +1,42 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 00_block_sparse_n_task_scaling_lr_v2
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/n_task_scaling --config-name=base_block_sparse
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [model.initial_hidden_units, task.n_tasks]
+  sensitivity:
+    hue: [optimizer.learning_rate]
+
+parameters:
+  # Joint scan over n_tasks AND hidden units. Per-unit fan-in for block_sparse
+  # is fixed at 784 (independent of n_tasks), so LR should be relatively
+  # stable across the n_tasks axis -- tighter range than dense.
+  task.n_tasks: [2, 4, 8, 16, 32]
+
+  # Base unit count 4, scaled up to 128x (4 → 512). Cells where
+  # initial_hidden_units < n_tasks will fail-fast (e.g. n=32 needs ≥32 units,
+  # so the 4/8/16-unit columns are infeasible there); the rest run with the
+  # new remainder-tolerant split (warning emitted for non-divisible cases).
+  model.initial_hidden_units: [4, 8, 16, 32, 64, 128, 256, 512]
+
+  # 02b found best uniformly at 2**-8 across all sizes at n=4. Keep tight
+  # around that value -- 4 LRs in {2**-10..2**-7} cover both directions of
+  # potential drift across the (n_tasks, hidden) grid.
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0]

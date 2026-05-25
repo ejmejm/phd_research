@@ -1,0 +1,38 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 02b_set_utility_scaling_4task_nonstationary_lr
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_set.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/set --config-name=02b_base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [set.connection_budget, set.init_mode]
+
+parameters:
+  # Compare both init formulations on every budget point.
+  set.init_mode: [epsilon, uniform_p]
+
+  # Budgets 1x..32x. Base derives target_hidden_units from connection_budget
+  # (192 units at 1x, scales linearly). ε is then derived from both.
+  # 64x dropped: at H=12288 each trial takes ~30 min and saturates 16 GB GPU
+  # with 3 workers running concurrent 64x cells. 32x already exposes the
+  # uniform_p vs epsilon scaling difference clearly.
+  set.connection_budget: [19056, 38112, 76224, 152448, 304896, 609792]
+
+  # Same LR grid as 02; revisit after first pass if best is at an edge.
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2, 3, 4]
