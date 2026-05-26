@@ -1,0 +1,40 @@
+name: 00_structure_search_n_task_scaling_lr_5seed
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train_weight_pruning_dynamic.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/n_task_scaling --config-name=base_structure_search
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  # Upload full (n_log_periods, n_seeds) per-seed curve arrays as a single
+  # comet asset per trial for true bootstrap-CI plotting in the analysis
+  # notebook. Live metric stream still shows the across-seed mean+std.
+  log_individual_seeds: true
+
+  # Joint scan over n_tasks AND connection_budget. connection_budget is the
+  # size axis (independent of n_tasks); max_hidden_units, prune_count, and
+  # max_units_per_event are all proportional to it via formulas in the base
+  # config (anchored at 02b/03's 1x baseline of budget=19056). Per-unit
+  # cost = gen_range_in + gen_range_out = 148 weights; max realistic units
+  # = budget/148; max_hidden ~ 6.2x over-provisioned (matches 02b/03/04).
+  task.n_tasks: [2, 4, 8, 16, 32]
+
+  # Centered around 02b/03's 1x baseline (19056 weights). 0.25x .. 8x range.
+  structure_search.connection_budget: [4764, 9528, 19056, 38112, 76224, 152448]
+
+  # 4 LRs from 03's structure_search sweep.
+  optimizer.learning_rate:
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+    - "${eval:2**-4}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds. Per-seed curves uploaded
+  # as a comet asset at end of trial. 5 × 6 × 4 = 120 trials total.
+  seed:
+    value: [0, 1, 2, 3, 4]

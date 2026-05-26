@@ -1,0 +1,62 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# Nonstationary regime where the per-task re-permutation rate is held
+# constant at one re-permutation every 2000 steps on average. Each event
+# permutes exactly one randomly-chosen task, so the expected steps between
+# re-permutations of a given task is permute_period * n_tasks; we set
+# permute_period = 2000 // n_tasks to make that quantity equal to 2000
+# regardless of n_tasks.
+task:
+  n_tasks: 4               # overridden by sweep
+  permute_period: ${eval:2000 // ${task.n_tasks}}
+  standardize: true
+
+# structure_search: starts at 0 units. connection_budget is the swept size
+# axis (INDEPENDENT of n_tasks); max_hidden_units, prune_count, and
+# max_units_per_event all scale linearly with it, anchored at 02b/03's 1x
+# base (budget=19056 -> max_hidden=800, prune=256, units_per_event=8).
+# Per-unit cost = gen_range_in + gen_range_out = 148 weights, so the
+# realistic max unit count is budget/148 (= 128 at 1x); max_hidden is
+# ~6.2x over-provisioned, matching 02b/03/04.
+model:
+  initial_hidden_units: 0
+  max_hidden_units: ${eval:800*${structure_search.connection_budget}//19056}
+  activation: leaky_relu
+
+  init_strategy: random_sparse        # irrelevant when initial_hidden_units = 0
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+  # Dynamic-network-only fields (ignored by train_weight_pruning.py)
+  max_connections_per_unit: 128
+  max_fan_out: 20
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3       # overridden by sweep
+  weight_decay: 0
+
+structure_search:
+  enabled: true
+  prune_frequency: 500
+  prune_count: ${eval:256*${structure_search.connection_budget}//19056}
+  decay_rate: 0.998
+  connection_budget: 19056          # overridden by sweep
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: ${eval:8*${structure_search.connection_budget}//19056}
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0]
+log_individual_seeds: false

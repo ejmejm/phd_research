@@ -1,0 +1,60 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# Nonstationary regime where the per-task re-permutation rate is held
+# constant at one re-permutation every 2000 steps on average. Each event
+# permutes exactly one randomly-chosen task, so the expected steps between
+# re-permutations of a given task is permute_period * n_tasks; we set
+# permute_period = 2000 // n_tasks to make that quantity equal to 2000
+# regardless of n_tasks.
+task:
+  n_tasks: 4               # overridden by sweep
+  permute_period: ${eval:2000 // ${task.n_tasks}}
+  standardize: true
+
+# random_sparse: per-unit cost held FIXED at 03's winning sparsity
+# (range_in=[1,58], range_out=[20,20] -> avg fan-in 29.625 + avg fan-out 20
+# = 49.625 weights/unit). initial_hidden_units is the size axis; total
+# weight budget = h * 49.625, per-task budget = h * 49.625 / n_tasks.
+model:
+  initial_hidden_units: 384         # overridden by sweep
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+  init_strategy: random_sparse
+  init_random_range_in: [1, 58]     # 2 * 29.625 - 1; 03's winner sparsity
+  init_random_range_out: [20, 20]
+
+  # Dynamic-network-only fields. Tightened to the range_in upper so the
+  # forward pass doesn't pay for unused slots.
+  max_connections_per_unit: 58
+  max_fan_out: 20
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3       # overridden by sweep
+  weight_decay: 0
+
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0]
+log_individual_seeds: false
