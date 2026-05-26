@@ -17,9 +17,12 @@ parameters:
   log_individual_seeds: true
 
   # Step at which block_sparse masks flip to all-ones (cross-task weights
-  # become trainable, starting at exactly 0). `null` = never fill (block_sparse
-  # baseline). `0` = dense from start with cross-task weights starting at 0.
-  model.dense_fill_step: [0, 250_000, null]
+  # become trainable, starting at exactly 0). Comet's Optimizer rejects
+  # `null` in a numeric discrete list, so we use `600_000` (> total_steps
+  # of 500_000) as the "never fill" sentinel: `step >= 600_000` is never
+  # true, so the fill block stays inert => block_sparse baseline. `0` =
+  # dense from start with cross-task weights starting at 0.
+  model.dense_fill_step: [0, 250_000, 600_000]
 
   # Same 5-LR grid (block_sparse v2 + 2^-11 added).
   optimizer.learning_rate:
