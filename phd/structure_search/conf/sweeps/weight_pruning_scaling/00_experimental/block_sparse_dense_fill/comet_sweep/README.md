@@ -13,7 +13,7 @@ bootstrap-CI plotting in the analysis notebook.
 
 | Config | Sweep ID | Trials | Steps/sec (4080) | Hrs/trial (H100 est.) | Total H100 hrs | Job time | Num jobs |
 |--------|----------|--------|------------------|-----------------------|----------------|----------|----------|
-| main | `a19019b1e23144019ad5a22486588f6a` | 30 | 370 (15-seed vmap) | ~0.23 | ~7 | 3h | 4 |
+| main | `dc6d3df68d25479999b72a32af29c275` | 30 | 370 (15-seed vmap) | ~0.23 | ~7 | 3h | 4 |
 
 `small.yaml` is intentionally **not** on CC — local-only.
 
@@ -22,14 +22,14 @@ bootstrap-CI plotting in the analysis notebook.
 sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
   --cpus-per-task=1 --mem=10G --time=01:00:00 \
   launch_comet_agent.sbatch \
-  -s a19019b1e23144019ad5a22486588f6a \
+  -s dc6d3df68d25479999b72a32af29c275 \
   -p $HOME/scratch/phd_research/phd/structure_search
 
 # main final array (3h, 4 parallel workers)
 sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
   --cpus-per-task=1 --mem=10G --time=03:00:00 \
   launch_comet_agent.sbatch \
-  -s a19019b1e23144019ad5a22486588f6a \
+  -s dc6d3df68d25479999b72a32af29c275 \
   -p $HOME/scratch/phd_research/phd/structure_search
 ```
 
