@@ -1,0 +1,36 @@
+name: 00_dense_n_task_scaling_lr_5seed
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/n_task_scaling --config-name=base_dense
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  # Upload full (n_log_periods, n_seeds) per-seed curve arrays as a single
+  # comet asset per trial for true bootstrap-CI plotting in the analysis
+  # notebook. Live metric stream still shows the across-seed mean+std.
+  log_individual_seeds: true
+
+  # Joint scan over n_tasks AND hidden units. Dense per-unit fan-in is
+  # 784*n_tasks (varies 16x across the n_tasks axis), so LR may shift with
+  # n_tasks even at fixed hidden_units.
+  task.n_tasks: [2, 4, 8, 16, 32]
+
+  model.initial_hidden_units: [4, 8, 16, 32, 64, 128, 256, 512]
+
+  # 4 LRs spanning 2**-13 .. 2**-7 (64x range).
+  optimizer.learning_rate:
+    - "${eval:2**-13}"
+    - "${eval:2**-11}"
+    - "${eval:2**-9}"
+    - "${eval:2**-7}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds. Per-seed curves uploaded
+  # as a comet asset at end of trial. 5 × 8 × 4 = 160 trials total.
+  seed:
+    value: [0, 1, 2, 3, 4]

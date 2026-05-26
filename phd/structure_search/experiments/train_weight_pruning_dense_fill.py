@@ -36,7 +36,8 @@ from phd.jax_core.optimizers.adam import AdamState
 from phd.jax_core.utils import configure_jax, count_params, stack_pytrees, tree_replace
 from phd.research_utils.logging import (
     init_experiment, init_child_runs, import_logger, bind_to_active_run,
-    log_metrics, log_child_metrics, finish_child_runs, finish_experiment,
+    log_metrics, log_child_metrics, log_np_array,
+    finish_child_runs, finish_experiment,
 )
 from phd.structure_search.data import load_dataset, ParallelMNISTStream
 
@@ -924,8 +925,9 @@ def run_config(cfg: DictConfig) -> dict:
     else:
         cfg.seed = list(cfg.seed)
 
-    if cfg.get('log_individual_seeds', False) and not cfg.get('mlflow', False):
-        raise ValueError('log_individual_seeds requires mlflow logging.')
+    if cfg.get('log_individual_seeds', False) and not cfg.get('mlflow', False) \
+            and not cfg.get('comet_ml', False):
+        raise ValueError('log_individual_seeds requires mlflow or comet_ml logging.')
 
     set_seed(cfg.seed[0])
     init_child_runs(cfg.seed, cfg)
@@ -975,6 +977,14 @@ def run_config(cfg: DictConfig) -> dict:
     if all_per_seed_losses:
         per_seed_losses = np.stack(all_per_seed_losses)
         per_seed_accs = np.stack(all_per_seed_accs)
+        # When log_individual_seeds is set, upload the full per-seed curves
+        # as a single artifact. Comet/mlflow rate-limits make per-seed metric
+        # series at every log period impractical for 5--30 seeds; one
+        # end-of-run asset gives the analysis notebook everything it needs
+        # for bootstrap CIs without burning the rate budget.
+        if cfg.get('log_individual_seeds', False):
+            log_np_array(per_seed_losses, 'per_seed_losses', cfg)
+            log_np_array(per_seed_accs, 'per_seed_accs', cfg)
         child_summary = {
             'average_loss': per_seed_losses.mean(axis=0).tolist(),
             'asymptotic_loss': per_seed_losses[-n_tail:].mean(axis=0).tolist(),
@@ -990,6 +1000,9 @@ def run_config(cfg: DictConfig) -> dict:
             child_summary['asymptotic_test_accuracy'] = (
                 per_seed_test_accs[-n_test_tail:].mean(axis=0).tolist()
             )
+            if cfg.get('log_individual_seeds', False):
+                log_np_array(per_seed_test_losses, 'per_seed_test_losses', cfg)
+                log_np_array(per_seed_test_accs, 'per_seed_test_accs', cfg)
         log_child_metrics(child_summary, cfg)
 
     finish_child_runs(cfg)

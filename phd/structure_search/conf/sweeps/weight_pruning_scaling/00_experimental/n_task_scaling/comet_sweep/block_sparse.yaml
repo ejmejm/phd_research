@@ -1,0 +1,37 @@
+name: 00_block_sparse_n_task_scaling_lr_5seed
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/n_task_scaling --config-name=base_block_sparse
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  # Upload full (n_log_periods, n_seeds) per-seed curve arrays as a single
+  # comet asset per trial for true bootstrap-CI plotting in the analysis
+  # notebook. Live metric stream still shows the across-seed mean+std.
+  log_individual_seeds: true
+
+  # Joint scan over n_tasks AND hidden units. Per-unit fan-in for block_sparse
+  # is fixed at 784 (independent of n_tasks), so LR should be relatively
+  # stable across the n_tasks axis -- tighter range than dense.
+  task.n_tasks: [2, 4, 8, 16, 32]
+
+  # Base unit count 4, scaled up to 128x (4 → 512). Cells where
+  # initial_hidden_units < n_tasks fail-fast.
+  model.initial_hidden_units: [4, 8, 16, 32, 64, 128, 256, 512]
+
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds. Per-seed curves uploaded
+  # as a comet asset at end of trial. 5 × 8 × 4 = 160 trials total.
+  seed:
+    value: [0, 1, 2, 3, 4]
