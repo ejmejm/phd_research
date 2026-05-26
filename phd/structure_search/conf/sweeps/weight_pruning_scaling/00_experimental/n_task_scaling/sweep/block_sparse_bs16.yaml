@@ -1,5 +1,5 @@
 experiment: paper-weight-pruning-scaling-sweep
-sweep_name: 00_block_sparse_n_task_scaling_lr_bs8
+sweep_name: 00_block_sparse_n_task_scaling_lr_bs15
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}

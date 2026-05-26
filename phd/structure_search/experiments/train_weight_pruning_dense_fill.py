@@ -1,10 +1,12 @@
-"""Simple connection-pruning / unit-generation training for a 2-layer MLP.
+"""Variant of train_weight_pruning.py that fills block_sparse masks to dense at a chosen step.
 
-Padded-dense representation: W1 of shape (max_hidden, input_dim) and
-W2 of shape (output_dim, max_hidden), with masks marking active units
-and connections. Pruning is connection-level (smallest contribution
-utility); generation creates whole new hidden units, sampling each new
-unit's incoming/outgoing fan-in from a configurable range.
+Starts as a block_sparse MLP (per-task independent sub-MLPs). At
+``cfg.model.dense_fill_step`` the w1/w2 masks are flipped from the block
+pattern to all-ones in the active region, making the previously-zeroed
+cross-task connections trainable. The underlying W1/W2 already store
+exactly 0 at those positions, so the forward pass is unchanged at the
+flip step; the question is whether subsequent training preserves the
+solution or destabilizes it.
 """
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -230,6 +232,21 @@ def init_model(
 def _model_filter_spec(model: PaddedMLP):
     spec = jax.tree.map(lambda _: False, model)
     return eqx.tree_at(lambda m: (m.W1, m.W2), spec, (True, True))
+
+
+def _fill_masks_to_dense(model: PaddedMLP, initial_hidden_units: int) -> PaddedMLP:
+    """Set w1_mask[:initial,:] and w2_mask[:,:initial] to ones.
+
+    W1/W2 already hold exactly 0 in the cross-task cells (they have been
+    masked since init), so flipping the masks is value-preserving at the
+    moment of the flip: forward pass is unchanged immediately after, and
+    only diverges once gradients flow into the newly-active weights on
+    the next step.
+    """
+    h = initial_hidden_units
+    new_w1_mask = model.w1_mask.at[:h, :].set(1.0)
+    new_w2_mask = model.w2_mask.at[:, :h].set(1.0)
+    return tree_replace(model, w1_mask=new_w1_mask, w2_mask=new_w2_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +693,25 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
     n_test_samples = int(n_test_samples_cfg) if n_test_samples_cfg is not None else None
     loss_type = str(cfg.train.get('loss', 'softmax_ce'))
 
+    dense_fill_step = cfg.model.get('dense_fill_step', None)
+    # mlflow-sweeper stringifies a `null` grid value as "None" on the CLI;
+    # OmegaConf then keeps it as the string "None" rather than parsing back
+    # to Python None. Treat that (and a few other obvious sentinels) as None.
+    if isinstance(dense_fill_step, str):
+        if dense_fill_step.strip().lower() in ('none', 'null', ''):
+            dense_fill_step = None
+        else:
+            dense_fill_step = int(dense_fill_step)
+    if dense_fill_step is not None:
+        assert cfg.model.init_strategy == 'block_sparse', (
+            'dense_fill_step only makes sense with init_strategy=block_sparse'
+        )
+        assert cfg.model.max_hidden_units == cfg.model.initial_hidden_units, (
+            'dense_fill_step assumes no padded units; max == initial required'
+        )
+    dense_fill_applied = False
+    initial_hidden_units = int(cfg.model.initial_hidden_units)
+
     train_step_fn = partial(
         train_step, num_classes=num_classes, n_tasks=n_tasks,
         decay=float(cfg.structure_search.decay_rate),
@@ -760,6 +796,23 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, streams,
         mean_loss, mean_acc = float(per_seed_loss.mean()), float(per_seed_acc.mean())
         std_loss, std_acc = float(per_seed_loss.std()), float(per_seed_acc.std())
         step = int(train_state.step[0].item())
+
+        if dense_fill_step is not None and step >= dense_fill_step and not dense_fill_applied:
+            new_model = _fill_masks_to_dense(train_state.model, initial_hidden_units)
+            train_state = tree_replace(train_state, model=new_model)
+            dense_fill_applied = True
+            # The static_structure_metrics cache (precomputed pre-loop) is now
+            # stale because masks changed; refresh it so tqdm/logs reflect the
+            # new dense structure for the remainder of training.
+            if not structure_search_enabled:
+                static_structure_metrics = {
+                    k: float(v.mean()) for k, v in
+                    _structure_diagnostics(train_state.model, n_tasks).items()
+                }
+            print(f'[dense_fill] Filled block_sparse masks to dense at step {step} '
+                  f'(target {dense_fill_step})')
+            if logging_active:
+                log_metrics({'dense_fill_applied_at_step': float(step)}, cfg, step=step)
 
         if structure_search_enabled:
             structure_metrics = {

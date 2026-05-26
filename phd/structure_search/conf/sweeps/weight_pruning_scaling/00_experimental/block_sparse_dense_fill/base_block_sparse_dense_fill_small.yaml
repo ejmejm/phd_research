@@ -1,0 +1,54 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# Nonstationary regime with per-task re-permutation period = 3200 steps,
+# matching 02_nonstationary (permute_period=800 at n_tasks=4). Each event
+# permutes one randomly-chosen task, so steps-between-repermutations of a
+# given task = permute_period * n_tasks; we set permute_period = 3200 // n_tasks.
+task:
+  n_tasks: 4
+  permute_period: ${eval:3200 // ${task.n_tasks}}
+  standardize: true
+
+model:
+  initial_hidden_units: 32
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+  init_strategy: block_sparse
+  init_random_range_in: [1, 256]
+  init_random_range_out: [1, 20]
+
+  # When set, w1/w2 masks are flipped to all-ones in the active region at
+  # this step (cross-task connections become trainable, starting from
+  # value 0). null = never fill (block_sparse baseline).
+  dense_fill_step: null
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3       # overridden by sweep
+  weight_decay: 0
+
+structure_search:
+  enabled: false
+  prune_frequency: 500
+  prune_count: 128
+  decay_rate: 0.998
+  connection_budget: 15000
+  gen_range_in: [128, 128]
+  gen_range_out: [20, 20]
+  max_units_per_event: 8
+
+train:
+  batch_size: 1
+  total_steps: 150_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0]
+log_individual_seeds: false

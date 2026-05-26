@@ -1,0 +1,35 @@
+experiment: paper-weight-pruning-scaling-sweep
+sweep_name: 00_block_sparse_dense_fill_small_n4_h32_v2
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_weight_pruning_dense_fill.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/block_sparse_dense_fill --config-name=base_block_sparse_dense_fill_small
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_loss, asymptotic_accuracy]
+  split_by: [model.dense_fill_step]
+  sensitivity:
+    hue: [optimizer.learning_rate]
+
+parameters:
+  # Step at which block_sparse masks flip to all-ones (cross-task weights
+  # become trainable, starting at exactly 0). `null` = never fill, i.e.,
+  # the block_sparse baseline. `0` = fill before the first scan, i.e., a
+  # dense run whose cross-task weights start at exactly 0.
+  model.dense_fill_step: [0, 75_000, null]
+
+  # Same 4-LR grid as block_sparse v2.
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0]
