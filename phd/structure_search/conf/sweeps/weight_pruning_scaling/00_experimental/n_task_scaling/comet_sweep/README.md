@@ -10,8 +10,8 @@ Joint scan over `task.n_tasks ∈ {2,4,8,16,32}` × `model.initial_hidden_units 
 |--------|----------|--------|-------------------------------------|-----------------------|----------------|----------|----------|
 | block_sparse | `bf92bf7c1ced4535823e892b8049089d` | 160 | varies (~5k–20k) | ~0.08 avg | ~13 | 3h | 10 |
 | dense | `b21316aca20d4aa7b60d05f03d59babc` | 160 | varies (~5k–20k) | ~0.08 avg | ~13 | 3h | 10 |
-| random_sparse | `3d93c2e4c31d45e7b27bcacc49f17777` | 120 | TBD | TBD | TBD | 3h | TBD |
-| structure_search | `6ba0897ddc4745c19f98f7f55f4c103d` | 120 | TBD | TBD | TBD | 3h | TBD |
+| random_sparse | `ac0163f45597446fbdea4a12edffd3ab` | 120 | TBD | TBD | TBD | 3h | TBD |
+| structure_search | `eb0849167ea44728a1173f9a794fd165` | 120 | TBD | TBD | TBD | 3h | TBD |
 
 ```bash
 # block_sparse test job (1h, 1 worker)
@@ -46,27 +46,27 @@ sbatch --array=1-10 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
 sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
   --cpus-per-task=1 --mem=10G --time=01:00:00 \
   launch_comet_agent.sbatch \
-  -s 3d93c2e4c31d45e7b27bcacc49f17777 \
+  -s ac0163f45597446fbdea4a12edffd3ab \
   -p $HOME/scratch/phd_research/phd/structure_search
 
 # structure_search test job (1h, 1 worker)
 sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
   --cpus-per-task=1 --mem=10G --time=01:00:00 \
   launch_comet_agent.sbatch \
-  -s 6ba0897ddc4745c19f98f7f55f4c103d \
+  -s eb0849167ea44728a1173f9a794fd165 \
   -p $HOME/scratch/phd_research/phd/structure_search
 
 # random_sparse final array (3h, ~8 parallel workers — adjust after test job measures throughput)
 sbatch --array=1-8 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
   --cpus-per-task=1 --mem=10G --time=03:00:00 \
   launch_comet_agent.sbatch \
-  -s 3d93c2e4c31d45e7b27bcacc49f17777 \
+  -s ac0163f45597446fbdea4a12edffd3ab \
   -p $HOME/scratch/phd_research/phd/structure_search
 
 # structure_search final array (3h, ~8 parallel workers — adjust after test job measures throughput)
 sbatch --array=1-8 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
   --cpus-per-task=1 --mem=10G --time=03:00:00 \
   launch_comet_agent.sbatch \
-  -s 6ba0897ddc4745c19f98f7f55f4c103d \
+  -s eb0849167ea44728a1173f9a794fd165 \
   -p $HOME/scratch/phd_research/phd/structure_search
 ```
