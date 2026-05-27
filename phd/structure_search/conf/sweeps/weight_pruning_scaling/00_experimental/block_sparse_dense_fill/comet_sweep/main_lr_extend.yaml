@@ -1,0 +1,48 @@
+name: 00_block_sparse_dense_fill_main_n16_h256_lrext
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train_weight_pruning_dense_fill.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/block_sparse_dense_fill --config-name=base_block_sparse_dense_fill_main
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+# Addendum to main.yaml: same grid in every axis EXCEPT the LR axis, which
+# is extended downward to 2^-13 and 2^-12. The analysis notebook merges this
+# sweep with the original main.yaml under the same logical 'dense_fill_main'
+# key, so the LR-sensitivity curve plots a continuous 7-point LR grid
+# across both sweeps.
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  model.dense_fill_step: [0, 250_000, 600_000]
+
+  # Only the two new LRs -- the {2^-11..2^-7} half already exists in main.yaml.
+  optimizer.learning_rate:
+    - "${eval:2**-13}"
+    - "${eval:2**-12}"
+
+  # Same 15-seeds-per-half split as the main sweep so combined per-cell
+  # views have a consistent 30-seed sample size. 3 fill × 2 LR × 2 offsets
+  # = 12 trials.
+  seed_offset: [0, 15]
+  seed:
+    value:
+      - "${eval:${seed_offset} + 0}"
+      - "${eval:${seed_offset} + 1}"
+      - "${eval:${seed_offset} + 2}"
+      - "${eval:${seed_offset} + 3}"
+      - "${eval:${seed_offset} + 4}"
+      - "${eval:${seed_offset} + 5}"
+      - "${eval:${seed_offset} + 6}"
+      - "${eval:${seed_offset} + 7}"
+      - "${eval:${seed_offset} + 8}"
+      - "${eval:${seed_offset} + 9}"
+      - "${eval:${seed_offset} + 10}"
+      - "${eval:${seed_offset} + 11}"
+      - "${eval:${seed_offset} + 12}"
+      - "${eval:${seed_offset} + 13}"
+      - "${eval:${seed_offset} + 14}"
