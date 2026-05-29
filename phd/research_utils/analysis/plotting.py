@@ -383,7 +383,8 @@ def plot_learning_curves(
         if subplot_col is not None:
             axes[i].set_title(f'{subplot_col_label if subplot_col_label else subplot_col} = {val}')
         axes[i].set_xlabel('step (binned)')
-        axes[i].ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+        # useMathText renders the offset as `×10⁵` instead of `1e5`.
+        axes[i].ticklabel_format(style='sci', axis='x', scilimits=(0, 0), useMathText=True)
         axes[i].set_ylabel(y_label if y_label else y_col)
     
     # Add a single legend to the figure
