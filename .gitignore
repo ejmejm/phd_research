@@ -26,6 +26,7 @@ discovery.egg-info/
 
 *.csv
 *.db
+*.npy
 *.pth
 *.pkl
 *.pbz2
