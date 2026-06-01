@@ -1,0 +1,41 @@
+# mlflow-sweeper config: BASELINE on 8-task parallel-MNIST with label drift.
+#
+# Sweep base step size (alpha) only — gates are frozen so theta is a no-op.
+# Network: 6272 -> 32 (leaky-ReLU) -> 80 outputs, sigmoid + per-output BCE.
+# Non-stationarity: permute one random task's label mapping every 200 steps.
+
+experiment: path-gates-multimnist
+sweep_name: pg_mm_8task_baseline_v1
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python train_multimnist.py
+algorithm: grid
+
+spec:
+  metric: asymptotic_online_acc
+  direction: maximize
+
+plot_params:
+  metrics: [asymptotic_online_acc, final_online_acc]
+
+parameters:
+  variant: baseline
+  alpha:
+    - "${eval:2**-15}"   # ~3.1e-5
+    - "${eval:2**-13}"   # ~1.2e-4
+    - "${eval:2**-11}"   # ~4.9e-4
+    - "${eval:2**-9}"    # ~2.0e-3
+    - "${eval:2**-7}"    # ~7.8e-3
+    - "${eval:2**-5}"    # ~3.1e-2
+
+  hidden_dim: 32
+  n_tasks: 8
+  permute_period: 200
+  activation: leaky_relu
+  batch_size: 1
+  num_steps: 20000
+  log_interval: 200
+  theta: 0.0
+
+  seed: [0, 1, 2]
