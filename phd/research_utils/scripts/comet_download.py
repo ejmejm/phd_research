@@ -104,21 +104,31 @@ def parse_args() -> argparse.Namespace:
 METRIC_PARAM_DISCOVERY_SAMPLES = 10
 
 
-def discover_all_metrics_and_params(experiments: List[Any]) -> Tuple[Set[str], Set[str]]:
+def discover_all_metrics_and_params(
+        experiments: List[Any],
+        sample_size: Optional[int] = None,
+    ) -> Tuple[Set[str], Set[str]]:
     """Discover all available metrics and parameters from experiments.
-    
+
     Args:
         experiments: List of CometML experiment objects.
-        
+        sample_size: How many experiments to sample for the discovery scan.
+            If None (default), uses the module constant
+            ``METRIC_PARAM_DISCOVERY_SAMPLES``. Pass a larger value to reduce
+            the chance of missing rare params that only appear on a small
+            subset of experiments (e.g. one sweep out of several).
+
     Returns:
         tuple: (set of all metric names, set of all parameter names)
     """
     logger.info("Discovering available metrics and parameters...")
     all_metrics = set()
     all_params = set()
-    
+
     # Sample a random subset of experiments to discover available metrics/params
-    sample_size = min(METRIC_PARAM_DISCOVERY_SAMPLES, len(experiments))
+    if sample_size is None:
+        sample_size = METRIC_PARAM_DISCOVERY_SAMPLES
+    sample_size = min(sample_size, len(experiments))
     indices = list(range(len(experiments)))
     random.shuffle(indices)
     sample_experiments = [experiments[i] for i in indices[:sample_size]]
@@ -341,6 +351,7 @@ def run(
     include_running: bool = False,
     n_threads: int = 8,
     save_batch_size: int = 300,
+    discovery_samples: Optional[int] = None,
 ):
     """Download experiment data from CometML and save as CSV.
 
@@ -356,6 +367,11 @@ def run(
         include_running: Include experiments that are still running.
         n_threads: Number of threads for parallel processing.
         save_batch_size: Number of experiments per batch before saving to disk.
+        discovery_samples: How many experiments to scan for param/metric name
+            discovery (default ``METRIC_PARAM_DISCOVERY_SAMPLES``=10). Set to
+            ``len(experiments)`` (or higher) to scan every experiment when
+            params only appear on a small subset (e.g. one sweep out of
+            several in the project) and the default sample misses them.
     """
     api = API()
     api.use_cache(False)
@@ -373,7 +389,9 @@ def run(
 
     if not history_vars or not params:
         logger.info("Discovering available metrics and parameters...")
-        all_metrics, all_params = discover_all_metrics_and_params(experiments)
+        all_metrics, all_params = discover_all_metrics_and_params(
+            experiments, sample_size=discovery_samples,
+        )
 
     metrics = history_vars if history_vars is not None else all_metrics
     params_to_use = params if params is not None else all_params
