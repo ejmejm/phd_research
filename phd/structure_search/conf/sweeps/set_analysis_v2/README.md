@@ -31,19 +31,22 @@ task -> 250*8 = ~2000 steps/task), `eval_freq=0` (no test split), objective
 
 ## Sweep Runs
 
-Throughput ~6000 steps/s on a 4080 (5-seed vmap); estimates below use a
-conservative ~5000 steps/s for the Nibi H100 MIG slice. Per trial = 500k steps
-(~100s) + ~12s compile + (stationary only) ~20 evals x ~3s = ~0.05 hr/trial
-stationary, ~0.03 hr/trial non-stationary. Totals include a 1.4x buffer.
+Throughput measured at ~2200 steps/s on a Nibi H100 MIG slice (1g.10gb, 5-seed
+vmap; the 4080 hits ~6000 but the small-batch workload runs slower on the MIG).
+Per trial = 500k steps (~227s) + ~12s compile + (stationary only) ~20 evals x
+~5s = ~0.09 hr/trial stationary, ~0.07 hr/trial non-stationary. Totals include
+a 1.4x buffer.
 
-| Config | Sweep ID | Trials | Steps/sec (4080) | Hrs/trial | Total hrs (x1.4) | Job time | Num jobs |
-|--------|----------|--------|------------------|-----------|------------------|----------|----------|
-| 01_stationary/sweep/random_sparse | `3c7b3b2be79a467bad339616f0a00017` | 5 | ~6000 | ~0.05 | 0.4 | 3h | 1 |
-| 01_stationary/sweep/set | `115211a82b564e139f6862d99b6c3372` | 300 | ~6000 | ~0.05 | 21 | 6h | 6 |
-| 02_nonstationary/sweep/random_sparse | `e0ff9ee6e4474edba051890381c5b07a` | 5 | ~6000 | ~0.03 | 0.2 | 3h | 1 |
-| 02_nonstationary/sweep/set | `f1163eecb71c4a4591ed85583eb4f0e2` | 300 | ~6000 | ~0.03 | 13 | 6h | 4 |
+| Config | Sweep ID | Trials | Steps/sec (MIG) | Hrs/trial | Total hrs (x1.4) | Job time | Num jobs |
+|--------|----------|--------|-----------------|-----------|------------------|----------|----------|
+| 01_stationary/sweep/random_sparse | `3c7b3b2be79a467bad339616f0a00017` | 5 | ~2200 | ~0.09 | 0.6 | 3h | 1 |
+| 01_stationary/sweep/set | `115211a82b564e139f6862d99b6c3372` | 300 | ~2200 | ~0.09 | 39 | 6h | 6 |
+| 02_nonstationary/sweep/random_sparse | `e0ff9ee6e4474edba051890381c5b07a` | 5 | ~2200 | ~0.07 | 0.5 | 3h | 1 |
+| 02_nonstationary/sweep/set | `f1163eecb71c4a4591ed85583eb4f0e2` | 300 | ~2200 | ~0.07 | 29 | 6h | 5 |
 
-Total: 12 jobs across the four sweeps (all <50, within rate limits).
+Total: 13 jobs across the four sweeps (all <50, within rate limits). Each
+worker pulls trials continuously until the sweep is exhausted or the job ends,
+so the arrays finish in ~4-5 h wall-clock.
 
 ```bash
 # --- Test jobs (1h, 1 worker each) — run first to confirm the pipeline ---
@@ -74,7 +77,7 @@ sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --me
   -p $HOME/scratch/phd_research/phd/structure_search
 
 # 02_nonstationary/sweep/set (300 trials)
-sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 \
+sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 \
   launch_comet_agent.sbatch -s f1163eecb71c4a4591ed85583eb4f0e2 \
   -p $HOME/scratch/phd_research/phd/structure_search
 ```
