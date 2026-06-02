@@ -1,0 +1,49 @@
+name: nonstationary_set
+project: set-analysis-sweep-v2
+command: python experiments/train_set.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/set --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  # Comet logging backend (base_set.yaml defaults to mlflow).
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  # Non-stationary, 8 tasks. With per-task heads, I + O = 8 * 794 = 6352.
+  # permute_period=250: each event re-permutes one random task, so a given
+  # task is re-permuted every period*n_tasks = 250*8 = 2000 steps on average.
+  # eval_freq=0 -> no held-out test split (objective is asymptotic_loss, not
+  # _test). Total connection budget held at 25,408 (= block-sparse 32-unit
+  # budget at n=8); epsilon is derived in base_set.yaml from connection_budget
+  # + target_hidden_units + n_tasks so realized hidden lands on each target.
+  task.n_tasks: 8
+  task.permute_period: 250
+  train.eval_freq: 0
+  set.connection_budget: 25408
+  set.utility_decay: 0.998
+
+  # Size axis at fixed budget: more hidden -> lower per-unit fan-in (sparser).
+  # 25408/H weights/unit -> ~265 (H=96) down to ~66 (H=384); block-sparse is
+  # 794/unit. Output dim is 80 at n=8, so W2's edge probability stays well
+  # below saturation across this whole range.
+  target_hidden_units: [96, 192, 384]
+  set.init_mode: [epsilon, uniform_p]
+  set.prune_metric: [magnitude, utility]
+  set.zeta: [0.01, 0.05, 0.1, 0.2, 0.3]
+
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds.
+  # 3 hidden x 2 init_mode x 2 prune_metric x 5 zeta x 5 LR = 300 trials.
+  seed:
+    value: [0, 1, 2, 3, 4]

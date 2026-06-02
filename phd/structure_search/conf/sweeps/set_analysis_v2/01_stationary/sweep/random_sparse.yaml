@@ -1,0 +1,48 @@
+name: stationary_random_sparse
+project: set-analysis-sweep-v2
+command: python experiments/train_weight_pruning.py --config-path=../conf/sweeps/weight_pruning_scaling --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  # Comet logging backend (base.yaml defaults to mlflow).
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  # Stationary, 8 tasks (the 32-hidden block-sparse frame). With per-task
+  # heads, I + O = 8 * 794 = 6352. Test-set eval every 25k steps.
+  task.n_tasks: 8
+  task.permute_period: 0
+  train.eval_freq: 25_000
+
+  model.init_strategy: random_sparse
+  # Sparsity held at the 2-task stationary winner: range_in=[1,256] (avg
+  # fan-in 128.5), range_out=[1,20] (avg fan-out 10.5) -> ~139 weights/unit.
+  # 183 * (128.5 + 10.5) = 25,437 ~= 25,408 (block-sparse 32-unit budget).
+  model.initial_hidden_units: 183
+  model.max_hidden_units: 183
+  # Atomic: the whole [lo, hi] pair is passed to every trial unchanged
+  # (NOT swept over lo and hi as separate values).
+  model.init_random_range_in:
+    value: [1, 256]
+  model.init_random_range_out:
+    value: [1, 20]
+  structure_search.enabled: false
+
+  # Only swept axis: 5 LRs (random_sparse units have low fan-in and favor
+  # larger LRs). 5 LR x 1 = 5 trials, each vmapping 5 seeds.
+  optimizer.learning_rate:
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds.
+  seed:
+    value: [0, 1, 2, 3, 4]
