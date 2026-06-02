@@ -40,7 +40,7 @@ a 1.4x buffer.
 | Config | Sweep ID | Trials | Steps/sec (MIG) | Hrs/trial | Total hrs (x1.4) | Job time | Num jobs |
 |--------|----------|--------|-----------------|-----------|------------------|----------|----------|
 | 01_stationary/sweep/random_sparse | `3c7b3b2be79a467bad339616f0a00017` | 5 | ~2200 | ~0.09 | 0.6 | 3h | 1 |
-| 01_stationary/sweep/set | `115211a82b564e139f6862d99b6c3372` | 300 | ~2200 | ~0.09 | 39 | 6h | 6 |
+| 01_stationary/sweep/set | `115211a82b564e139f6862d99b6c3372` | 300 | ~2200 | ~0.09-0.12 | 39 | 6h | 9 |
 | 02_nonstationary/sweep/random_sparse | `e0ff9ee6e4474edba051890381c5b07a` | 5 | ~2200 | ~0.07 | 0.5 | 3h | 1 |
 | 02_nonstationary/sweep/set | `f1163eecb71c4a4591ed85583eb4f0e2` | 300 | ~2200 | ~0.07 | 29 | 6h | 5 |
 
@@ -66,8 +66,9 @@ sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --me
   launch_comet_agent.sbatch -s 3c7b3b2be79a467bad339616f0a00017 \
   -p $HOME/scratch/phd_research/phd/structure_search
 
-# 01_stationary/sweep/set (300 trials)
-sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 \
+# 01_stationary/sweep/set (300 trials) — 9 workers for ~1.5x headroom
+# (eval overhead makes these the most expensive trials). Launched as 1-6 + 1-3.
+sbatch --array=1-9 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 \
   launch_comet_agent.sbatch -s 115211a82b564e139f6862d99b6c3372 \
   -p $HOME/scratch/phd_research/phd/structure_search
 
