@@ -1,0 +1,51 @@
+experiment: set-analysis-sweep-v2
+sweep_name: stationary_set
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python experiments/train_set.py --config-path=../conf/sweeps/weight_pruning_scaling/00_experimental/set --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_loss
+  direction: minimize
+
+plot_params:
+  metrics: [asymptotic_test_loss, asymptotic_test_accuracy]
+  split_by: [set.init_mode]
+  sensitivity:
+    hue: [target_hidden_units]
+    params: [optimizer.learning_rate]
+
+parameters:
+  # Stationary, 8 tasks. With per-task heads, I + O = 8 * 794 = 6352. Total
+  # connection budget held at 25,408 (= block-sparse 32-unit budget at n=8),
+  # so SET, random_sparse and the existing block-sparse results all sit at the
+  # same total weight count. epsilon is derived in base_set.yaml from
+  # connection_budget + target_hidden_units + n_tasks so the realized hidden
+  # width lands exactly on each target. Test eval every 10k steps and the
+  # canonical magnitude prune metric both come from base_set.yaml.
+  task.n_tasks: 8
+  task.permute_period: 0
+  set.connection_budget: 25408
+  train.eval_freq: 25_000
+  log_individual_seeds: false
+
+  # Size axis at fixed budget: more hidden -> lower per-unit fan-in (sparser).
+  # 25408/H weights/unit -> ~1059 (H=24) down to ~66 (H=384); block-sparse is
+  # 794/unit. Output dim is 80 at n=8, so W2's edge probability stays well
+  # below saturation across this whole range (unlike the n=4 sweep, which
+  # capped at 192).
+  target_hidden_units: [96, 192, 384]
+  set.init_mode: [epsilon, uniform_p]
+
+  # Same grid as the other 01-era SET sweeps.
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    type: atomic
+    value: [0, 1, 2]
