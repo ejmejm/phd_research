@@ -12,7 +12,7 @@ spec:
 
 plot_params:
   metrics: [asymptotic_test_loss, asymptotic_test_accuracy]
-  split_by: [set.init_mode]
+  split_by: [set.init_mode, set.prune_metric, set.zeta]
   sensitivity:
     hue: [target_hidden_units]
     params: [optimizer.learning_rate]
@@ -30,6 +30,7 @@ parameters:
   set.connection_budget: 25408
   train.eval_freq: 25_000
   log_individual_seeds: false
+  set.utility_decay: 0.998
 
   # Size axis at fixed budget: more hidden -> lower per-unit fan-in (sparser).
   # 25408/H weights/unit -> ~1059 (H=24) down to ~66 (H=384); block-sparse is
@@ -38,6 +39,8 @@ parameters:
   # capped at 192).
   target_hidden_units: [96, 192, 384]
   set.init_mode: [epsilon, uniform_p]
+  set.prune_metric: [magnitude, utility]
+  set.zeta: [0.01, 0.05, 0.1, 0.2, 0.3]
 
   # Same grid as the other 01-era SET sweeps.
   optimizer.learning_rate:
@@ -45,6 +48,7 @@ parameters:
     - "${eval:2**-9}"
     - "${eval:2**-8}"
     - "${eval:2**-7}"
+    - "${eval:2**-6}"
 
   seed:
     type: atomic
