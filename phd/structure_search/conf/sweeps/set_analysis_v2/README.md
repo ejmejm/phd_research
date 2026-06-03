@@ -11,8 +11,8 @@ relative to `experiments/`).
 Layout mirrors `weight_pruning_scaling`: split by regime, then `sweep/`.
 
 ```
-01_stationary/sweep/{random_sparse,set}.yaml
-02_nonstationary/sweep/{random_sparse,set}.yaml
+01_stationary/sweep/{random_sparse,set,set_static}.yaml
+02_nonstationary/sweep/{random_sparse,set,set_static}.yaml
 ```
 
 Project: `set-analysis-sweep-v2`.
@@ -28,6 +28,10 @@ task -> 250*8 = ~2000 steps/task), `eval_freq=0` (no test split), objective
 - **set** — `target_hidden_units {96,192,384}` x `init_mode {epsilon,uniform_p}`
   x `prune_metric {magnitude,utility}` x `zeta {0.01,0.05,0.1,0.2,0.3}` x 5 LR
   = **300 trials**.
+- **set_static** — `set` with `zeta=0` (no prune/regrow -> network frozen at its
+  SET-init sparse topology; a static random-sparse-style baseline). `prune_metric`
+  fixed (no-op at zeta=0). `target_hidden_units {96,192,384}` x
+  `init_mode {epsilon,uniform_p}` x 5 LR = **30 trials**.
 
 ## Sweep Runs
 
@@ -43,8 +47,10 @@ a 1.4x buffer.
 | 01_stationary/sweep/set | `115211a82b564e139f6862d99b6c3372` | 300 | ~2200 | ~0.09-0.12 | 39 | 6h | 9 |
 | 02_nonstationary/sweep/random_sparse | `e0ff9ee6e4474edba051890381c5b07a` | 5 | ~2200 | ~0.07 | 0.5 | 3h | 1 |
 | 02_nonstationary/sweep/set | `f1163eecb71c4a4591ed85583eb4f0e2` | 300 | ~2200 | ~0.07 | 29 | 6h | 5 |
+| 01_stationary/sweep/set_static | `15302aa125924c25944c9aca84e99323` | 30 | ~2200 | ~0.09 | 3.8 | 3h | 2 |
+| 02_nonstationary/sweep/set_static | `8e5bb3ff5f3449a6a0bd77dddd3e9ce2` | 30 | ~2200 | ~0.07 | 2.9 | 3h | 2 |
 
-Total: 13 jobs across the four sweeps (all <50, within rate limits). Each
+Total: 17 jobs across the six sweeps (all <50, within rate limits). Each
 worker pulls trials continuously until the sweep is exhausted or the job ends,
 so the arrays finish in ~4-5 h wall-clock.
 
@@ -80,6 +86,16 @@ sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --me
 # 02_nonstationary/sweep/set (300 trials)
 sbatch --array=1-5 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=06:00:00 \
   launch_comet_agent.sbatch -s f1163eecb71c4a4591ed85583eb4f0e2 \
+  -p $HOME/scratch/phd_research/phd/structure_search
+
+# 01_stationary/sweep/set_static (30 trials, zeta=0 baseline)
+sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=03:00:00 \
+  launch_comet_agent.sbatch -s 15302aa125924c25944c9aca84e99323 \
+  -p $HOME/scratch/phd_research/phd/structure_search
+
+# 02_nonstationary/sweep/set_static (30 trials, zeta=0 baseline)
+sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=8G --time=03:00:00 \
+  launch_comet_agent.sbatch -s 8e5bb3ff5f3449a6a0bd77dddd3e9ce2 \
   -p $HOME/scratch/phd_research/phd/structure_search
 ```
 
