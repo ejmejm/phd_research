@@ -23,7 +23,7 @@ method:
 # Training
 train:
   total_steps: 100_000
-  log_freq: 1000      # steps between log points (Python loop stride)
+  log_freq: 1000      # steps per scan == steps aggregated per logged point
 
 # Seed: single int (null = random)
 seed: null
