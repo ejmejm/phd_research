@@ -41,6 +41,3 @@ class LMS(eqx.Module):
         updates, opt_state = self.optimizer.update(grads, self.opt_state, self.w)
         w = optax.apply_updates(self.w, updates)
         return tree_replace(self, w=w, opt_state=opt_state), loss   # prune_mask stays all-False
-
-
-# METHODS['lms'] = MethodSpec('lms', 'LMS', LMS, LMS.DEFAULTS)
