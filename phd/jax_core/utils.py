@@ -9,17 +9,25 @@ from jaxtyping import Array
 from omegaconf import DictConfig
 
 
+DEFAULT_JIT_CACHE_DIR = '/tmp/jax_cache'
+
+
 def configure_jax(cfg: DictConfig):
     """Configure JAX compilation cache and device."""
-    jax.config.update('jax_compilation_cache_dir', cfg.jax_jit_cache_dir)
+    cache_dir = cfg.get('jax_jit_cache_dir', DEFAULT_JIT_CACHE_DIR)
+    jax.config.update('jax_compilation_cache_dir', cache_dir)
     jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
     jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
     jax.config.update(
         'jax_persistent_cache_enable_xla_caches',
         'xla_gpu_per_fusion_autotune_cache_dir',
     )
-    jax.config.update('jax_platform_name', cfg.device)
-    print(f'JAX device: {jax.devices(cfg.device)[0]}')
+    
+    if cfg.device is not None:
+        jax.config.update('jax_platform_name', cfg.device)
+        print(f'JAX device: {jax.devices(cfg.device)[0]}')
+    else:
+        print(f'JAX device not specified, using default: {jax.devices()[0]}')
 
 
 def count_params(model) -> int:
