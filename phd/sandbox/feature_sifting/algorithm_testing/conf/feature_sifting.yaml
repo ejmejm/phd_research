@@ -1,0 +1,29 @@
+project: feature-sifting
+device: gpu
+jax_jit_cache_dir: /tmp/jax_cache
+
+# Experiment tracking
+wandb: false
+mlflow: false
+comet_ml: false
+
+# Task (feature sifting problem) — passed straight to FeatureSiftingTask
+task:
+  n_target_features: 10
+  n_learner_features: 20
+  target_noise_std: 0.0
+
+# Method (algorithm under test). Hyperparameter defaults live in the method's
+# own file; override them from the CLI with e.g.
+#   +method.hparams.learning_rate=0.001
+method:
+  name: lms
+  hparams: {}
+
+# Training
+train:
+  total_steps: 100_000
+  log_freq: 1000      # steps between log points (Python loop stride)
+
+# Seed: single int (null = random)
+seed: null
