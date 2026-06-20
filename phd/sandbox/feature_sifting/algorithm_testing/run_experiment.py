@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from phd.feature_search.jax_core.experiment_helpers import set_seed
 from phd.jax_core.tasks.feature_sifting import FeatureSiftingTask
-from phd.jax_core.utils import configure_jax, tree_replace
+from phd.jax_core.utils import configure_jax, stack_pytrees, tree_replace
 from phd.research_utils.logging import init_experiment, log_metrics, finish_experiment
 
 from cbp_autostep import CBPAutostep
@@ -48,20 +48,33 @@ class StepMetrics(eqx.Module):
 # ---------------------------------------------------------------------------
 
 def prepare_experiment(cfg: DictConfig) -> TrainState:
-    """Initialize the feature-sifting task and the chosen method."""
-    set_seed(cfg.seed)
-    seed = cfg.seed if cfg.seed is not None else np.random.randint(0, 2**31)
-    task_key, method_key = random.split(random.PRNGKey(seed))
+    """Initialize the task and method for each seed, stacked for vmap.
 
-    task = FeatureSiftingTask(**cfg.task, key=task_key)
+    Returns a single TrainState whose leaves carry a leading seed axis, so the
+    whole experiment runs for every seed at once under jax.vmap.
+    """
+    seeds = cfg.seed
+    if seeds is None:
+        seeds = [np.random.randint(0, 2**31)]
+    elif isinstance(seeds, int):
+        seeds = [seeds]
+    else:
+        seeds = list(seeds)
+    set_seed(seeds[0])
 
     method_cls = METHODS[cfg.method.name]
     hparams = dict(method_cls.DEFAULTS)
     if cfg.method.get('hparams') is not None:
         hparams.update(OmegaConf.to_container(cfg.method.hparams, resolve=True))
-    method = method_cls.init(task.n_learner_features, hparams, method_key)
 
-    return TrainState(task=task, method=method)
+    train_states = []
+    for seed in seeds:
+        task_key, method_key = random.split(random.PRNGKey(seed))
+        task = FeatureSiftingTask(**cfg.task, key=task_key)
+        method = method_cls.init(task.n_learner_features, hparams, method_key)
+        train_states.append(TrainState(task=task, method=method))
+
+    return stack_pytrees(train_states)
 
 
 # ---------------------------------------------------------------------------
@@ -92,10 +105,16 @@ def train_multi_step(train_state: TrainState, n_steps: int) -> Tuple[TrainState,
 
 
 def compute_metrics(step_metrics: StepMetrics) -> dict:
-    """Aggregate per-step metrics from a logged cycle into scalars."""
+    """Aggregate a logged cycle's per-step metrics across seeds.
+
+    `step_metrics.loss` has a leading seed axis: (n_seeds, log_freq, ...). Take
+    each seed's mean over the cycle, then report the mean / std across seeds
+    (matching the run-script convention).
+    """
+    per_seed_loss = step_metrics.loss.reshape(step_metrics.loss.shape[0], -1).mean(axis=1)
     return {
-        'loss': float(step_metrics.loss.mean()),
-        'loss_std': float(step_metrics.loss.std()),
+        'loss': float(per_seed_loss.mean()),
+        'loss_std': float(per_seed_loss.std()),
     }
 
 
@@ -109,7 +128,7 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, train_fn: Callable)
     for _ in range(num_scans):
         train_state, step_metrics = train_fn(train_state, log_freq)
 
-        step = int(train_state.step)
+        step = int(train_state.step[0])
         metrics = compute_metrics(step_metrics)
         log_metrics(metrics, cfg, step=step)
 
@@ -131,7 +150,8 @@ def main(cfg: DictConfig) -> None:
 
     try:
         train_state = prepare_experiment(cfg)
-        train_fn = jax.jit(train_multi_step, static_argnames=('n_steps',))
+        train_fn = jax.jit(jax.vmap(train_multi_step, in_axes=(0, None)),
+                           static_argnames=('n_steps',))
         train_state = run_experiment(cfg, train_state, train_fn)
     finally:
         finish_experiment(cfg)

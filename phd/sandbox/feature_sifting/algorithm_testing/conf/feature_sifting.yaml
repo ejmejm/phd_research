@@ -25,5 +25,5 @@ train:
   total_steps: 100_000
   log_freq: 1000      # steps per scan == steps aggregated per logged point
 
-# Seed: single int (null = random)
+# Seed: single int, a list of ints (run in parallel over seeds via vmap), or null (random)
 seed: null
