@@ -12,6 +12,7 @@ task:
   n_target_features: 10
   n_learner_features: 20
   target_noise_std: 0.0
+  flip_period: -1
 
 # Method (algorithm under test). Hyperparameter defaults live in the method's
 # own file; override them from the CLI with e.g.
