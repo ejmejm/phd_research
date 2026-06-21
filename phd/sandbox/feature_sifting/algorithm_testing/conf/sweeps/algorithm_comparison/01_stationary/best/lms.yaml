@@ -1,0 +1,27 @@
+# 30-seed run of the best LMS config (stationary), from the
+# 01_stationary/sweep/lms.yaml grid sweep (sweep_name lms_v1). Winner: lr=2^-13.
+experiment: feature_sifting_best
+sweep_name: lms
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python run_experiment.py --config-path=conf/sweeps/algorithm_comparison --config-name=base_lms
+algorithm: grid
+
+spec:
+  metric: final_loss
+  direction: minimize
+
+parameters:
+  mlflow: true
+  method.name: lms
+  train.total_steps: 300_000
+  # flip_period inherits the default (-1, stationary).
+
+  # Best hyperparameter from the stationary lms sweep.
+  method.hparams.learning_rate: "${eval:2**-13}"
+
+  # Seeds are vmapped inside the script -> one run for the whole set, not one per seed.
+  seed:
+    type: atomic
+    value: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]

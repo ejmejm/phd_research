@@ -1,0 +1,36 @@
+# Self-contained base config for the CBP+Autostep algorithm-comparison sweeps.
+# Mirrors conf/feature_sifting.yaml with the method fixed to cbp_autostep and its
+# hyperparameters declared (so sweeps can override them without the `+` prefix).
+# Referenced by the sweep/best configs via:
+#   python run_experiment.py --config-path=conf/sweeps/algorithm_comparison --config-name=base_cbp_autostep
+project: feature-sifting
+device: gpu
+jax_jit_cache_dir: /tmp/jax_cache
+
+# Experiment tracking
+wandb: false
+mlflow: false
+comet_ml: false
+
+# Task (feature sifting problem) — passed straight to FeatureSiftingTask.
+# flip_period=-1 is stationary; the nonstationary scenario overrides it.
+task:
+  n_target_features: 10
+  n_learner_features: 20
+  target_noise_std: 0.0
+  flip_period: -1
+
+method:
+  name: cbp_autostep
+  hparams:                              # placeholders (cbp_autostep.py defaults); set by the sweep
+    learning_rate: ${eval:2**-2}
+    meta_learning_rate: ${eval:2**-4}
+    replace_rate: 1e-3
+
+# Training
+train:
+  total_steps: 100_000
+  log_freq: 1000
+
+# Seed: single int, a list of ints (vmapped in parallel), or null (random)
+seed: null

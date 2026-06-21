@@ -1,9 +1,9 @@
 experiment: feature_sifting_sweeps
-sweep_name: cbp_autostep_v2
+sweep_name: cbp_autostep_ns_v5
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
-command: python run_experiment.py --config-name=cbp_autostep_sweep
+command: python run_experiment.py --config-path=conf/sweeps/algorithm_comparison --config-name=base_cbp_autostep
 algorithm: sensitivity
 
 spec:
@@ -14,6 +14,7 @@ parameters:
   mlflow: true
   method.name: cbp_autostep
   train.total_steps: 300_000
+  task.flip_period: 100
 
   # Seeds are vmapped inside the script -> one run for the whole set, not one per seed.
   seed:
@@ -21,23 +22,24 @@ parameters:
     value: [1, 2, 3, 4, 5]
 
   # Baseline (default) for each swept hyperparameter; held fixed while another varies.
-  method.hparams.learning_rate: "${eval:2**-2}"
-  method.hparams.meta_learning_rate: "${eval:2**-7}"
+  method.hparams.learning_rate: "${eval:2**-4}"
+  method.hparams.meta_learning_rate: "${eval:2**-6}"
   method.hparams.replace_rate: 1e-4
 
 # Candidate values tried one parameter at a time, off the baseline above.
 sensitivity:
   method.hparams.learning_rate:        # 2^-3 .. 2^2
+    - "${eval:2**-6}"
     - "${eval:2**-5}"
     - "${eval:2**-4}"
     - "${eval:2**-3}"
     - "${eval:2**-2}"
-    - "${eval:2**-1}"
-    - "${eval:2**0}"
   method.hparams.meta_learning_rate:   # 2^-7 .. 2^-5
     - "${eval:2**-9}"
     - "${eval:2**-8}"
     - "${eval:2**-7}"
     - "${eval:2**-6}"
     - "${eval:2**-5}"
+    - "${eval:2**-4}"
+    - "${eval:2**-3}"
   method.hparams.replace_rate: [1e-5, 5e-5, 1e-4, 5e-4]

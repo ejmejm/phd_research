@@ -1,9 +1,9 @@
 experiment: feature_sifting_sweeps
-sweep_name: cbp_autostep_ns_v1
+sweep_name: cbp_autostep_v2
 output_dir: outputs
 optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
 mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
-command: python run_experiment.py --config-name=cbp_autostep_sweep
+command: python run_experiment.py --config-path=conf/sweeps/algorithm_comparison --config-name=base_cbp_autostep
 algorithm: sensitivity
 
 spec:
@@ -14,7 +14,6 @@ parameters:
   mlflow: true
   method.name: cbp_autostep
   train.total_steps: 300_000
-  task.flip_period: 100
 
   # Seeds are vmapped inside the script -> one run for the whole set, not one per seed.
   seed:
