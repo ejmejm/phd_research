@@ -13,7 +13,7 @@ DEFAULT_HYPERPARAMETERS = {
     'learning_rate': 2.0 ** -2,
     'meta_learning_rate': 2.0 ** -4,
     'replace_rate': 1e-3,
-    'decay_rate': 0.99,
+    'decay_rate': 0.999,
 }
 
 

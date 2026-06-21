@@ -17,7 +17,7 @@ task:
 # own file; override them from the CLI with e.g.
 #   +method.hparams.learning_rate=0.001
 method:
-  name: lms # {lms, cbp_autostep}
+  name: lms # {lms, cbp_autostep, hybrid}
   hparams: {}
 
 # Training

@@ -15,6 +15,7 @@ from phd.jax_core.utils import configure_jax, stack_pytrees, tree_replace
 from phd.research_utils.logging import init_experiment, log_metrics, finish_experiment
 
 from cbp_autostep import CBPAutostep
+from hybrid import Hybrid
 from lms import LMS
 
 
@@ -29,6 +30,7 @@ SCAN_UNROLL = 4
 METHODS = {
     'lms': LMS,
     'cbp_autostep': CBPAutostep,
+    'hybrid': Hybrid,
 }
 
 
@@ -182,18 +184,31 @@ def run_experiment(cfg: DictConfig, train_state: TrainState, train_fn: Callable)
 
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
 
+    losses = []
     for _ in range(num_scans):
         train_state, step_metrics = train_fn(train_state, log_freq)
 
         step = int(train_state.step[0])
         metrics = compute_metrics(step_metrics)
         log_metrics(metrics, cfg, step=step)
+        losses.append(metrics['loss'])
 
         pbar.update(log_freq)
         pbar.set_postfix({'loss': f'{metrics["loss"]:.4f}',
                           'norm': f'{metrics["normalized_loss"]:.3f}'})
 
     pbar.close()
+
+    # End-of-run summary metrics, logged once (no step). Cycles are equal-length, so the
+    # mean of per-cycle losses is the per-step average, and the last 10% of cycles is the
+    # loss over the last 10% of steps.
+    if losses:
+        n_tail = max(1, len(losses) // 10)
+        log_metrics({
+            'average_loss': float(np.mean(losses)),
+            'final_loss': float(np.mean(losses[-n_tail:])),
+        }, cfg)
+
     return train_state
 
 

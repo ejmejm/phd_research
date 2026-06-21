@@ -1,0 +1,14 @@
+# Base config for the CBP+Autostep sweep. Inherits the feature-sifting setup and
+# declares the swept hyperparameters under method.hparams, so the sweep can
+# override them without the `+` prefix. Used via:
+#   run_experiment.py --config-name=cbp_autostep_sweep
+defaults:
+  - feature_sifting
+  - _self_
+
+method:
+  name: cbp_autostep
+  hparams:                              # placeholders (cbp_autostep.py defaults); set by the sweep
+    learning_rate: ${eval:2**-2}
+    meta_learning_rate: ${eval:2**-4}
+    replace_rate: 1e-3
