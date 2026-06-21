@@ -38,13 +38,14 @@ class FeatureSiftingTask(eqx.Module):
     # Static parameters (configuration)
     n_target_features: int = eqx.field(static=True)
     n_learner_features: int = eqx.field(static=True)
+    flip_period: int = eqx.field(static=True)
     
     # Dynamic parameters (weights and state)
     learner_feature_idxs: Int[Array, 'n_learner_features']
     noise_coefficients: Float[Array, 'n_learner_features']
     weights: List[Float[Array, 'n_target_features']]
     target_noise_std: float
-    # flip_rate: Float[Array, '']
+    step_idx: Int[Array, '']
     rng: random.PRNGKey
 
     def __init__(
@@ -52,6 +53,7 @@ class FeatureSiftingTask(eqx.Module):
         n_target_features: int = 10,
         n_learner_features: int = 20,
         target_noise_std: float = 0.0,
+        flip_period: int = -1,
         key: random.PRNGKey = None,
     ):
         """
@@ -64,6 +66,8 @@ class FeatureSiftingTask(eqx.Module):
         self.n_target_features = n_target_features
         self.n_learner_features = n_learner_features
         self.target_noise_std = target_noise_std
+        self.flip_period = flip_period
+        self.step_idx = 0
         
         # Set up RNG
         if key is None:
@@ -107,7 +111,20 @@ class FeatureSiftingTask(eqx.Module):
                 - learner_features: Array of shape (n_learner_features,), the noisy features sampled by the learner.
                 - target_output: Scalar float, the weighted sum of the true target features.
         """
-        new_rng, feature_key, x_key, target_noise_key, feature_noise_key = random.split(self.rng, 5)
+        new_rng, flip_key, feature_key, x_key, target_noise_key, feature_noise_key = random.split(self.rng, 6)
+        
+        new_weights = self.weights
+        if self.flip_period > 0:
+            should_flip = (self.step_idx % self.flip_period) == 0
+            flip_idx = random.randint(flip_key, (1,), 0, self.n_target_features)
+            new_weights = new_weights.at[flip_idx].set(-new_weights[flip_idx])
+            new_weights = jnp.where(should_flip, new_weights, self.weights)
+
+        new_state: 'FeatureSiftingTask' = tree_replace(
+            self,
+            weights = new_weights,
+            step_idx = self.step_idx + 1,
+        )
 
         # Generate new features
         new_feature_idxs, new_noise_coefficients = self._generate_new_features(
@@ -171,6 +188,7 @@ class FeatureSiftingTaskNP:
         n_target_features: int = 10,
         n_learner_features: int = 20,
         target_noise_std: float = 0.0,
+        flip_period: int = -1,
         seed: Optional[int] = None,
     ):
         """
@@ -178,11 +196,16 @@ class FeatureSiftingTaskNP:
             n_target_features: Number of features in the target network.
             n_learner_features: Number of candidate features the learner sees.
             target_noise_std: Standard deviation of the noise added to the target output.
+            flip_period: If > 0, the sign of one randomly chosen target weight is
+                flipped every ``flip_period`` steps (including the first step).
+                Disabled when <= 0.
             seed: Random seed for reproducibility.
         """
         self.n_target_features = n_target_features
         self.n_learner_features = n_learner_features
         self.target_noise_std = target_noise_std
+        self.flip_period = flip_period
+        self.step_idx = 0
 
         self.rng = np.random.default_rng(seed)
 
@@ -226,6 +249,12 @@ class FeatureSiftingTaskNP:
               features (plus optional noise).
         """
         prune_mask = np.asarray(prune_mask, dtype=bool)
+
+        # Periodically flip the sign of one randomly chosen target weight.
+        if self.flip_period > 0 and (self.step_idx % self.flip_period) == 0:
+            flip_idx = self.rng.integers(0, self.n_target_features)
+            self.weights[flip_idx] = -self.weights[flip_idx]
+        self.step_idx += 1
 
         # Generate fresh features only for the pruned slots and swap them in.
         n_pruned = int(prune_mask.sum())
