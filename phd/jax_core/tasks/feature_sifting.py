@@ -135,7 +135,7 @@ class FeatureSiftingTask(eqx.Module):
     
         # Update state
         new_state: 'FeatureSiftingTask' = tree_replace(
-            self,
+            new_state,
             rng = new_rng,
             learner_feature_idxs = feature_idxs,
             noise_coefficients = noise_coefficients,
