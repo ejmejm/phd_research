@@ -1,0 +1,44 @@
+# Long-horizon convergence study: how does CBP's noise floor depend on the
+# pruning/replacement rate as t -> infinity? Sweeps replace_rate over 2^-16 .. 2^-10 on the
+# STATIONARY feature-sifting task (flip_period=-1), with the other CBP hyperparameters fixed at
+# the stationary best (lr=2^-2, meta_lr=2^-7). The question is whether the noise floor
+# (best_possible_noise) converges to a positive, rate-dependent value or keeps decreasing toward 0.
+#
+# 50 seeds, 10M steps each. Run from phd/sandbox/feature_sifting/algorithm_testing/:
+#   mlflow-sweep conf/sweeps/algorithm_comparison/03_convergence/cbp_replace_rate.yaml
+experiment: feature_sifting_convergence
+sweep_name: cbp_replace_rate_v1
+output_dir: outputs
+optuna_storage: ${oc.env:OPTUNA_TRACKING_URI}
+mlflow_storage: ${oc.env:MLFLOW_TRACKING_URI}
+command: python run_experiment.py --config-path=conf/sweeps/algorithm_comparison --config-name=base_cbp_autostep
+algorithm: grid
+
+spec:
+  metric: final_loss
+  direction: minimize
+
+parameters:
+  mlflow: true
+  method.name: cbp_autostep
+  train.total_steps: 10_000_000
+  # flip_period inherits the default (-1, stationary).
+
+  # Fixed CBP hyperparameters (stationary best from the 01 sweep).
+  method.hparams.learning_rate: "${eval:2**-2}"
+  method.hparams.meta_learning_rate: "${eval:2**-7}"
+
+  # 50 seeds, vmapped inside the script -> one run over the whole set per replace_rate.
+  seed:
+    type: atomic
+    value: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+
+  # Swept: pruning / replacement rate, 2^-16 .. 2^-10.
+  method.hparams.replace_rate:
+    - "${eval:2**-16}"
+    - "${eval:2**-15}"
+    - "${eval:2**-14}"
+    - "${eval:2**-13}"
+    - "${eval:2**-12}"
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
