@@ -17,7 +17,15 @@ algorithm_comparison/
   02_nonstationary/           # flip_period=100
     sweep/{cbp_autostep,lms}.yaml
     best/{cbp_autostep,lms}.yaml
+  03_convergence/             # long-horizon noise-floor convergence study
+    cbp_replace_rate.yaml     # 50-seed, 10M-step replace_rate grid (2^-16 .. 2^-10)
 ```
+
+`03_convergence/cbp_replace_rate.yaml` sweeps the pruning rate `replace_rate` over
+`2^-16 .. 2^-10` on the stationary task (other CBP hyperparameters fixed at the 01
+stationary best), 50 seeds × 10M steps each, to test whether CBP's noise floor
+(`best_possible_noise`) converges to a positive, rate-dependent value or keeps
+decreasing toward 0. Logged to the `feature_sifting_convergence` MLflow experiment.
 
 Seeds are vmapped inside `run_experiment.py`, so each sweep trial / best config
 is a single run over the whole seed set (not one run per seed).

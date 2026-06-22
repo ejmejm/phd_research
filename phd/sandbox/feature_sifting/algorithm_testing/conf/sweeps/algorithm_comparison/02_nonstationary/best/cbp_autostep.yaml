@@ -22,7 +22,7 @@ parameters:
 
   # Best hyperparameters from the non-stationary cbp_autostep sweep.
   method.hparams.learning_rate: "${eval:2**-4}"
-  method.hparams.meta_learning_rate: "${eval:2**-7}"
+  method.hparams.meta_learning_rate: "${eval:2**-6}"
   method.hparams.replace_rate: 1e-4
 
   # Seeds are vmapped inside the script -> one run for the whole set, not one per seed.
