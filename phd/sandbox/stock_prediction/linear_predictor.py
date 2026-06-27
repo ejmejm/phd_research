@@ -21,6 +21,7 @@ import argparse
 import numpy as np
 
 from data import FIELDS, SMALL_NUM_STEPS, SMALL_NUM_STOCKS, load_stock_data
+from norm_recorder import NormalizationRecorder
 
 
 # --------------------------------------------------------------------------------------
@@ -35,11 +36,17 @@ class WelfordNormalizer:
     During the first ~1/alpha steps the weight is capped at ``1/count``, i.e. an equal-weight
     running mean that smoothly hands off to the EWMA, so early estimates are not biased toward
     the zero initialization.
+
+    ``normalize`` returns zeros for the first ``warmup`` samples: until then the variance
+    estimate is near-degenerate (e.g. nearly-identical consecutive prices), and dividing by it
+    would produce explosive values. A handful of samples is enough for the estimate to settle.
     """
 
-    def __init__(self, dim: int, alpha: float = 0.01, eps: float = 1e-8):
+    # Alpha default is effectively 1 month of data.
+    def __init__(self, dim: int, alpha: float = 0.001, warmup: int = 10, eps: float = 1e-8):
         self.count = 0
         self.alpha = alpha
+        self.warmup = warmup
         self.mean = np.zeros(dim, dtype=np.float64)
         self.var = np.zeros(dim, dtype=np.float64)  # exponentially weighted variance
         self.eps = eps
@@ -58,6 +65,8 @@ class WelfordNormalizer:
         return np.sqrt(self.var)
 
     def normalize(self, x: np.ndarray) -> np.ndarray:
+        if self.count < self.warmup:
+            return np.zeros_like(x)  # variance estimate not yet settled -> no scale to apply
         return (x - self.mean) / (self.std + self.eps)
 
     def denormalize(self, z: np.ndarray) -> np.ndarray:
@@ -94,7 +103,12 @@ def features_from_state(state: np.ndarray) -> np.ndarray:
 # Training loop
 # --------------------------------------------------------------------------------------
 def train(
-    data: dict[str, np.ndarray], lr: float, log_every: int, norm_alpha: float = 0.01
+    data: dict[str, np.ndarray],
+    lr: float,
+    log_every: int,
+    norm_alpha: float = 0.001,
+    plot: bool = False,
+    plot_path: str = "normalization.png",
 ) -> None:
     num_stocks, num_steps = data["close"].shape
     print(f"Training: {num_stocks} stocks, {num_steps} steps, lr={lr}, norm_alpha={norm_alpha}")
@@ -115,6 +129,9 @@ def train(
     win_raw_sse = 0.0
     win_count = 0
 
+    # Optional sanity-check recording of raw vs. normalized values (see norm_recorder.py).
+    recorder = NormalizationRecorder() if plot else None
+
     for t in range(num_steps):
         step_data = {f: data[f][:, t] for f in data}
 
@@ -122,11 +139,13 @@ def train(
         x_raw = features_from_state(state)
         y_raw = step_data["close"]
 
-        # Update each normalizer with the fresh observation, then normalize.
-        in_norm.update(x_raw)
-        tgt_norm.update(y_raw)
+        # Normalize with statistics from prior steps only -- the current target is not yet
+        # "revealed", so it must not feed its own normalization (no look-ahead bias).
         x = in_norm.normalize(x_raw)
         y = tgt_norm.normalize(y_raw)
+
+        if recorder is not None:
+            recorder.record(x_raw, x, y_raw, y)
 
         # Forward / loss / SGD step (MSE in normalized space).
         pred = W @ x + b
@@ -134,7 +153,8 @@ def train(
         W -= lr * np.outer(err, x)
         b -= lr * err
 
-        # Track normalized MSE and de-normalized (raw price) RMSE.
+        # Track normalized MSE and de-normalized (raw price) RMSE. Denormalize with the same
+        # pre-update stats used for ``y`` so the raw metric stays leakage-free too.
         win_norm_sse += float(np.mean(err**2))
         pred_raw = tgt_norm.denormalize(pred)
         win_raw_sse += float(np.mean((pred_raw - y_raw) ** 2))
@@ -148,8 +168,14 @@ def train(
             win_norm_sse = win_raw_sse = 0.0
             win_count = 0
 
-        # Persistent state is updated at the END of the step from the full step data.
+        # Now reveal this step's observation: update the normalizers and the persistent
+        # state for the next step.
+        in_norm.update(x_raw)
+        tgt_norm.update(y_raw)
         state = agent_state_update(state, step_data)
+
+    if recorder is not None:
+        recorder.save(plot_path)
 
 
 # --------------------------------------------------------------------------------------
@@ -177,11 +203,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--norm-alpha",
         type=float,
-        default=0.01,
+        default=1/8640,
         help="EWMA weight for the input/target normalizers (~1/alpha-step horizon; "
         "smaller = longer memory).",
     )
     p.add_argument("--log-every", type=int, default=1000, help="Log interval in steps.")
+    p.add_argument(
+        "--plot-norm",
+        action="store_true",
+        help="Record every stock's raw vs. normalized inputs/targets and save twin-axis plots "
+        "to --plot-path (to sanity-check the Welford normalizer).",
+    )
+    p.add_argument(
+        "--plot-path",
+        type=str,
+        default="normalization.png",
+        help="Output path for the --plot-norm figure.",
+    )
     return p.parse_args()
 
 
@@ -199,7 +237,14 @@ def main() -> None:
     data = load_stock_data(
         fields=FIELDS, num_stocks=num_stocks, num_steps=num_steps, full=args.full
     )
-    train(data, lr=args.lr, log_every=args.log_every, norm_alpha=args.norm_alpha)
+    train(
+        data,
+        lr=args.lr,
+        log_every=args.log_every,
+        norm_alpha=args.norm_alpha,
+        plot=args.plot_norm,
+        plot_path=args.plot_path,
+    )
 
 
 if __name__ == "__main__":
