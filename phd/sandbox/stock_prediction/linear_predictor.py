@@ -40,16 +40,32 @@ class WelfordNormalizer:
     ``normalize`` returns zeros for the first ``warmup`` samples: until then the variance
     estimate is near-degenerate (e.g. nearly-identical consecutive prices), and dividing by it
     would produce explosive values. A handful of samples is enough for the estimate to settle.
+
+    Two further guards keep degenerate series from blowing up the metrics (and the model):
+    a feature whose std has collapsed below ``std_floor`` (a perfectly flat series pins it at
+    ~0, so the first later move would standardize to ~Δprice/eps ~ 1e7) is treated as carrying
+    no signal and emits 0; and the standardized output is clipped to +/-``clip``, a
+    one-in-a-billion tail of N(0,1) (6 sigma), so any surviving outlier can't dominate.
     """
 
     # Alpha default is effectively 1 month of data.
-    def __init__(self, dim: int, alpha: float = 0.001, warmup: int = 10, eps: float = 1e-8):
+    def __init__(
+        self,
+        dim: int,
+        alpha: float = 0.001,
+        warmup: int = 10,
+        eps: float = 1e-8,
+        std_floor: float = 1e-5,
+        clip: float = 6.0,
+    ):
         self.count = 0
         self.alpha = alpha
         self.warmup = warmup
         self.mean = np.zeros(dim, dtype=np.float64)
         self.var = np.zeros(dim, dtype=np.float64)  # exponentially weighted variance
         self.eps = eps
+        self.std_floor = std_floor  # below this, std is treated as degenerate (no signal)
+        self.clip = clip  # |z| cap; 6 sigma ~ one-in-a-billion tail of N(0, 1)
 
     def update(self, x: np.ndarray) -> None:
         """Exponentially weighted Welford update (Finch 2009) with warmup debiasing."""
@@ -67,7 +83,13 @@ class WelfordNormalizer:
     def normalize(self, x: np.ndarray) -> np.ndarray:
         if self.count < self.warmup:
             return np.zeros_like(x)  # variance estimate not yet settled -> no scale to apply
-        return (x - self.mean) / (self.std + self.eps)
+        std = self.std
+        z = (x - self.mean) / (std + self.eps)
+        # Degenerate variance (e.g. a perfectly flat series) makes z ill-defined: the first
+        # later move standardizes to ~Delta/eps ~ 1e7. Emit 0 for those features (no signal).
+        z = np.where(std <= self.std_floor, 0.0, z)
+        # Clip to a one-in-a-billion N(0, 1) tail so any remaining outlier can't dominate.
+        return np.clip(z, -self.clip, self.clip)
 
     def denormalize(self, z: np.ndarray) -> np.ndarray:
         return z * (self.std + self.eps) + self.mean
