@@ -1,0 +1,46 @@
+project: stock-prediction
+device: null            # null = JAX default device; set to 'gpu' or 'cpu' to force
+jax_jit_cache_dir: /tmp/jax_cache
+x64: true               # float64 for parity with the numpy predictor (normalizer numerics)
+
+# Experiment tracking
+wandb: false
+mlflow: false
+comet_ml: false
+
+# Data (see data.py / load_stock_data)
+data:
+  full: false           # true = load the entire dataset (all stocks/steps)
+  num_stocks: 200       # null = all (only meaningful with full=true)
+  num_steps: 10_000     # null = common max length across kept stocks
+
+# GVFs to predict, one per list entry, each instantiated per stock (=> n_gvfs*num_stocks
+# targets). cumulant = an observation field; gamma = discount (0 => one-step prediction).
+# 'close'/gamma=0 reproduces the original next-close predictor. The fields used here are
+# loaded automatically (plus 'close', which always feeds the input features).
+gvfs:
+  - field: close        # one-step next-close prediction (the original task)
+    gamma: 0.0
+  - field: volume       # discounted future volume
+    gamma: 0.99
+
+# Welford normalizer (matches linear_predictor.WelfordNormalizer)
+norm:
+  alpha: 0.00011574074074074075  # = 1/8640, ~1-month EWMA horizon (smaller = longer memory)
+  eps: 1e-8
+  clip: 6.0             # |z| cap; 6 sigma ~ one-in-a-billion tail of N(0, 1)
+
+# Optimizer
+optimizer:
+  name: sgd
+  learning_rate: 0.002  # stable lr scales ~1/num_stocks (effective LMS step is lr*||x||^2)
+
+# Training
+train:
+  total_steps: null     # null = use all loaded steps; otherwise capped to data length
+  log_freq: 1000        # steps per scan block / between log points
+  prefetch: 2           # blocks copied to the device ahead of compute (0 = no overlap)
+  log_baseline: true    # also log the predict-the-running-mean baseline for norm_mse/raw_rmse
+
+# Seed: single int (null = random). Model init is zeros, so this only affects logging order.
+seed: null
