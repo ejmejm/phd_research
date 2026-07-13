@@ -1,48 +1,44 @@
 r"""Sixth experiment: the *drift judge* — an adaptive-horizon protection indicator.
 
-The earlier experiments established the gap: under **blocking** (a candidate that
-is colinear with an already-established feature), the cheap maturity indicators —
-the $\Delta w$ traces and, most sharply, the IDBD/IDBD3 $h$-flip — fire *too
-early*. The incumbent blocks the candidate's gradient signal, so convergence
-along the shared direction is slow and $h$ flips almost immediately, which in a
-real generate-and-test learner would **prune a genuinely useful feature**.
+Same toy problem as experiments 3–5 (the blocking setup), now repeated as a
+generate-and-test loop with a real prune/keep decision:
 
-This experiment closes that gap by turning the raw $h$-flip into a *statistical
-test with a learned horizon* (the "drift judge", see ``algorithm.md`` / the
-docstring block below). The judge keeps the step-size slaving of $h$ (so it needs
-no retuning across step-sizes or noise) and adds one dimensionless, **globally
-learned** patience multiplier ``P`` that stretches the horizon exactly when
-blocking makes it necessary.
+- **established feature** (column 0): fixed at 10% noise, started at its solo
+  optimum $w^\star_{\text{est}} = \text{optimal\_weight}(0.5, 0.1) \approx 0.549$;
+- **candidate feature** (column 1, tracked): a *perfect* (clean, $c = 0$) view of
+  the same shared signal, learned from a zero weight — exactly the incumbent of
+  experiments 3–5. It is genuinely useful (joint optimum drives it to $\approx
+  0.5$ and the noisier established feature to $\approx 0$), so the correct action
+  is always **KEEP**; the danger is *premature pruning* while it is still blocked.
 
-Unlike experiments 1–5, which only *observed* indicators, here the indicator
-drives a real decision. Each "episode" generates a fresh candidate feature and
-protects it while it learns (constant-step-size LMS, ``STEP_SIZE``); when the
-judge returns a **converged verdict** protection ends and the candidate is
-**kept** (tenured) or **pruned** by comparing $|w|$ to a utility bar. The problem
-is then reset — weights back to their initial values — but the **algorithm's own
-parameters persist** (the global patience prior ``P0`` and its running state).
-We run episodes until ``P0`` converges (or a step budget is exhausted).
+Each episode protects the candidate under constant-step-size LMS while the drift
+judge watches its gradient signal ``g = delta * phi``. When the judge returns a
+**converged verdict** protection ends and the candidate is kept or pruned by
+comparing $|w|$ to a utility bar; the problem is then reset (weights back to their
+initial values) while the judge's **own parameters persist** (the global patience
+prior ``P0`` and its controller state). We run episodes until ``P0`` converges.
 
-Why a mixed candidate pool. A strongly-blocked candidate (the corr $\approx0.99$,
-10%-noise case that is our focus) never lands in the *veto* branch: its residual
-gradient sits at the noise floor, so the judge protects it via the doubling
-(inconclusive) branch and then keeps it. The *veto* pressure that the global
-controller needs — a premature $h$-flip while genuine drift persists — comes from
-the *easier* useful features, which flip early exactly when ``P0`` is too small.
-So the pool is a realistic generate-and-test mix: strongly-blocked useful
-features (KEEP, the focus), easier useful features (KEEP, the veto source that
-pushes ``P0`` up), and near-duplicate junk features (PRUNE). ``P0`` then
-converges to the pool's blocking difficulty, exactly as the algorithm intends:
-"P0 tracks the blocking difficulty of the current candidate pool without any
-explicit correlation measurement."
+The earlier experiments established the gap: under blocking the cheap IDBD/IDBD3
+``h``-flip fires almost immediately (the incumbent blocks the candidate's gradient
+signal, so ``h`` flips long before the weight matures), which would prune a
+genuinely useful feature. The drift judge replaces that raw flip with a
+statistical drift test that keeps the step-size slaving of ``h`` and adds one
+dimensionless, globally learned patience multiplier ``P`` that stretches the
+horizon exactly when blocking makes it necessary.
+
+Two indicators are compared on every episode:
+  * **naive** — the raw IDBD3 ``h``-flip of experiments 3–5 (stop protecting at the
+    first sign flip; decide keep/prune from $|w|$ there);
+  * **drift judge** — protect until a converged verdict, then decide.
 
 Three plots are produced:
-  1. the patience prior ``P0`` over episodes (the value we run until it converges);
-  2. cumulative keeps and prunes over episodes;
-  3. the focus case (blocking, 10% noise) run with the *converged* ``P0``, drawn
-     in the exact style of experiments 3–5 (weights + normalized indicators),
-     annotated with where the naive $h$-flip would have pruned versus where the
-     drift judge actually ends protection and keeps.
+  1. the patience prior ``P0`` over episodes (plus the per-feature horizon the
+     doubling test actually reaches), the value we run until it converges;
+  2. cumulative keeps/prunes over episodes, drift judge vs the naive baseline;
+  3. the blocking case run with the *converged* ``P0``, in the style of
+     experiments 3–5 (weights + the two indicators; the $\Delta w$ traces are
+     dropped), annotated with where the naive ``h``-flip would prune versus where
+     the drift judge ends protection and keeps.
 
 --- drift judge algorithm (verbatim summary of the spec) -------------------
 Per protected feature the judge keeps EMA traces of g = delta * phi at two
@@ -65,7 +61,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from shared import (
-    STEP_SIZE, TRACE_DECAYS, W_COLOR, DW_COLORS, H_IDBD3_COLOR,
+    STEP_SIZE, W_COLOR, H_IDBD3_COLOR,
     W_TEACHER, EST_NOISE_FIXED,
     make_problem_data, optimal_weight, _norm_peak,
 )
@@ -90,13 +86,12 @@ NEFF_MIN = 30.0    # minimum effective sample count before a test may fire
 # ---------------------------------------------------------------------------
 UTILITY_BAR = 0.25          # keep iff |w_candidate| >= UTILITY_BAR at the verdict
 MAX_EPISODE_STEPS = 200_000  # per-episode protection budget (steps)
-MAX_EPISODES = 500           # outer stop if patience never settles
-POOL_KINDS = ['blocked', 'indep', 'junk']
-POOL_WEIGHTS = (0.5, 0.3, 0.2)
+MAX_EPISODES = 150           # outer stop if patience never settles
+NAIVE_WARMUP = 10            # ignore the first few steps when finding the naive h-flip
 # convergence of P0: coefficient of variation over a trailing window
-CONV_WINDOW = 80
-CONV_COV = 0.04
-CONV_MIN_EPISODES = 160
+CONV_WINDOW = 60
+CONV_COV = 0.02
+CONV_MIN_EPISODES = 120
 
 
 class DriftJudge:
@@ -182,48 +177,28 @@ class PatienceController:
         self.log_P0 = math.log(self.P0)      # keep log in sync with the clip
 
 
-def make_candidate(kind, n_steps, seed):
-    """Build one pool member: ``(features, y, w_est0, correct_action)``.
+def make_blocking_problem(n_steps, seed):
+    """One episode of the exp 3-5 blocking setup.
 
-    Column 0 is always the established feature (held fixed at 10% noise, started
-    at its solo optimum); column 1 is the tracked candidate, learned from zero.
+    Column 0 = established feature (fixed 10% noise, started at its solo optimum);
+    column 1 = a perfect (clean) candidate that is a noisy-free view of the same
+    shared signal, learned from zero. Correct action is always KEEP.
     """
-    if kind == 'blocked':
-        # FOCUS: clean candidate sharing the signal with the 10%-noise established
-        # feature (corr ~0.99). Joint optimum drives the candidate to ~0.5 -> KEEP.
-        feats, y = make_problem_data(
-            n_steps, [W_TEACHER, 0.0], feature_noise=[EST_NOISE_FIXED, 0.0],
-            target_noise_std=0.1, shared_signal=True, seed=seed,
-        )
-        return feats, y, optimal_weight(W_TEACHER, EST_NOISE_FIXED), 'keep'
-    if kind == 'indep':
-        # Easier useful feature: independent of the established one. At a too-small
-        # P0 its fast trace flips prematurely while it is still climbing -> VETO,
-        # which is what pushes the global patience up. Correct action -> KEEP.
-        feats, y = make_problem_data(
-            n_steps, [0.0, W_TEACHER], feature_noise=[EST_NOISE_FIXED, 0.0],
-            target_noise_std=0.1, shared_signal=False, seed=seed,
-        )
-        return feats, y, 0.0, 'keep'
-    if kind == 'junk':
-        # Near-duplicate of the established feature (perfect twin, joint optimum
-        # ~0). The judge converges at |w| ~ 0 -> PRUNE.
-        feats, y = make_problem_data(
-            n_steps, [W_TEACHER, 0.0], feature_noise=[0.0, 0.0],
-            target_noise_std=0.1, shared_signal=True, seed=seed,
-        )
-        return feats, y, optimal_weight(W_TEACHER, 0.0), 'prune'
-    raise ValueError(kind)
+    feats, y = make_problem_data(
+        n_steps, [W_TEACHER, 0.0], feature_noise=[EST_NOISE_FIXED, 0.0],
+        target_noise_std=0.1, shared_signal=True, seed=seed,
+    )
+    w_est0 = optimal_weight(W_TEACHER, EST_NOISE_FIXED)
+    return feats, y, w_est0
 
 
 def run_episode(P0, feats, y, w_est0, step_size=STEP_SIZE, record=False):
     """Protect the candidate (column 1) until the judge returns a verdict.
 
-    Learning is constant-step-size LMS on both weights; the judge observes the
-    candidate's gradient signal ``g = delta * phi`` each step. Returns a dict with
-    the ``decision`` ('keep'/'prune'), the ``verdict_step``, veto/inconclusive
-    counts, the final candidate weight, and (when ``record``) full per-step
-    histories plus the naive IDBD3 h-trace for the experiment-3/4/5-style plot.
+    Both weights learn with constant-step-size LMS; the judge observes the
+    candidate's gradient signal ``g = delta * phi`` each step. The naive IDBD3
+    ``h``-trace of experiments 3-5 is tracked alongside so its (premature) first
+    sign flip gives a baseline keep/prune decision on the same episode.
     """
     judge = DriftJudge(P0)
     f0 = feats[:, 0]
@@ -232,6 +207,10 @@ def run_episode(P0, feats, y, w_est0, step_size=STEP_SIZE, record=False):
     w0 = float(w_est0)
     w1 = 0.0
 
+    h_naive = 0.0
+    naive_flip_step = -1
+    naive_flip_w = None
+
     n_veto = 0
     n_incon = 0
     verdict_step = -1
@@ -239,15 +218,9 @@ def run_episode(P0, feats, y, w_est0, step_size=STEP_SIZE, record=False):
     events = []
 
     if record:
-        decays = np.asarray(TRACE_DECAYS, dtype=float)
-        n_dec = len(decays)
-        dw_tr = np.zeros(n_dec)
-        h_idbd3 = 0.0
         w1_hist = np.empty(n)
         w0_hist = np.empty(n)
         u_hist = np.empty(n)
-        P_hist = np.empty(n)
-        dw_hist = np.empty((n, n_dec))
         h_hist = np.empty(n)
 
     for t in range(n):
@@ -258,12 +231,15 @@ def run_episode(P0, feats, y, w_est0, step_size=STEP_SIZE, record=False):
 
         ev = judge.step(g, step_size, f1t, t)
 
-        if record:
-            loss_grad = 2.0 * error * f1t
-            keep = max(0.0, 1.0 - step_size * f1t * f1t)
-            h_idbd3 = h_idbd3 * keep + loss_grad
-            dw1 = -step_size * loss_grad
-            dw_tr = decays * dw_tr + (1.0 - decays) * dw1
+        # naive IDBD3 h-trace of exps 3-5 (observed only) + its first sign flip
+        loss_grad = 2.0 * error * f1t
+        keep = max(0.0, 1.0 - step_size * f1t * f1t)
+        h_prev = h_naive
+        h_naive = h_naive * keep + loss_grad
+        if (naive_flip_step < 0 and t >= NAIVE_WARMUP
+                and h_prev != 0.0 and h_naive * h_prev < 0.0):
+            naive_flip_step = t
+            naive_flip_w = w1
 
         w0 -= step_size * 2.0 * error * f0t
         w1 -= step_size * 2.0 * error * f1t
@@ -272,9 +248,7 @@ def run_episode(P0, feats, y, w_est0, step_size=STEP_SIZE, record=False):
             w1_hist[t] = w1
             w0_hist[t] = w0
             u_hist[t] = judge.u
-            P_hist[t] = judge.P
-            dw_hist[t] = dw_tr
-            h_hist[t] = h_idbd3
+            h_hist[t] = h_naive
 
         if ev == 'veto':
             n_veto += 1
@@ -292,6 +266,11 @@ def run_episode(P0, feats, y, w_est0, step_size=STEP_SIZE, record=False):
         verdict_step = n - 1
         decision = 'keep' if abs(w1) >= UTILITY_BAR else 'prune'
 
+    if naive_flip_w is None:                        # naive never flipped -> keep
+        naive_decision = 'keep'
+    else:
+        naive_decision = 'keep' if abs(naive_flip_w) >= UTILITY_BAR else 'prune'
+
     out = dict(
         decision=decision,
         verdict_step=verdict_step,
@@ -299,26 +278,26 @@ def run_episode(P0, feats, y, w_est0, step_size=STEP_SIZE, record=False):
         n_incon=n_incon,
         w1=w1,
         P_final=judge.P,
+        naive_decision=naive_decision,
+        naive_flip_step=naive_flip_step,
     )
     if record:
         sl = slice(0, verdict_step + 1)
         out['hist'] = dict(
-            w1=w1_hist[sl], w0=w0_hist[sl], u=u_hist[sl], P=P_hist[sl],
-            dw_trace=dw_hist[sl], h_idbd3=h_hist[sl], events=events,
+            w1=w1_hist[sl], w0=w0_hist[sl], u=u_hist[sl], h_idbd3=h_hist[sl],
+            events=events,
         )
     return out
 
 
 def calibrate():
-    """Run episodes until the patience prior P0 converges (or the budget ends)."""
+    """Run blocking episodes until the patience prior P0 converges (or budget)."""
     controller = PatienceController()
-    rng = np.random.default_rng(0)
 
-    records = []          # per-episode dicts
-    P0_series = []        # P0 after each episode's controller charges
+    records = []
+    P0_series = []
     for ep in range(MAX_EPISODES):
-        kind = str(rng.choice(POOL_KINDS, p=POOL_WEIGHTS))
-        feats, y, w_est0, correct = make_candidate(kind, MAX_EPISODE_STEPS, seed=1000 + ep)
+        feats, y, w_est0 = make_blocking_problem(MAX_EPISODE_STEPS, seed=1000 + ep)
         res = run_episode(controller.P0, feats, y, w_est0)
 
         # controller: one veto=1 per veto event, one veto=0 for the converged verdict
@@ -326,12 +305,11 @@ def calibrate():
             controller.event(1)
         controller.event(0)
 
-        P0_now = controller.P0
-        P0_series.append(P0_now)
+        P0_series.append(controller.P0)
         records.append(dict(
-            episode=ep, kind=kind, decision=res['decision'], correct=correct,
-            ok=res['decision'] == correct, verdict_step=res['verdict_step'],
-            n_veto=res['n_veto'], w1=res['w1'], P0=P0_now,
+            episode=ep, decision=res['decision'], verdict_step=res['verdict_step'],
+            n_veto=res['n_veto'], w1=res['w1'], P0=controller.P0,
+            P_final=res['P_final'], naive_decision=res['naive_decision'],
         ))
 
         if ep + 1 >= CONV_MIN_EPISODES:
@@ -350,96 +328,81 @@ def calibrate():
 # ===========================================================================
 controller, records, P0_series, converged, P0_final = calibrate()
 n_ep = len(records)
-keeps = [r for r in records if r['decision'] == 'keep']
-prunes = [r for r in records if r['decision'] == 'prune']
-accuracy = float(np.mean([r['ok'] for r in records]))
-print(f'episodes run           : {n_ep}')
-print(f'patience converged     : {converged}  (P0 -> {P0_final:.2f})')
-print(f'keeps / prunes         : {len(keeps)} / {len(prunes)}')
-print(f'decision accuracy      : {accuracy:.3f}')
+keeps = sum(r['decision'] == 'keep' for r in records)
+prunes = sum(r['decision'] == 'prune' for r in records)
+naive_prunes = sum(r['naive_decision'] == 'prune' for r in records)
+print(f'episodes run              : {n_ep}')
+print(f'patience prior P0         : {P0_final:.2f}  (converged: {converged})')
+print(f'drift judge keeps / prunes: {keeps} / {prunes}')
+print(f'naive h-flip keeps / prunes: {n_ep - naive_prunes} / {naive_prunes}')
+
+episodes = np.arange(1, n_ep + 1)
 
 # ---------------------------------------------------------------------------
-# Plot 1 — the patience prior P0 over episodes (the value we run until it settles).
+# Plot 1 — the patience prior P0 over episodes (the value we run until it settles),
+# with the per-feature horizon the doubling test actually reaches each episode.
 # ---------------------------------------------------------------------------
-episodes = np.arange(1, n_ep + 1)
-kind_color = {'blocked': '#3953e2', 'indep': '#029999', 'junk': '#FF3300'}
+P_reached = np.array([r['P_final'] for r in records], dtype=float)
 
 fig, ax = plt.subplots(figsize=(11, 5))
-ax.plot(episodes, P0_series, color=W_COLOR, lw=2.0, label='patience prior $P_0$', zorder=5)
-for kind in POOL_KINDS:
-    xs = [r['episode'] + 1 for r in records if r['kind'] == kind]
-    ys = [r['P0'] for r in records if r['kind'] == kind]
-    ax.scatter(xs, ys, s=14, color=kind_color[kind], alpha=0.65,
-               label=f'{kind} candidate', zorder=6)
-ax.axhline(P0_final, color='0.4', ls='--', lw=1.5, alpha=0.8,
+ax.plot(episodes, P0_series, color=W_COLOR, lw=2.4, label='patience prior $P_0$ (persists)')
+ax.plot(episodes, P_reached, color='#3953e2', lw=1.4, alpha=0.55, marker='o', ms=3,
+        label='per-feature horizon $P$ reached (doubling test)')
+ax.axhline(P0_final, color='0.4', ls='--', lw=1.4, alpha=0.8,
            label=f'converged $P_0 \\approx {P0_final:.2f}$')
-if converged:
-    ax.axvline(n_ep, color='0.55', ls=(0, (4, 3)), lw=1.0, alpha=0.5)
-ax.set_xlabel('episode (fresh candidate feature)', fontsize=16)
-ax.set_ylabel('patience prior $P_0$', fontsize=16)
-ax.set_title('Adaptive patience over generate-and-test episodes', fontsize=18)
-ax.legend(loc='lower right', fontsize=11, ncol=2)
+ax.set_yscale('log', base=2)
+ax.set_xlabel('episode (fresh perfect candidate)', fontsize=16)
+ax.set_ylabel('patience (log$_2$)', fontsize=16)
+ax.set_title('Adaptive patience over blocking episodes', fontsize=18)
+ax.legend(loc='center right', fontsize=11)
 fig.tight_layout()
 fig.savefig('exp6_patience_over_time.png', dpi=130, bbox_inches='tight')
 
 # ---------------------------------------------------------------------------
-# Plot 2 — cumulative keeps and prunes over episodes.
+# Plot 2 — cumulative keeps/prunes over episodes: drift judge vs naive h-flip.
+# The candidate is always a perfect (useful) feature, so KEEP is always correct;
+# the naive indicator prunes it prematurely under blocking, the drift judge keeps.
 # ---------------------------------------------------------------------------
-keep_flag = np.array([1 if r['decision'] == 'keep' else 0 for r in records])
-prune_flag = 1 - keep_flag
-cum_keep = np.cumsum(keep_flag)
-cum_prune = np.cumsum(prune_flag)
+judge_keep = np.cumsum([r['decision'] == 'keep' for r in records])
+judge_prune = np.cumsum([r['decision'] == 'prune' for r in records])
+naive_prune = np.cumsum([r['naive_decision'] == 'prune' for r in records])
 
 fig, ax = plt.subplots(figsize=(11, 5))
-ax.plot(episodes, cum_keep, color='#029999', lw=2.4, label='keeps (tenured)')
-ax.plot(episodes, cum_prune, color='#FF3300', lw=2.4, label='prunes')
-ax.fill_between(episodes, 0, cum_keep, color='#029999', alpha=0.12)
-ax.fill_between(episodes, 0, cum_prune, color='#FF3300', alpha=0.12)
-# outcome ticks along the top: correct (grey) vs wrong (black x)
-wrong = [r['episode'] + 1 for r in records if not r['ok']]
-top = max(cum_keep[-1], cum_prune[-1])
-if wrong:
-    ax.scatter(wrong, [top * 1.02] * len(wrong), marker='x', color='black',
-               s=40, label='wrong decision', zorder=6)
-ax.set_xlabel('episode (fresh candidate feature)', fontsize=16)
+ax.fill_between(episodes, 0, judge_keep, color='#029999', alpha=0.15)
+ax.plot(episodes, judge_keep, color='#029999', lw=3.4, zorder=4,
+        label='kept — drift judge (correct)')
+ax.plot(episodes, naive_prune, color=H_IDBD3_COLOR, lw=2.0, ls=(0, (6, 4)), zorder=6,
+        label='pruned — naive $h$-flip (premature)')
+ax.plot(episodes, judge_prune, color='#3953e2', lw=2.2, ls=':', zorder=5,
+        label='pruned — drift judge')
+ax.set_xlabel('episode (fresh perfect candidate)', fontsize=16)
 ax.set_ylabel('cumulative count', fontsize=16)
-ax.set_title(f'Keeps vs prunes over time  (decision accuracy = {accuracy:.1%})',
-             fontsize=18)
+ax.set_title('Keeps vs prunes over time (perfect blocked feature)', fontsize=18)
 ax.legend(loc='upper left', fontsize=12)
 fig.tight_layout()
 fig.savefig('exp6_prunes_keeps_over_time.png', dpi=130, bbox_inches='tight')
 
 # ---------------------------------------------------------------------------
-# Plot 3 — the focus case (blocking, 10% noise) with the CONVERGED P0, drawn in
-# the experiment 3/4/5 style, annotated with the naive h-flip (premature prune)
-# versus the drift judge's actual verdict (protect-then-keep).
+# Plot 3 — the blocking case with the CONVERGED P0, drawn in the experiment 3/4/5
+# style (weights + indicators), annotated with the naive h-flip (premature prune)
+# versus the drift judge's actual verdict (protect-then-keep). The delta-w traces
+# with different gammas are dropped.
 # ---------------------------------------------------------------------------
-feats, y, w_est0, correct = make_candidate('blocked', MAX_EPISODE_STEPS, seed=7)
+feats, y, w_est0 = make_blocking_problem(MAX_EPISODE_STEPS, seed=7)
 final = run_episode(P0_final, feats, y, w_est0, record=True)
 hist = final['hist']
 n_show = len(hist['w1'])
 plot_steps = np.arange(1, n_show + 1)
 w_opt = optimal_weight(W_TEACHER, 0.0)            # clean candidate solo optimum == 0.5
-
-# naive IDBD3 indicator (as plotted before: -h) and its first premature flip
 neg_h = -hist['h_idbd3']
-naive_flip = None
-for i in range(200, n_show):
-    if neg_h[i - 1] > 0.0 and neg_h[i] <= 0.0:
-        naive_flip = i + 1
-        break
 
-fig, ax = plt.subplots(figsize=(11, 6.0))
+fig, ax = plt.subplots(figsize=(11, 5.4))
 
-# --- right axis: normalized indicators (same colours / convention as before) ---
+# --- right axis: the two indicators (normalized to unit peak, -h convention) ---
 ax2 = ax.twinx()
-for k, d in enumerate(TRACE_DECAYS):
-    ax2.plot(plot_steps, _norm_peak(hist['dw_trace'][:, k]),
-             color=DW_COLORS[k], lw=1.0, alpha=0.5,
-             label=f'$\\Delta w$ trace ($\\beta = {d}$)')
-ax2.plot(plot_steps, _norm_peak(neg_h), color=H_IDBD3_COLOR, lw=1.3, alpha=0.65,
+ax2.plot(plot_steps, _norm_peak(neg_h), color=H_IDBD3_COLOR, lw=1.5, alpha=0.8,
          label='$-h$ (IDBD3, naive)')
-ax2.plot(plot_steps, _norm_peak(-hist['u']), color='#9923DC', lw=1.3, alpha=0.6,
+ax2.plot(plot_steps, _norm_peak(-hist['u']), color='#9923DC', lw=1.5, alpha=0.8,
          label='$-u$ (drift-judge fast trace)')
 ax2.axhline(0.0, color='0.5', lw=0.6, alpha=0.3)
 ax2.set_ylim(-1.15, 1.15)
@@ -461,12 +424,11 @@ ax.set_zorder(ax2.get_zorder() + 1)
 ax.patch.set_visible(False)
 
 # annotations: naive premature prune vs drift-judge verdict
-if naive_flip is not None:
-    ax.axvline(naive_flip, color=H_IDBD3_COLOR, ls=(0, (4, 3)), lw=1.4, alpha=0.8,
-               zorder=11, label='naive $h$-flip (would prune)')
-verdict_x = final['verdict_step'] + 1
-ax.axvline(verdict_x, color='#029999', ls='-', lw=1.8, alpha=0.85, zorder=11,
-           label=f'drift-judge verdict → {final["decision"].upper()}')
+if final['naive_flip_step'] >= 0:
+    ax.axvline(final['naive_flip_step'] + 1, color=H_IDBD3_COLOR, ls=(0, (4, 3)),
+               lw=1.4, alpha=0.85, zorder=11, label='naive $h$-flip (would prune)')
+ax.axvline(final['verdict_step'] + 1, color='#029999', ls='-', lw=1.8, alpha=0.85,
+           zorder=11, label=f'drift-judge verdict → {final["decision"].upper()}')
 for (t_ev, kind_ev) in hist['events']:
     if kind_ev in ('veto', 'inconclusive'):
         ax.axvline(t_ev + 1, color='0.6', ls=(0, (1, 3)), lw=0.9, alpha=0.5, zorder=9)
@@ -479,7 +441,7 @@ hL, lL = ax.get_legend_handles_labels()
 hR, lR = ax2.get_legend_handles_labels()
 fig.legend(hL + hR, lL + lR, loc='lower center', ncol=4, fontsize=10,
            bbox_to_anchor=(0.5, -0.02))
-fig.tight_layout(rect=(0, 0.14, 1, 1.0))
+fig.tight_layout(rect=(0, 0.10, 1, 1.0))
 fig.savefig('exp6_final_blocking_converged.png', dpi=130, bbox_inches='tight')
 
 print('saved: exp6_patience_over_time.png, exp6_prunes_keeps_over_time.png, '
