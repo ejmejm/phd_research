@@ -167,6 +167,72 @@ def optax_idbd(
     return base.GradientTransformation(init_fn, update_fn)
 
 
+def optax_idbd3(
+    meta_lr: float = 0.005,
+    init_lr: float = 0.01,
+    version: str = 'prediction_grads', # {prediction_grads, loss_grads}
+) -> base.GradientTransformation:
+    """Incremental Delta-Bar-Delta 3 optimizer.
+    
+    This is an implementation of the IDBD3 algorithm adapted for deep neural networks.
+    Instead of working with input features directly, it uses gradients with respect
+    to parameters and maintains separate learning rates for each parameter.
+    
+    Args:
+        params: Iterable of parameters to optimize
+        meta_lr: Meta learning rate (default: 0.01)
+        init_lr: Initial learning rate (default: 0.01)
+        version: Version of IDBD to use (default: prediction_grads)
+    
+    Returns:
+        A :class:`optax.GradientTransformation` object.
+    """
+
+    def init_fn(params):
+        assert version in ['prediction_grads', 'loss_grads'], f"Invalid IDBD version: {version}!"
+        
+        init_beta = jnp.log(init_lr)
+        beta = jax.tree.map(lambda x: jnp.full_like(x, init_beta), params)
+        h = jax.tree.map(lambda x: jnp.zeros_like(x), params)
+
+        return IDBDState(init_beta=init_beta, beta=beta, h=h, v=None)
+
+    def update_fn(updates, state, params):
+        loss_grads, prediction_grads = updates
+        init_beta, beta, h, _ = state
+        
+        # Try square of loss grads version of this as fisher approximation of hessian
+        if version == 'loss_grads':
+            h_decay_term = jax.tree.map(jnp.square, loss_grads)
+        elif version == 'prediction_grads':
+            h_decay_term = jax.tree.map(jnp.square, prediction_grads)
+        
+        beta = jax.tree.map(
+            lambda b_i, g_i, h_i: b_i + meta_lr * g_i * h_i,
+            beta, prediction_grads, h,
+        )
+        alpha = jax.tree.map(jnp.exp, beta)
+        
+        # Update gradient trace (h)
+        h = jax.tree.map(
+            lambda h_i, a_i, g_i, d_i: h_i * jnp.clip(1 - a_i * d_i, min=0) + g_i,
+            h, alpha, loss_grads, h_decay_term,
+        )
+        
+        # Compute parameter updates
+        param_updates = jax.tree.map(
+            lambda a_i, g_i: -a_i * g_i,
+            alpha, loss_grads,
+        )
+        
+        # Update state
+        state = IDBDState(init_beta=init_beta, beta=beta, h=h, v=None)
+        
+        return param_updates, state
+
+    return base.GradientTransformation(init_fn, update_fn)
+
+
 def categorical_optax_idbd(
     meta_lr: float = 0.005,
     init_lr: float = 0.01,
