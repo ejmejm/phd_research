@@ -7,6 +7,10 @@ than the bookkeeping. Two groups of helpers:
   curve plus a scalar final loss, logged to the active MLflow run in one batched call.
 * ``summarize_runs`` / ``plot_sensitivity`` / ``plot_learning_curve`` — turn the
   downloaded ``config_dfs`` / ``run_dfs`` into the notebook's figures.
+
+Uncertainty bands are confidence intervals on the mean over seeds, derived at plot time from
+the logged across-seed std by ``ci_halfwidth`` — nothing CI-specific is logged, so the level
+(``CI_LEVEL``) can change without re-running any experiment.
 """
 import math
 
@@ -15,8 +19,26 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import mlflow
 from mlflow.entities import Metric
+from scipy import stats
 
 from phd.research_utils.analysis.analysis_utils import get_color_palette
+
+
+CI_LEVEL = 0.95   # confidence level of the band drawn by `plot_learning_curve`
+
+
+def ci_halfwidth(std, n_seeds, level=CI_LEVEL):
+    """Half-width of a `level` CI on the mean, from the *population* std across seeds.
+
+    ``std`` is the across-seed std with ``ddof=0`` (what numpy's ``.std()`` returns and what
+    ``log_run`` computes), so the sample std is ``std * sqrt(n / (n - 1))`` and the standard
+    error of the mean is that divided by ``sqrt(n)`` — i.e. ``std / sqrt(n - 1)``. Uses the
+    t distribution, which matters at these seed counts (``t = 2.045`` vs ``z = 1.96`` at n=30).
+    """
+    if n_seeds < 2:
+        return np.zeros_like(np.asarray(std, dtype=float))
+    t = float(stats.t.ppf(0.5 + level / 2.0, n_seeds - 1))
+    return t * np.asarray(std, dtype=float) / math.sqrt(n_seeds - 1)
 
 
 # --------------------------------------------------------------------------- logging
@@ -29,6 +51,9 @@ def log_run(losses, n_log_points=250, final_fraction=0.05):
     ``final_fraction`` of steps. Non-finite values (divergence) are treated as NaN so they
     propagate through the means; a fully-diverged run reports a large finite sentinel so
     Optuna always receives a number.
+
+    Only the mean and the across-seed std are logged; confidence intervals are derived from
+    them at plot time by `ci_halfwidth`, so changing the CI level needs no re-run.
     """
     losses = np.asarray(losses, dtype=np.float64)
     losses[~np.isfinite(losses)] = np.nan   # treat divergence (inf) as NaN
@@ -213,14 +238,23 @@ def plot_sensitivity(summary, sweep_vars, title):
         plt.tight_layout()
 
 
-def plot_learning_curve(runs, sweep_name, label=None, color=None, ax=None):
-    """Binned mean learning curve with a ±1 std band (std across seeds, as logged)."""
+def plot_learning_curve(runs, sweep_name, label=None, color=None, ax=None, n_seeds=None,
+                        show_ci=True):
+    """Binned mean learning curve with an uncertainty band.
+
+    With ``n_seeds`` given the band is a `CI_LEVEL` confidence interval on the mean over
+    seeds, computed from the logged across-seed std by `ci_halfwidth`; without it the band
+    falls back to ±1 std (the across-seed spread). Pass ``show_ci=False`` for no band at
+    all — useful when several curves share an axis and overlapping bands hide the means.
+    """
     ax = ax or plt.gca()
     rdf = runs[sweep_name].dropna(subset=['loss'])
     rdf = rdf.groupby('step').agg(loss=('loss', 'mean'), loss_std=('loss_std', 'mean')).reset_index()
     rdf = rdf.sort_values('step')
     steps, mean, std = rdf['step'].values, rdf['loss'].values, rdf['loss_std'].values
+    band = ci_halfwidth(std, n_seeds) if n_seeds is not None else std
     ax.plot(steps, mean, color=color, label=label or sweep_name)
-    ax.fill_between(steps, mean - std, mean + std, color=color, alpha=0.2)
+    if show_ci:
+        ax.fill_between(steps, mean - band, mean + band, color=color, alpha=0.2)
     ax.grid(True, alpha=0.4)
     ax.set_xlabel('step'); ax.set_ylabel('loss')
