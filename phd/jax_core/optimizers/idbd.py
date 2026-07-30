@@ -28,15 +28,15 @@ def optax_idbd(
     step_size_decay: float = 0.0,
     autostep: bool = False,
     tau: float = 1e4,
-    version: str = 'prediction_grads', # {prediction_grads, loss_grads}
+    version: str = 'prediction_grads', # {prediction_grads, loss_grads, squared_inputs}
     shadow_weight_threshold_factor: float = 0.0,
 ) -> base.GradientTransformation:
     """Incremental Delta-Bar-Delta optimizer.
-    
+
     This is an implementation of the IDBD algorithm adapted for deep neural networks.
     Instead of working with input features directly, it uses gradients with respect
     to parameters and maintains separate learning rates for each parameter.
-    
+
     Args:
         params: Iterable of parameters to optimize
         meta_lr: Meta learning rate (default: 0.01)
@@ -45,18 +45,28 @@ def optax_idbd(
         step_size_decay: Step size decay factor (default: 0.0)
         autostep: Whether to use autostep (default: False)
         tau: Tau parameter for autostep (default: 1e4)
-        version: Version of IDBD to use (default: prediction_grads)
+        version: Which approximation of the curvature term to use when decaying the gradient
+            trace `h`. All versions share the same update; they differ only in `h_decay_term`:
+            - `prediction_grads`: squared gradient of the prediction wrt each weight. Drops the
+              hessian term entirely, so it is the network-wide approximation.
+            - `loss_grads`: squared loss gradient (a Fisher-style approximation).
+            - `squared_inputs`: squared value of each weight's *source unit* — network inputs for
+              first-layer weights, hidden-unit values for later layers. This treats every layer as
+              its own independent linear problem, which is what linear IDBD/Autostep is actually
+              derived for. Requires the caller to pass `param_inputs` (see `update_fn`).
+            (default: prediction_grads)
         shadow_weight_threshold_factor: When a step-size is less than this value times the initial step-size
             of a given weight, then the step-size will be treated as zero. Only applicable when optimizer is idbd.
-    
+
     Returns:
         A :class:`optax.GradientTransformation` object.
     """
 
     def init_fn(params):
         assert autostep or step_size_decay == 0.0, "Step size decay is only supported with autostep!"
-        assert version in ['prediction_grads', 'loss_grads'], f"Invalid IDBD version: {version}!"
-        
+        assert version in ['prediction_grads', 'loss_grads', 'squared_inputs'], \
+            f"Invalid IDBD version: {version}!"
+
         if step_size_decay != 0.0:
             raise NotImplementedError("Step-size decay is not implemented with JAX!")
         
@@ -71,7 +81,9 @@ def optax_idbd(
             assert n_biases == 0, "AutoStep optimizer does not support biases!"
             assert n_weights > 0, "No valid weight parameters found!"
 
-            if n_weights > 1:
+            # `squared_inputs` treats every layer as its own independent linear problem, so
+            # multiple weight matrices are the intended use of that mode rather than a hazard.
+            if n_weights > 1 and version != 'squared_inputs':
                 logger.warning(
                     "Found multiple sets of weights, but AutoStep does not support non-linear  "
                     "layer structures. If the weights provided to AutoStep are stacked and not "
@@ -89,15 +101,43 @@ def optax_idbd(
         return IDBDState(init_beta=init_beta, beta=beta, h=h, v=v)
 
     def update_fn(updates, state, params):
-        loss_grads, prediction_grads = updates
+        """
+        Args:
+            updates: Either `(loss_grads, prediction_grads)` or, for `version='squared_inputs'`,
+                `(loss_grads, prediction_grads, param_inputs)`. `param_inputs` is a tree matching
+                `params` whose leaves hold the value of each weight's source unit. A leaf may be
+                shaped `(1, in_features)` and broadcast over the output-row axis, since every
+                op it feeds is elementwise or an `axis=-1` reduction. `prediction_grads` may be
+                `None` whenever it is unused (`autostep=True` and `version != 'prediction_grads'`).
+            state: Current `IDBDState`
+            params: Current parameters (used for weight decay)
+        """
+        if len(updates) == 3:
+            loss_grads, prediction_grads, param_inputs = updates
+        else:
+            loss_grads, prediction_grads = updates
+            param_inputs = None
         init_beta, beta, h, v = state
-        
+
+        if not autostep:
+            assert prediction_grads is not None, \
+                "IDBD without autostep drives its meta-update with prediction_grads, so they " \
+                "may not be None!"
+
         # Try square of loss grads version of this as fisher approximation of hessian
         if version == 'loss_grads':
             h_decay_term = jax.tree.map(jnp.square, loss_grads)
         elif version == 'prediction_grads':
+            assert prediction_grads is not None, \
+                "version='prediction_grads' requires prediction_grads!"
             h_decay_term = jax.tree.map(jnp.square, prediction_grads)
-        
+        elif version == 'squared_inputs':
+            assert param_inputs is not None, \
+                "version='squared_inputs' requires updates=(loss_grads, prediction_grads, param_inputs)!"
+            h_decay_term = jax.tree.map(jnp.square, param_inputs)
+        else:
+            raise ValueError(f"Invalid IDBD version: {version}!")
+
         if autostep:
             def _autostep_update(beta, h, v, loss_grads, h_decay_term):
                 alpha = jnp.exp(beta)

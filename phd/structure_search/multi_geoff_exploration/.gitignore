@@ -1,0 +1,4 @@
+# Local experiment stores and caches written by the notebooks. `output/` is already covered by
+# the repo-level .gitignore; these are not, and the cached trace archives run to tens of MB.
+data/
+sweep_output/
