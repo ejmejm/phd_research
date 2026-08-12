@@ -1,0 +1,86 @@
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+mlflow: true
+wandb: false
+comet_ml: false
+
+# SET at 32 parallel MNIST tasks, non-stationary. Carries forward the single
+# winning configuration from `set_analysis_v2` at 8 tasks (init_mode=epsilon,
+# prune_metric=utility, zeta=0.01, H at the 62-weights-per-unit point) instead
+# of re-sweeping the axes that study already settled. The `set_static` arm is
+# the same config with zeta=0 (topology frozen at SET's ER init), which beat
+# random_sparse at 8 tasks and so replaces it as the baseline here.
+#
+# Everything is defined on a SAMPLE axis (see `samples` below) and the
+# step-based knobs are derived by dividing through by batch_size, so changing
+# `train.batch_size` changes *only* how many optimizer updates the run gets --
+# the data stream, the drift schedule and the evolve schedule are identical in
+# sample-space at every batch size. That makes the batch-size study a clean
+# reading of "same data, fewer but better-estimated updates".
+
+# --- Sample timeline. The single source of truth; nothing below is in steps. ---
+samples:
+  total: 512_000            # samples seen (= steps at batch_size=1)
+  per_log: 1024             # samples between metric logs -> 500 log points at any B
+  per_evolve: 512           # samples between SET prune/regrow events
+  per_task_permute: 2048    # samples between re-permutations OF A GIVEN task
+  # utility-trace EMA horizon: decay per *sample*, compounded over the batch
+  # so the trace looks back over the same stretch of data at every batch size.
+  utility_decay_per_sample: 0.998
+
+task:
+  n_tasks: 32
+  # Each event re-permutes one randomly chosen task, so a given task is hit
+  # every permute_period * n_tasks steps. Solving for the target sample
+  # interval: period = per_task_permute / (n_tasks * batch_size). At n=32, B=1
+  # this is 64 -> 2048 samples/task, matching set_analysis_v2's 2000 at n=8.
+  permute_period: ${eval:${samples.per_task_permute} // ${task.n_tasks} // ${train.batch_size}}
+  standardize: true
+
+# Width at fixed budget. `target_hidden_units` does not set capacity (the
+# connection budget does) -- it sets how thinly the budget is spread, i.e. the
+# per-unit fan-in. 48 units/task at 4*(I+O) budget reproduces the 8-task winner
+# exactly: epsilon ~= 3.57 and ~62 W1 weights per unit at every n_tasks.
+target_hidden_units: ${eval:48 * ${task.n_tasks}}
+
+model:
+  activation: leaky_relu
+  fan_in_safety_factor: 2.0
+
+optimizer:
+  name: sgd
+  learning_rate: 1e-3       # overridden by sweep
+  weight_decay: 0
+
+set:
+  enabled: true
+  init_mode: epsilon        # 8-task winner: beat uniform_p at every LR
+  prune_metric: utility     # 8-task winner: 9.26 vs 15.41 for magnitude
+  zeta: 0.01                # 8-task winner (0.05 within noise; 0 is far worse)
+
+  # 4x (input_dim + output_dim) = 4 * n_tasks * 794, which holds the per-task
+  # connection budget fixed as n_tasks grows. At n=32: 101,632 weights, the
+  # 8-task budget (25,408) scaled by 4.
+  connection_budget: ${eval:4 * ${task.n_tasks} * 794}
+  # Inverts the hidden-width derivation in train_set.py:_derive_sizes so the
+  # realized hidden width lands exactly on target_hidden_units. The +0.5
+  # absorbs that function's floor().
+  epsilon: "${eval:'${set.connection_budget} / (2*${target_hidden_units} + 0.5 + ${task.n_tasks}*794)'}"
+
+  evolve_frequency: ${eval:${samples.per_evolve} // ${train.batch_size}}
+  utility_decay: ${eval:${samples.utility_decay_per_sample} ** ${train.batch_size}}
+
+train:
+  # The only knob a sweep needs to touch for the batch-size study: total_steps,
+  # log_freq, evolve_frequency, permute_period and utility_decay all follow.
+  # Keep to powers of two so log_freq stays divisible by evolve_frequency
+  # (asserted in run_experiment) -- B in {1,4,16,64} all hold.
+  batch_size: 1
+  total_steps: ${eval:${samples.total} // ${train.batch_size}}
+  log_freq: ${eval:${samples.per_log} // ${train.batch_size}}
+  eval_freq: 0              # non-stationary: no held-out split, all data trains
+
+seed: [0, 1, 2, 3, 4]
+log_individual_seeds: true

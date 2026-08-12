@@ -1,0 +1,47 @@
+name: set32_batch_set
+project: set-32task-sweep
+command: python experiments/train_set.py --config-path=../conf/sweeps/set_32task --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  # Comet logging backend (base_set.yaml defaults to mlflow).
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  # Batch size at a FIXED SAMPLE BUDGET. base_set.yaml derives total_steps,
+  # log_freq, evolve_frequency, permute_period and utility_decay from
+  # batch_size, so all four cells below see the same 512,000-sample stream with
+  # the same drift and evolve schedule -- only the number of optimizer updates
+  # changes (512k / 128k / 32k / 8k). Plot against SAMPLES, not steps.
+  #
+  #   B   steps  log_freq  evolve_freq  permute_period  utility_decay
+  #   1  512000      1024          512              64        0.99800
+  #   4  128000       256          128              16        0.99202
+  #  16   32000        64           32               4        0.96848
+  #  64    8000        16            8               1        0.87974
+  #
+  # Powers of two only: log_freq must stay divisible by evolve_frequency (see
+  # the assert in train_set.py:run_experiment). 64 is the ceiling -- at B=128
+  # permute_period would round to 0 and the drift would switch off.
+  train.batch_size: [1, 4, 16, 64]
+
+  # Larger batches give a lower-variance gradient and so usually tolerate (and
+  # want) a larger step, and there are 1/B as many updates to cover the same
+  # data. So the LR grid is swept at every batch size rather than reusing the
+  # B=1 winner, shifted one octave up from 01_main to leave room at the top.
+  # Re-centre this on 01_main's winner before launching if that came out at 2^-7.
+  optimizer.learning_rate:
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+    - "${eval:2**-4}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds.
+  # 4 batch_size x 3 LR = 12 trials.
+  seed:
+    value: [0, 1, 2, 3, 4]

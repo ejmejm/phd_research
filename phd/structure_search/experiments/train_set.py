@@ -492,6 +492,24 @@ def set_evolve(state: TrainState, *, zeta: float, prune_metric: str,
 # Step
 # ---------------------------------------------------------------------------
 
+def _w1_source_magnitude(images, input_indices):
+    """Batch-mean ``|x_i|`` for each W1 slot, as a (units, conns) array.
+
+    ``input_indices[u, c] = i`` is the input index feeding slot (u, c), or -1
+    for an inactive slot (which contributes 0).
+
+    The batch is reduced *before* the per-slot gather. That is exact -- abs and
+    mean both commute with a gather, so every slot still receives the mean of
+    the same B values -- and it keeps the intermediate at (units, conns)
+    instead of (B, units, conns). Only the trace is affected; the sparse
+    forward pass gathers per-slot inputs itself and is unavoidably B-sized.
+    """
+    active = input_indices >= 0
+    safe_idx = jnp.where(active, input_indices, 0)
+    x_abs_mean = jnp.mean(jnp.abs(images), axis=0)                      # (I,)
+    return jnp.where(active, x_abs_mean[safe_idx], 0.0)                # (U, C)
+
+
 def train_step(state: TrainState, data, *, num_classes: int, n_tasks: int,
                utility_decay: float):
     images, labels = data
@@ -518,12 +536,7 @@ def train_step(state: TrainState, data, *, num_classes: int, n_tasks: int,
     max_units = network.max_units_per_layer
 
     # W1 contribution: |x_i| * |w_{u,c}| where i = input_indices[u, c].
-    input_indices = network.input_indices[HIDDEN_LAYER]                # (U, C)
-    active_w1 = input_indices >= 0
-    safe_idx = jnp.where(active_w1, input_indices, 0)
-    x_per_slot = images[:, safe_idx]                                   # (B, U, C)
-    x_per_slot_abs = jnp.where(active_w1, jnp.abs(x_per_slot), 0.0)
-    x_mag = jnp.mean(x_per_slot_abs, axis=0)                           # (U, C)
+    x_mag = _w1_source_magnitude(images, network.input_indices[HIDDEN_LAYER])  # (U, C)
     w1_abs = jnp.abs(network.weights[HIDDEN_LAYER])                    # (U, C)
     contrib_w1 = x_mag * w1_abs
     new_util_w1 = state.util_w1.at[HIDDEN_LAYER].set(

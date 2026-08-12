@@ -1,0 +1,41 @@
+name: set32_main_set_static
+project: set-32task-sweep
+command: python experiments/train_set.py --config-path=../conf/sweeps/set_32task --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  # Comet logging backend (base_set.yaml defaults to mlflow).
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  # The baseline: identical to set32_main_set EXCEPT zeta=0, so the evolve step
+  # prunes and regrows nothing and the network stays frozen at its initial ER
+  # topology. This is the static-sparsity control -- at 8 tasks it beat
+  # random_sparse outright (13.84 vs worse), so it replaces random_sparse as
+  # the comparison here rather than running a third arm.
+  #
+  # zeta is the *only* difference from set32_main_set, so the two could be one
+  # grid (`set.zeta: [0.01, 0]`). Kept separate to match the set_analysis_v2
+  # layout and to keep one sweep ID per arm, which makes them independently
+  # launchable and re-runnable.
+  #
+  # prune_metric and utility_decay are no-ops at zeta=0 (they only choose WHICH
+  # weights to drop, and none are dropped), so they are left at the base values
+  # rather than swept.
+  set.zeta: 0
+
+  optimizer.learning_rate:
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds.
+  # 3 LR = 3 trials.
+  seed:
+    value: [0, 1, 2, 3, 4]

@@ -1,0 +1,32 @@
+name: set32_main_set
+project: set-32task-sweep
+command: python experiments/train_set.py --config-path=../conf/sweeps/set_32task --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  # Comet logging backend (base_set.yaml defaults to mlflow).
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  # Everything except the learning rate is inherited from base_set.yaml, which
+  # carries the 8-task winner forward: n_tasks=32, budget=101,632, H=1536,
+  # init_mode=epsilon, prune_metric=utility, zeta=0.01, batch_size=1.
+  #
+  # LR is the one axis. At 8 tasks the winner sat at the top of the swept range
+  # (2^-6 of {2^-10..2^-6}), so this grid is shifted up an octave to put the
+  # optimum inside it rather than on the edge.
+  optimizer.learning_rate:
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds.
+  # 3 LR = 3 trials.
+  seed:
+    value: [0, 1, 2, 3, 4]

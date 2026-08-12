@@ -1,0 +1,37 @@
+name: set32_batch_set_static
+project: set-32task-sweep
+command: python experiments/train_set.py --config-path=../conf/sweeps/set_32task --config-name=base_set
+algorithm: grid
+
+spec:
+  metric: asymptotic_loss
+  objective: minimize
+  retryAssignLimit: 4
+
+parameters:
+  # Comet logging backend (base_set.yaml defaults to mlflow).
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  # Same batch-size x LR grid as set32_batch_set, with zeta=0 (frozen topology).
+  # Running the baseline over the same grid is what makes the batch-size result
+  # interpretable: if large batches hurt SET, this arm says whether that is
+  # about the *evolution* losing update resolution or just about SGD on a
+  # non-stationary stream getting fewer updates.
+  #
+  # As in 01_main, zeta is the only difference from the SET arm; kept as its own
+  # sweep so each arm has its own ID and can be launched or re-run alone.
+  set.zeta: 0
+
+  train.batch_size: [1, 4, 16, 64]
+
+  optimizer.learning_rate:
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+    - "${eval:2**-4}"
+
+  # 5 seeds atomic: one trial vmaps all 5 seeds.
+  # 4 batch_size x 3 LR = 12 trials.
+  seed:
+    value: [0, 1, 2, 3, 4]
