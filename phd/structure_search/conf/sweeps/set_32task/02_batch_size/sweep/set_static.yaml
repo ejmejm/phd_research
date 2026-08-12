@@ -1,4 +1,4 @@
-name: set32_batch_set_static
+name: set32_batch_v2_set_static
 project: set-32task-sweep
 command: python experiments/train_set.py --config-path=../conf/sweeps/set_32task --config-name=base_set
 algorithm: grid
@@ -27,14 +27,14 @@ parameters:
   train.batch_size: [1, 4, 16, 64]
 
   # Same grid as set32_batch_set: anchored at 01_main's winner (2^-6, which won
-  # for this arm too) and running up to the sqrt-scaling prediction for B=64.
+  # for this arm too), two octaves up. See the note there about B=64's optimum
+  # possibly sitting above this ceiling.
   optimizer.learning_rate:
     - "${eval:2**-6}"
     - "${eval:2**-5}"
     - "${eval:2**-4}"
-    - "${eval:2**-3}"
 
   # 5 seeds atomic: one trial vmaps all 5 seeds.
-  # 4 batch_size x 4 LR = 16 trials.
+  # 4 batch_size x 3 LR = 12 trials.
   seed:
     value: [0, 1, 2, 3, 4]

@@ -83,17 +83,21 @@ relative to `experiments/`. Each trial vmaps 5 seeds (0–4).
 |--------|----------|--------|------|
 | `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | 3 LR |
 | `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 3 LR, ζ=0 |
-| `02_batch_size/sweep/set` | `0e0e4c42982043699da8ac33778491bd` | 16 | 4 B × 4 LR |
-| `02_batch_size/sweep/set_static` | `480e38591b4040a684f133765e815b0e` | 16 | 4 B × 4 LR, ζ=0 |
+| `02_batch_size/sweep/set` | `054effb1de4c45539d5dbe8a7c687c02` | 12 | 4 B × 3 LR |
+| `02_batch_size/sweep/set_static` | `0867cad50b464fd8b3ec63cab3fc3180` | 12 | 4 B × 3 LR, ζ=0 |
 
 Resource plan and sbatch commands are under [Sweep Runs](#sweep-runs) below.
 
 `01_main` picked **lr = 2⁻⁶ for both arms**, interior to its
 {2⁻⁷, 2⁻⁶, 2⁻⁵} grid — so no extension was needed. `02_batch_size` is anchored
-there and runs three octaves up, {2⁻⁶ … 2⁻³}: both the lower gradient variance of
-a large batch and its 1/B update budget push the optimum up, never down, so 2⁻⁶
-is the floor; and sqrt-scaling puts B=64's optimum at 8× the B=1 step, i.e. 2⁻³,
-the top of the grid. The optimum should therefore be interior at both ends.
+there and runs two octaves up, {2⁻⁶, 2⁻⁵, 2⁻⁴}: both the lower gradient variance
+of a large batch and its 1/B update budget push the optimum up, never down, so
+2⁻⁶ is the floor.
+
+⚠️ sqrt-scaling puts B=64's optimum at 8× the B=1 step, i.e. 2⁻³ — one octave
+*above* this ceiling. If B=16 or B=64 bottoms out at 2⁻⁴, its optimum is outside
+the grid and that cell is only a lower bound on how well the batch can do;
+extend before concluding that large batches hurt.
 
 Because LR is re-swept at every batch size (B=1 included), `01_main`'s winner
 only sets where the grid is centred — the batch study re-measures its own B=1
@@ -142,14 +146,20 @@ and one 0.92 h trial fits it with 3x headroom.
 |--------|----------|--------|-----------|-----------|-----------|----------|----------|
 | `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
 | `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
-| `02_batch_size/sweep/set` | `0e0e4c42982043699da8ac33778491bd` | 16 | 7–155 | 0.32–0.92 | 11.8 | 3h | 16 |
-| `02_batch_size/sweep/set_static` | `480e38591b4040a684f133765e815b0e` | 16 | 7–155 | 0.32–0.92 | 11.8 | 3h | 16 |
+| `02_batch_size/sweep/set` | `054effb1de4c45539d5dbe8a7c687c02` | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
+| `02_batch_size/sweep/set_static` | `0867cad50b464fd8b3ec63cab3fc3180` | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
 
-6 jobs for `01_main`, 32 for `02_batch_size` — inside the 50-job cap.
+6 jobs for `01_main`, 24 for `02_batch_size` — inside the 50-job cap.
 
 Per-trial MIG times for `02_batch_size`: B=1 0.92 h, B=4 0.51 h, B=16 0.35 h,
 B=64 0.32 h. One worker per trial puts its wall-clock at ~0.92 h too, set by the
 slowest (B=1) cells.
+
+The batch sweeps are named `set32_batch_v2_*`, not `set32_batch_*`: an earlier
+4-LR version of this grid was created and briefly ran before being cancelled, and
+its partial trials are still logged in the project under the old name. The rename
+keeps them out of the analysis entirely rather than relying on dedup to hide
+them — `analysis/set_32task` selects on `sweep_name`.
 
 A larger MIG slice or a full H100 would **not** speed up the B=1 trials. Each
 step reads only ~170 MB across the 5 vmapped seeds; at the measured 277 steps/s
@@ -164,9 +174,9 @@ for ID in 2ce99280dab74dd29c5b0c71d92e7990 43dd6aa99fe74da698e8accb771c0806; do
     launch_comet_agent.sbatch -s $ID -p $HOME/scratch/phd_research/phd/structure_search
 done
 
-# --- 02_batch_size: 32 jobs, one trial each -> ~0.92 h (set by the B=1 cells) ---
-for ID in 0e0e4c42982043699da8ac33778491bd 480e38591b4040a684f133765e815b0e; do
-  sbatch --array=1-16 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=03:00:00 \
+# --- 02_batch_size: 24 jobs, one trial each -> ~0.92 h (set by the B=1 cells) ---
+for ID in 054effb1de4c45539d5dbe8a7c687c02 0867cad50b464fd8b3ec63cab3fc3180; do
+  sbatch --array=1-12 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=03:00:00 \
     launch_comet_agent.sbatch -s $ID -p $HOME/scratch/phd_research/phd/structure_search
 done
 ```

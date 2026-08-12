@@ -1,4 +1,4 @@
-name: set32_batch_set
+name: set32_batch_v2_set
 project: set-32task-sweep
 command: python experiments/train_set.py --config-path=../conf/sweeps/set_32task --config-name=base_set
 algorithm: grid
@@ -33,23 +33,21 @@ parameters:
 
   # LR is swept at every batch size rather than reusing the B=1 winner -- whether
   # the best step size moves with the batch is half the question. The grid is
-  # anchored at 01_main's winner (2^-6, for both arms) and runs three octaves up
-  # from there:
+  # anchored at 01_main's winner (2^-6, for both arms) and runs two octaves up.
+  # Larger batches give a lower-variance gradient, so they tolerate a larger
+  # step; and with 1/B as many updates to track the same drift, they need one.
+  # Both effects push the optimum up, never down, so 2^-6 is the floor.
   #
-  #   - Larger batches give a lower-variance gradient, so they tolerate a larger
-  #     step; and with 1/B as many updates to track the same drift, they need
-  #     one. Both effects push the optimum up, never down, so 2^-6 is the floor.
-  #   - sqrt-scaling predicts B=64 wants 8x the B=1 step, i.e. 2^-3 -- exactly
-  #     the top of this grid. (Linear scaling would say 2^0, which would surely
-  #     diverge.) So the grid spans from the B=1 optimum to the largest step any
-  #     standard scaling rule predicts, leaving the optimum interior at both ends.
+  # NOTE: sqrt-scaling predicts B=64's optimum at 8x the B=1 step, i.e. 2^-3,
+  # one octave above this ceiling. If B=64 (or B=16) bottoms out at 2^-4, its
+  # optimum is outside the grid and that cell's result is a lower bound on how
+  # well the batch can do -- extend before concluding that large batches hurt.
   optimizer.learning_rate:
     - "${eval:2**-6}"
     - "${eval:2**-5}"
     - "${eval:2**-4}"
-    - "${eval:2**-3}"
 
   # 5 seeds atomic: one trial vmaps all 5 seeds.
-  # 4 batch_size x 4 LR = 16 trials.
+  # 4 batch_size x 3 LR = 12 trials.
   seed:
     value: [0, 1, 2, 3, 4]
