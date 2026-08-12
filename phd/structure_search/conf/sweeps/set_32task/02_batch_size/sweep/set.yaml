@@ -31,17 +31,25 @@ parameters:
   # permute_period would round to 0 and the drift would switch off.
   train.batch_size: [1, 4, 16, 64]
 
-  # Larger batches give a lower-variance gradient and so usually tolerate (and
-  # want) a larger step, and there are 1/B as many updates to cover the same
-  # data. So the LR grid is swept at every batch size rather than reusing the
-  # B=1 winner, shifted one octave up from 01_main to leave room at the top.
-  # Re-centre this on 01_main's winner before launching if that came out at 2^-7.
+  # LR is swept at every batch size rather than reusing the B=1 winner -- whether
+  # the best step size moves with the batch is half the question. The grid is
+  # anchored at 01_main's winner (2^-6, for both arms) and runs three octaves up
+  # from there:
+  #
+  #   - Larger batches give a lower-variance gradient, so they tolerate a larger
+  #     step; and with 1/B as many updates to track the same drift, they need
+  #     one. Both effects push the optimum up, never down, so 2^-6 is the floor.
+  #   - sqrt-scaling predicts B=64 wants 8x the B=1 step, i.e. 2^-3 -- exactly
+  #     the top of this grid. (Linear scaling would say 2^0, which would surely
+  #     diverge.) So the grid spans from the B=1 optimum to the largest step any
+  #     standard scaling rule predicts, leaving the optimum interior at both ends.
   optimizer.learning_rate:
     - "${eval:2**-6}"
     - "${eval:2**-5}"
     - "${eval:2**-4}"
+    - "${eval:2**-3}"
 
   # 5 seeds atomic: one trial vmaps all 5 seeds.
-  # 4 batch_size x 3 LR = 12 trials.
+  # 4 batch_size x 4 LR = 16 trials.
   seed:
     value: [0, 1, 2, 3, 4]

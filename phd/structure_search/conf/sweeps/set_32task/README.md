@@ -35,8 +35,8 @@ sets capacity, and H decides how thinly it is spread.
 
 **The one swept axis in `01_main` is the learning rate.** The 8-task winner sat
 at the top edge of its LR range (2⁻⁶ of {2⁻¹⁰..2⁻⁶}), so the grid here is shifted
-up an octave to {2⁻⁷, 2⁻⁶, 2⁻⁵}. If the minimum lands on 2⁻⁵ again, extend before
-trusting `02_batch_size`.
+up an octave to {2⁻⁷, 2⁻⁶, 2⁻⁵}. **Result: 2⁻⁶ for both arms** — interior, so no
+extension was needed and `02_batch_size` could be anchored on it.
 
 ## The sample timeline
 
@@ -83,27 +83,29 @@ relative to `experiments/`. Each trial vmaps 5 seeds (0–4).
 |--------|----------|--------|------|
 | `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | 3 LR |
 | `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 3 LR, ζ=0 |
-| `02_batch_size/sweep/set` | not yet created | 12 | 4 B × 3 LR |
-| `02_batch_size/sweep/set_static` | not yet created | 12 | 4 B × 3 LR, ζ=0 |
+| `02_batch_size/sweep/set` | `0e0e4c42982043699da8ac33778491bd` | 16 | 4 B × 4 LR |
+| `02_batch_size/sweep/set_static` | `480e38591b4040a684f133765e815b0e` | 16 | 4 B × 4 LR, ζ=0 |
 
 Resource plan and sbatch commands are under [Sweep Runs](#sweep-runs) below.
 
-`02_batch_size` is deliberately **not** created yet: its LR grid
-({2⁻⁶, 2⁻⁵, 2⁻⁴}) assumes `01_main` lands at 2⁻⁶ or 2⁻⁵. Read `01_main` first,
-re-centre the grid if the winner is 2⁻⁷, then:
+`01_main` picked **lr = 2⁻⁶ for both arms**, interior to its
+{2⁻⁷, 2⁻⁶, 2⁻⁵} grid — so no extension was needed. `02_batch_size` is anchored
+there and runs three octaves up, {2⁻⁶ … 2⁻³}: both the lower gradient variance of
+a large batch and its 1/B update budget push the optimum up, never down, so 2⁻⁶
+is the floor; and sqrt-scaling puts B=64's optimum at 8× the B=1 step, i.e. 2⁻³,
+the top of the grid. The optimum should therefore be interior at both ends.
 
-```bash
-comet_sweep --config \
-  conf/sweeps/set_32task/02_batch_size/sweep/set.yaml \
-  conf/sweeps/set_32task/02_batch_size/sweep/set_static.yaml
-```
+Because LR is re-swept at every batch size (B=1 included), `01_main`'s winner
+only sets where the grid is centred — the batch study re-measures its own B=1
+reference rather than inheriting one.
 
 ### Cost
 
 32 tasks is **far** more expensive per step than 8 was: `input_dim` goes 6272 →
 25088 and H goes 384 → 1536, so the dense `(output_dim, buffer_size)` =
-(320, 26624) output-weight matmul dominates, and it is memory-bound at B=1.
-Measured on the RTX 4080, n=32, 5-seed vmap:
+(320, 26624) output-weight matmul dominates. At B=1 it is *launch*-bound rather
+than bandwidth-bound (see [Sweep Runs](#sweep-runs)). Measured on the RTX 4080,
+n=32, 5-seed vmap:
 
 | B | steps/s | samples/s | steps for 512k samples | per trial (4080) | est. MIG |
 |---|---|---|---|---|---|
@@ -140,10 +142,10 @@ and one 0.92 h trial fits it with 3x headroom.
 |--------|----------|--------|-----------|-----------|-----------|----------|----------|
 | `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
 | `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
-| `02_batch_size/sweep/set` | not yet created | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
-| `02_batch_size/sweep/set_static` | not yet created | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
+| `02_batch_size/sweep/set` | `0e0e4c42982043699da8ac33778491bd` | 16 | 7–155 | 0.32–0.92 | 11.8 | 3h | 16 |
+| `02_batch_size/sweep/set_static` | `480e38591b4040a684f133765e815b0e` | 16 | 7–155 | 0.32–0.92 | 11.8 | 3h | 16 |
 
-6 jobs for `01_main` (24 more for `02_batch_size`) — inside the 50-job cap.
+6 jobs for `01_main`, 32 for `02_batch_size` — inside the 50-job cap.
 
 Per-trial MIG times for `02_batch_size`: B=1 0.92 h, B=4 0.51 h, B=16 0.35 h,
 B=64 0.32 h. One worker per trial puts its wall-clock at ~0.92 h too, set by the
@@ -162,9 +164,9 @@ for ID in 2ce99280dab74dd29c5b0c71d92e7990 43dd6aa99fe74da698e8accb771c0806; do
     launch_comet_agent.sbatch -s $ID -p $HOME/scratch/phd_research/phd/structure_search
 done
 
-# --- 02_batch_size, once its sweeps exist (fill in the IDs) ---
-for ID in <02_batch_size/sweep/set ID> <02_batch_size/sweep/set_static ID>; do
-  sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=03:00:00 \
+# --- 02_batch_size: 32 jobs, one trial each -> ~0.92 h (set by the B=1 cells) ---
+for ID in 0e0e4c42982043699da8ac33778491bd 480e38591b4040a684f133765e815b0e; do
+  sbatch --array=1-16 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=03:00:00 \
     launch_comet_agent.sbatch -s $ID -p $HOME/scratch/phd_research/phd/structure_search
 done
 ```
