@@ -84,6 +84,7 @@ relative to `experiments/`. Each trial vmaps 5 seeds (0–4).
 | `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | 3 LR |
 | `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 3 LR, ζ=0 |
 | `02_batch_size/sweep/set` | `054effb1de4c45539d5dbe8a7c687c02` | 12 | 4 B × 3 LR |
+| `02_batch_size/sweep/set` (2⁻³ extension) | `4f6f6bb5aca046b1bb4d8b37b1b823ff` | 4 | 4 B × 1 LR |
 | `02_batch_size/sweep/set_static` | `0867cad50b464fd8b3ec63cab3fc3180` | 12 | 4 B × 3 LR, ζ=0 |
 
 Resource plan and sbatch commands are under [Sweep Runs](#sweep-runs) below.
@@ -94,10 +95,17 @@ there and runs two octaves up, {2⁻⁶, 2⁻⁵, 2⁻⁴}: both the lower gradi
 of a large batch and its 1/B update budget push the optimum up, never down, so
 2⁻⁶ is the floor.
 
-⚠️ sqrt-scaling puts B=64's optimum at 8× the B=1 step, i.e. 2⁻³ — one octave
-*above* this ceiling. If B=16 or B=64 bottoms out at 2⁻⁴, its optimum is outside
-the grid and that cell is only a lower bound on how well the batch can do;
-extend before concluding that large batches hurt.
+sqrt-scaling puts B=64's optimum at 8× the B=1 step, i.e. 2⁻³ — one octave
+*above* that ceiling — and the large batches did indeed want the bigger step, so
+**2⁻³ was added afterwards** as an extension-only sweep
+(`4f6f6bb5aca046b1bb4d8b37b1b823ff`, 4 trials): `set.yaml` was temporarily
+reduced to that single LR, the sweep created, then the file restored to the full
+{2⁻⁶ … 2⁻³} list. Both sweeps share the `set32_batch_v2_set` name, so the
+analysis sees one 16-cell grid and nothing was recomputed.
+
+⚠️ Recreating `set.yaml` as it now stands would re-run all 16 cells. The SET arm
+is 16 cells; the **static arm is still only 12** ({2⁻⁶, 2⁻⁵, 2⁻⁴}), so the two
+arms no longer share an LR grid — check before comparing them at 2⁻³.
 
 Because LR is re-swept at every batch size (B=1 included), `01_main`'s winner
 only sets where the grid is centred — the batch study re-measures its own B=1
@@ -147,9 +155,10 @@ and one 0.92 h trial fits it with 3x headroom.
 | `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
 | `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
 | `02_batch_size/sweep/set` | `054effb1de4c45539d5dbe8a7c687c02` | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
+| `02_batch_size/sweep/set` (2⁻³ ext) | `4f6f6bb5aca046b1bb4d8b37b1b823ff` | 4 | 7–155 | 0.32–0.92 | 2.9 | 3h | 4 |
 | `02_batch_size/sweep/set_static` | `0867cad50b464fd8b3ec63cab3fc3180` | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
 
-6 jobs for `01_main`, 24 for `02_batch_size` — inside the 50-job cap.
+6 jobs for `01_main`, 24 for `02_batch_size` plus 4 for the 2⁻³ extension (job 19710589) — inside the 50-job cap.
 
 Per-trial MIG times for `02_batch_size`: B=1 0.92 h, B=4 0.51 h, B=16 0.35 h,
 B=64 0.32 h. One worker per trial puts its wall-clock at ~0.92 h too, set by the
@@ -173,6 +182,11 @@ for ID in 2ce99280dab74dd29c5b0c71d92e7990 43dd6aa99fe74da698e8accb771c0806; do
   sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=03:00:00 \
     launch_comet_agent.sbatch -s $ID -p $HOME/scratch/phd_research/phd/structure_search
 done
+
+# --- the 2^-3 extension to the SET arm (4 trials) ---
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=03:00:00 \
+  launch_comet_agent.sbatch -s 4f6f6bb5aca046b1bb4d8b37b1b823ff \
+  -p $HOME/scratch/phd_research/phd/structure_search
 
 # --- 02_batch_size: 24 jobs, one trial each -> ~0.92 h (set by the B=1 cells) ---
 for ID in 054effb1de4c45539d5dbe8a7c687c02 0867cad50b464fd8b3ec63cab3fc3180; do

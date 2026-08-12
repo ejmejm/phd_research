@@ -42,12 +42,19 @@ parameters:
   # one octave above this ceiling. If B=64 (or B=16) bottoms out at 2^-4, its
   # optimum is outside the grid and that cell's result is a lower bound on how
   # well the batch can do -- extend before concluding that large batches hurt.
+  # This is the full grid as analysed. It was NOT created in one shot: 2^-6..2^-4
+  # ran first (sweep 054effb1...), then 2^-3 was added as an extension-only sweep
+  # (4f6f6bb5..., this file temporarily reduced to that single value) once the
+  # large batches turned out to want a bigger step than the original ceiling.
+  # Both sweeps carry the same `name`, so the analysis sees one 16-cell grid.
+  # Recreating this file as-is would re-run all 16 cells.
   optimizer.learning_rate:
     - "${eval:2**-6}"
     - "${eval:2**-5}"
     - "${eval:2**-4}"
+    - "${eval:2**-3}"
 
   # 5 seeds atomic: one trial vmaps all 5 seeds.
-  # 4 batch_size x 3 LR = 12 trials.
+  # 4 batch_size x 4 LR = 16 trials (12 + 4 extension).
   seed:
     value: [0, 1, 2, 3, 4]
