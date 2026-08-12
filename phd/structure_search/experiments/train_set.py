@@ -60,11 +60,13 @@ from phd.structure_search.data import load_dataset, ParallelMNISTStream
 from phd.structure_search.dynamic_network import (
     DynamicNetwork, build_outgoing_indices, sync_outgoing_weights,
 )
+from phd.structure_search.metrics import (
+    DIVERGENCE_LOSS_THRESHOLD, finite_summary,
+)
 
 
 SCAN_UNROLL = 4
 HIDDEN_LAYER = 0  # single hidden layer (max_layers=1)
-DIVERGENCE_LOSS_THRESHOLD = 1e6  # stop training early if train loss exceeds this (or NaN/inf)
 
 
 # ---------------------------------------------------------------------------
@@ -1052,10 +1054,19 @@ def run_config(cfg: DictConfig) -> dict:
         summary['asymptotic_test_loss'] = float(np.mean(all_test_losses[-n_test_tail:]))
         summary['asymptotic_test_accuracy'] = float(np.mean(all_test_accs[-n_test_tail:]))
     elif eval_freq > 0:
-        # Diverged before the first test eval -- emit NaN so downstream tools
-        # (mlflow-sweeper's Optuna metric lookup) still find the key.
+        # Diverged before the first test eval -- emit the key so downstream
+        # tools (mlflow-sweeper's Optuna metric lookup) still find it.
         summary['asymptotic_test_loss'] = float('nan')
         summary['asymptotic_test_accuracy'] = float('nan')
+
+    # A diverged run stops early but is a completed measurement, not a failed
+    # job. Its loss is inf/nan, which a sweep backend cannot store as an
+    # objective, so the trial would register no result and be re-assigned --
+    # recomputing the same divergence until retryAssignLimit is exhausted.
+    # Substituting a finite sentinel lets it complete; `diverged` stays 1.0 and
+    # is what the analysis masks on.
+    summary = finite_summary(summary)
+
     print(f'Average loss: {summary["average_loss"]:.4f} | '
           f'Asymptotic loss: {summary["asymptotic_loss"]:.4f} | '
           f'Asymptotic acc: {summary["asymptotic_accuracy"]:.4f}')
