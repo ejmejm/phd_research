@@ -124,41 +124,53 @@ usual 6G.
 
 ## Sweep Runs
 
-Hrs/trial is the MIG estimate; total hrs includes the standard 1.4x buffer. All
-`01_main` trials are B=1, so 1.3 h/trial; `02_batch_size` averages over its four
-batch sizes (1.3 + 0.72 + 0.5 + 0.45 = 2.97 h per LR triple / 4 ≈ 0.74 h/trial).
-Trials exceed 1 h, so these use the 12 h slot — a job must never be killed
-mid-trial.
+**Measured on the MIG: 155 steps/s at B=1** (job 19699556, 2026-08-12), i.e.
+0.92 h/trial — better than the 110 steps/s extrapolated from the 4080. The MIG is
+only 1.8x slower than the 4080 rather than the 2.5x seen at 8 tasks, which fits
+the launch-bound picture below: when you are latency-limited, a smaller slice
+costs less than its SM count suggests. Other batch sizes below are the 4080
+measurements scaled by the same 0.56 factor.
+
+**Sized for wall-clock, not allocation efficiency**: one worker per trial, so all
+trials run concurrently and a sweep finishes in the time of a single trial rather
+than the sum. The 3 h slot also carries higher scheduling priority than 6 h/12 h,
+and one 0.92 h trial fits it with 3x headroom.
 
 | Config | Sweep ID | Trials | Steps/sec | Hrs/trial | Total hrs | Job time | Num jobs |
 |--------|----------|--------|-----------|-----------|-----------|----------|----------|
-| `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | ~110 (B=1) | 1.3 | 5.5 | 12h | 1 |
-| `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | ~110 (B=1) | 1.3 | 5.5 | 12h | 1 |
-| `02_batch_size/sweep/set` | not yet created | 12 | 110–320 | 0.74 | 12.4 | 12h | 2 |
-| `02_batch_size/sweep/set_static` | not yet created | 12 | 110–320 | 0.74 | 12.4 | 12h | 2 |
+| `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
+| `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
+| `02_batch_size/sweep/set` | not yet created | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
+| `02_batch_size/sweep/set_static` | not yet created | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
 
-6 jobs total, far inside the rate limits.
+6 jobs for `01_main` (24 more for `02_batch_size`) — inside the 50-job cap.
+
+Per-trial MIG times for `02_batch_size`: B=1 0.92 h, B=4 0.51 h, B=16 0.35 h,
+B=64 0.32 h. One worker per trial puts its wall-clock at ~0.92 h too, set by the
+slowest (B=1) cells.
+
+A larger MIG slice or a full H100 would **not** speed up the B=1 trials. Each
+step reads only ~170 MB across the 5 vmapped seeds; at the measured 277 steps/s
+on the 4080 that is ~47 GB/s against ~717 GB/s available, so the scan is
+launch/latency-bound on many tiny sequential steps, not compute- or
+bandwidth-bound. Extra SMs buy nothing — concurrency across trials is the lever.
 
 ```bash
-# --- 01_main. Launch the SET arm first, confirm from its log that a trial is
-#     training (n_tasks=32 has never run on CC), then launch the static arm. ---
-sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=12:00:00 \
-  launch_comet_agent.sbatch -s 2ce99280dab74dd29c5b0c71d92e7990 \
-  -p $HOME/scratch/phd_research/phd/structure_search
-
-sbatch --array=1-1 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=12:00:00 \
-  launch_comet_agent.sbatch -s 43dd6aa99fe74da698e8accb771c0806 \
-  -p $HOME/scratch/phd_research/phd/structure_search
+# --- 01_main: 6 jobs, one trial each, all concurrent -> ~1.3 h + queue ---
+for ID in 2ce99280dab74dd29c5b0c71d92e7990 43dd6aa99fe74da698e8accb771c0806; do
+  sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=03:00:00 \
+    launch_comet_agent.sbatch -s $ID -p $HOME/scratch/phd_research/phd/structure_search
+done
 
 # --- 02_batch_size, once its sweeps exist (fill in the IDs) ---
 for ID in <02_batch_size/sweep/set ID> <02_batch_size/sweep/set_static ID>; do
-  sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=12:00:00 \
+  sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=16G --time=03:00:00 \
     launch_comet_agent.sbatch -s $ID -p $HOME/scratch/phd_research/phd/structure_search
 done
 ```
 
-Each worker pulls trials until the sweep is exhausted or the job ends, so
-`01_main` finishes in ~3.9 h of wall-clock on one worker per arm.
+`--mem=16G` overrides the launcher's hardcoded `--mem=4G` (command-line sbatch
+options win over in-script directives). Logs land in `~/scratch/job_outputs/`.
 
 `--mem=16G` rather than the 8G used at 8 tasks: the host holds one log period of
 data per seed, which is 1024 × 32 × 784 floats × 5 streams ≈ 500 MB, and peak
