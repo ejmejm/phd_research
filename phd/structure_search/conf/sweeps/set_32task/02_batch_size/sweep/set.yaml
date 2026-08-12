@@ -53,6 +53,9 @@ parameters:
     - "${eval:2**-5}"
     - "${eval:2**-4}"
     - "${eval:2**-3}"
+    - "${eval:2**-2}"
+    - "${eval:2**-1}"
+    - "${eval:2**0}"
 
   # 5 seeds atomic: one trial vmaps all 5 seeds.
   # 4 batch_size x 4 LR = 16 trials (12 + 4 extension).

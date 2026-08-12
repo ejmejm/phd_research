@@ -84,7 +84,8 @@ relative to `experiments/`. Each trial vmaps 5 seeds (0–4).
 | `01_main/sweep/set` | `2ce99280dab74dd29c5b0c71d92e7990` | 3 | 3 LR |
 | `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 3 LR, ζ=0 |
 | `02_batch_size/sweep/set` | `054effb1de4c45539d5dbe8a7c687c02` | 12 | 4 B × 3 LR |
-| `02_batch_size/sweep/set` (2⁻³ extension) | `4f6f6bb5aca046b1bb4d8b37b1b823ff` | 4 | 4 B × 1 LR |
+| `02_batch_size/sweep/set` (2⁻³ ext) | `4f6f6bb5aca046b1bb4d8b37b1b823ff` | 4 | 4 B × 1 LR |
+| `02_batch_size/sweep/set` (2⁻²..2⁰ ext) | `a65344fa7d4c467496913b296d2564e5` | 12 | 4 B × 3 LR |
 | `02_batch_size/sweep/set_static` | `0867cad50b464fd8b3ec63cab3fc3180` | 12 | 4 B × 3 LR, ζ=0 |
 
 Resource plan and sbatch commands are under [Sweep Runs](#sweep-runs) below.
@@ -103,9 +104,30 @@ reduced to that single LR, the sweep created, then the file restored to the full
 {2⁻⁶ … 2⁻³} list. Both sweeps share the `set32_batch_v2_set` name, so the
 analysis sees one 16-cell grid and nothing was recomputed.
 
-⚠️ Recreating `set.yaml` as it now stands would re-run all 16 cells. The SET arm
-is 16 cells; the **static arm is still only 12** ({2⁻⁶, 2⁻⁵, 2⁻⁴}), so the two
-arms no longer share an LR grid — check before comparing them at 2⁻³.
+The grid was then pushed three octaves further, to {2⁻², 2⁻¹, 2⁰}
+(`a65344fa7d4c467496913b296d2564e5`, 12 trials), by the same
+narrow-create-restore procedure. The SET arm is therefore **28 cells**
+(4 B × 7 LR), assembled from three sweeps that all share the
+`set32_batch_v2_set` name.
+
+Most of the top end is expected to diverge — 2⁰ is a step of 1.0 under plain
+SGD. That is the point: it establishes where the ceiling actually is rather than
+assuming it. Those cells stop early, report the `finite_summary` sentinel, and
+show as gaps in the analysis, so they are cheap and do not retry (see below).
+
+⚠️ Two asymmetries to keep in mind:
+
+- Recreating `set.yaml` as it now stands would re-run **all 28 cells**. The file
+  describes the grid as analysed, not as submitted.
+- The **static arm is still only 12 cells** ({2⁻⁶, 2⁻⁵, 2⁻⁴}), so above 2⁻⁴ the
+  two arms no longer share an LR grid. A SET-vs-static comparison there has
+  nothing to compare against; extending it is the same 4-trial-per-octave
+  operation on `0867cad50b464fd8b3ec63cab3fc3180`.
+
+**The cluster must be at `fe28e31` or later** for the high-LR cells. Before that
+commit a diverged run reported a nan objective, so the trial registered no
+result and was re-assigned up to `retryAssignLimit` — at these step sizes that
+would have meant recomputing each divergence four times over.
 
 Because LR is re-swept at every batch size (B=1 included), `01_main`'s winner
 only sets where the grid is centred — the batch study re-measures its own B=1
@@ -156,6 +178,7 @@ and one 0.92 h trial fits it with 3x headroom.
 | `01_main/sweep/set_static` | `43dd6aa99fe74da698e8accb771c0806` | 3 | 155 (measured) | 0.92 | 2.8 | 3h | 3 |
 | `02_batch_size/sweep/set` | `054effb1de4c45539d5dbe8a7c687c02` | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
 | `02_batch_size/sweep/set` (2⁻³ ext) | `4f6f6bb5aca046b1bb4d8b37b1b823ff` | 4 | 7–155 | 0.32–0.92 | 2.9 | 3h | 4 |
+| `02_batch_size/sweep/set` (2⁻²..2⁰ ext) | `a65344fa7d4c467496913b296d2564e5` | 12 | 7–155 | ≤0.92 | ≤8.8 | 3h | 12 |
 | `02_batch_size/sweep/set_static` | `0867cad50b464fd8b3ec63cab3fc3180` | 12 | 7–155 | 0.32–0.92 | 8.8 | 3h | 12 |
 
 6 jobs for `01_main`, 24 for `02_batch_size` plus 4 for the 2⁻³ extension (job 19710589) — inside the 50-job cap.
