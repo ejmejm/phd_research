@@ -27,6 +27,7 @@ discovery.egg-info/
 *.csv
 *.db
 *.npy
+*.npz
 *.pth
 *.pkl
 *.pbz2
@@ -38,6 +39,7 @@ discovery.egg-info/
 phd/sandbox/nethack_benchmarking/data/nld-nao/
 phd/sandbox/atari_prediction_generalization/data/
 phd/sandbox/one_off_experiments/learning_by_pruning/data/
+phd/sandbox/one_off_experiments/aprop/data/
 phd/sandbox/stock_prediction/reference_impl/
 phd/sandbox/feature_sifting/exploration/data/
 
