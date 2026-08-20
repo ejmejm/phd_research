@@ -39,6 +39,7 @@ phd/sandbox/nethack_benchmarking/data/nld-nao/
 phd/sandbox/atari_prediction_generalization/data/
 phd/sandbox/one_off_experiments/learning_by_pruning/data/
 phd/sandbox/stock_prediction/reference_impl/
+phd/sandbox/feature_sifting/exploration/data/
 
 # Ignore symlinks
 *.lnk
@@ -49,3 +50,4 @@ phd/sandbox/stock_prediction/reference_impl/
 
 # Build artifacts
 build/
+.claude/
