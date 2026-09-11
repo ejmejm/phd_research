@@ -19,26 +19,62 @@ import equinox as eqx
 import numpy as np
 from jax import random
 from jaxtyping import Array, Float, Int
+from scipy.stats import irwinhall
 
 from ..utils import tree_replace
 
 
-def output_weight_scale(n_hidden_per_task: int) -> float:
+def output_weight_scale(
+    n_hidden_per_task: int, firing_prob: Optional[float] = None,
+) -> float:
     """Output weight magnitude giving unit signal variance per output in expectation.
 
-    Each LTU has a symmetric, continuous pre-activation, so it fires with probability
-    exactly q = 1/2 and Var(h_j) = q(1 - q) = 1/4. With independent, zero-mean output
+    A zero-threshold LTU has a symmetric, continuous pre-activation, so it fires with
+    probability exactly q = 1/2 and Var(h_j) = q(1 - q) = 1/4; with a target `firing_prob`
+    (see `ltu_thresholds`) q is that value instead. With independent, zero-mean output
     weights of magnitude c the cross-covariance terms vanish in expectation, leaving
-    E[Var(f_i)] = c^2 * n_hidden_per_task / 4. Setting that to 1 gives
-    c = 2 / sqrt(n_hidden_per_task).
+    E[Var(f_i)] = c^2 * n_hidden_per_task * q(1 - q). Setting that to 1 gives
+    c = 1 / sqrt(n_hidden_per_task * q(1 - q)), i.e. 2 / sqrt(n_hidden_per_task) for the
+    zero-threshold teacher.
 
     Args:
         n_hidden_per_task: Number of hidden LTUs per slot (m)
+        firing_prob: Target firing probability q of the LTUs; None for zero thresholds
 
     Returns:
         Output weight magnitude c
     """
-    return 2.0 / math.sqrt(n_hidden_per_task)
+    if firing_prob is None:
+        return 2.0 / math.sqrt(n_hidden_per_task)
+    return 1.0 / math.sqrt(n_hidden_per_task * firing_prob * (1.0 - firing_prob))
+
+
+def ltu_thresholds(
+    n_active: Int[Array, '...'], firing_prob: float, input_bounds: Tuple[float, float],
+) -> Float[Array, '...']:
+    """Thresholds making LTUs with `n_active` unit input weights fire with probability `firing_prob`.
+
+    With inputs uniform on (a, b), the pre-activation of an LTU with k unit weights is
+    k a + (b - a) S with S ~ Irwin-Hall(k), so its threshold is that affine map of the
+    Irwin-Hall (1 - q)-quantile. At q = 1/2 this is the midpoint k (a + b) / 2, exactly zero
+    for symmetric bounds. An LTU with no active inputs has pre-activation 0 and keeps
+    threshold 0, so it never fires.
+
+    Args:
+        n_active: Number of unit input weights of each LTU
+        firing_prob: Probability q with which each LTU should fire
+        input_bounds: Bounds (a, b) of the uniform input distribution
+
+    Returns:
+        One threshold per LTU, in `n_active`'s shape
+    """
+    low, high = input_bounds
+    n_active = np.asarray(n_active).astype(int)
+    thresholds = np.zeros(n_active.shape)
+    for k in np.unique(n_active[n_active > 0]):
+        quantile = irwinhall(int(k)).ppf(1.0 - firing_prob)
+        thresholds[n_active == k] = k * low + (high - low) * quantile
+    return jnp.asarray(thresholds, dtype=jnp.float32)
 
 
 def perturbation_period(per_task_period: int, n_tasks: int) -> int:
@@ -62,12 +98,17 @@ class MultiGEOFFTask(eqx.Module):
     """Multi-task, non-stationary GEOFF regression task with block-diagonal teacher.
 
     The teacher is `n_tasks` independent slots. For slot t, inputs x^(t) are uniform on
-    `input_bounds`, hidden units are LTUs with binary input weights U^(t) and zero
-    thresholds, and every output is a dense linear readout of that slot's hidden code via
+    `input_bounds`, hidden units are LTUs with binary input weights U^(t) and thresholds
+    theta^(t), and every output is a dense linear readout of that slot's hidden code via
     V^(t), whose entries are in {-c, +c}:
 
-        h^(t)_j = 1[U^(t)_j . x^(t) > 0]
+        h^(t)_j = 1[U^(t)_j . x^(t) > theta^(t)_j]
         y^(t)_i = sum_j V^(t)_ij h^(t)_j + eps,    eps ~ N(0, noise_std^2)
+
+    The thresholds are zero unless a target `firing_prob` is given, in which case each is set
+    so that its LTU fires with exactly that probability (see `ltu_thresholds`). A low firing
+    probability gives sparser features and a less linear target: the linear share of an LTU's
+    variance is 2/pi at a firing probability of 1/2 and falls as the LTU fires less.
 
     Inputs and outputs are laid out slot-major, so the flat input of dimension
     `n_tasks * n_features_per_task` reshapes to (n_tasks, n_features_per_task) and the
@@ -95,10 +136,12 @@ class MultiGEOFFTask(eqx.Module):
     weight_scale: float = eqx.field(static=True)
     noise_std: float = eqx.field(static=True)
     input_bounds: Tuple[float, float] = eqx.field(static=True)
+    firing_prob: Optional[float] = eqx.field(static=True)
     perturb_period: Optional[int] = eqx.field(static=True)
 
     # Dynamic parameters (weights and state)
     input_weights: Float[Array, 'n_tasks n_hidden_per_task n_features_per_task']
+    thresholds: Float[Array, 'n_tasks n_hidden_per_task']
     output_weights: Float[Array, 'n_tasks n_outputs_per_task n_hidden_per_task']
     step: Int[Array, '']
     rng: random.PRNGKey
@@ -112,6 +155,7 @@ class MultiGEOFFTask(eqx.Module):
         n_outputs_per_task: int = 10,
         noise_std: float = 1.0,
         input_bounds: Tuple[float, float] = (-1.0, 1.0),
+        firing_prob: Optional[float] = None,
         seed: Optional[int] = None,
     ):
         """
@@ -124,6 +168,8 @@ class MultiGEOFFTask(eqx.Module):
             n_outputs_per_task: Number of outputs per slot (p)
             noise_std: Standard deviation of the per-output observation noise
             input_bounds: Bounds of the uniform input distribution
+            firing_prob: Optional target firing probability of every hidden LTU, met by setting
+                per-unit thresholds. None keeps the thresholds at zero, the original teacher.
             seed: Random seed for reproducibility
         """
         super().__init__()
@@ -133,9 +179,12 @@ class MultiGEOFFTask(eqx.Module):
         self.n_features_per_task = n_features_per_task
         self.n_hidden_per_task = n_hidden_per_task
         self.n_outputs_per_task = n_outputs_per_task
-        self.weight_scale = output_weight_scale(n_hidden_per_task)
+        assert firing_prob is None or 0.0 < firing_prob < 1.0, \
+            f'firing_prob must be None or in (0, 1), got {firing_prob}'
+        self.weight_scale = output_weight_scale(n_hidden_per_task, firing_prob)
         self.noise_std = noise_std
         self.input_bounds = tuple(input_bounds)
+        self.firing_prob = firing_prob
         self.perturb_period = perturb_period
 
         # Set up RNG
@@ -148,6 +197,11 @@ class MultiGEOFFTask(eqx.Module):
         self.input_weights = random.bernoulli(
             input_key, 0.5, (n_tasks, n_hidden_per_task, n_features_per_task),
         ).astype(jnp.float32)
+        if firing_prob is None:
+            self.thresholds = jnp.zeros((n_tasks, n_hidden_per_task), jnp.float32)
+        else:
+            self.thresholds = ltu_thresholds(
+                self.input_weights.sum(axis=-1), firing_prob, self.input_bounds)
         signs = random.randint(
             output_key, (n_tasks, n_outputs_per_task, n_hidden_per_task), 0, 2,
         ) * 2 - 1
@@ -192,7 +246,7 @@ class MultiGEOFFTask(eqx.Module):
         """LTU activations of every slot for a single sample."""
         x = x.reshape(self.n_tasks, self.n_features_per_task)
         pre_activations = jnp.einsum('tmn,tn->tm', self.input_weights, x)
-        return (pre_activations > 0).astype(jnp.float32)
+        return (pre_activations > self.thresholds).astype(jnp.float32)
 
     def _forward(self, x: Float[Array, 'n_features']) -> Float[Array, 'n_outputs']:
         """Noise-free targets of a single sample, flattened over slots."""

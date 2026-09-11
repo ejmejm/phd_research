@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from phd.jax_core.tasks.multi_geoff import (
-    MultiGEOFFTask, output_weight_scale, perturbation_period,
+    MultiGEOFFTask, ltu_thresholds, output_weight_scale, perturbation_period,
 )
 
 
@@ -179,6 +179,55 @@ def test_generate_batch_is_jit_and_scan_safe():
     assert sums.shape == (50,) and jnp.all(jnp.isfinite(sums))
     assert int(final.step) == 50, f'step counter is {int(final.step)}, expected 50'
     print('PASS: test_generate_batch_is_jit_and_scan_safe')
+
+
+def test_no_firing_prob_is_the_zero_threshold_teacher():
+    """Without a target firing probability the teacher is the original one: zero thresholds
+    whatever the input bounds, and the 2 / sqrt(m) weight scale, so existing runs and caches are
+    unaffected. An explicit 1/2 with symmetric bounds lands on exactly the same teacher."""
+    task = _task(n_tasks=2, n_features_per_task=20, n_hidden_per_task=10)
+    assert task.firing_prob is None and task.thresholds.shape == (2, 10)
+    assert np.all(np.asarray(task.thresholds) == 0.0), 'default thresholds must be exactly zero'
+    assert task.weight_scale == 2.0 / np.sqrt(10) and output_weight_scale(4) == 1.0
+    skewed = _task(n_tasks=2, n_hidden_per_task=10, input_bounds=(0.0, 1.0))
+    assert np.all(np.asarray(skewed.thresholds) == 0.0), 'None must keep zero thresholds'
+    half = _task(n_tasks=2, n_features_per_task=20, n_hidden_per_task=10, firing_prob=0.5)
+    assert np.all(np.asarray(half.thresholds) == 0.0) and np.isclose(half.weight_scale, task.weight_scale)
+    assert np.all(np.asarray(ltu_thresholds(jnp.arange(61), 0.5, (-1.0, 1.0))) == 0.0)
+    print('PASS: test_no_firing_prob_is_the_zero_threshold_teacher')
+
+
+def test_thresholds_follow_the_irwin_hall_quantile():
+    """The threshold is the affine map of the Irwin-Hall quantile: zero for a unit with no active
+    inputs, increasing as the firing probability drops, exact for the one-input case, and the
+    midpoint for asymmetric bounds at 1/2 (so the default really does fire half the time)."""
+    n_active = jnp.array([0, 1, 4, 10])
+    rare = np.asarray(ltu_thresholds(n_active, 0.1, (-1.0, 1.0)))
+    rarer = np.asarray(ltu_thresholds(n_active, 0.05, (-1.0, 1.0)))
+    assert rare[0] == 0.0 and rarer[0] == 0.0, 'a unit with no inputs keeps threshold 0'
+    assert np.all(rare[1:] > 0.0) and np.all(rarer[1:] > rare[1:])
+    # One uniform(-1, 1) input: P(x > t) = (1 - t) / 2 = q  =>  t = 1 - 2q.
+    assert np.isclose(rare[1], 0.8) and np.isclose(rarer[1], 0.9)
+    midpoints = np.asarray(ltu_thresholds(n_active, 0.5, (0.0, 1.0)))
+    assert np.allclose(midpoints, np.asarray(n_active) / 2.0)
+    print('PASS: test_thresholds_follow_the_irwin_hall_quantile')
+
+
+def test_firing_prob_is_exact_per_unit():
+    """Every LTU fires with the requested probability, whatever its number of active inputs
+    (the thresholds are per unit), and `output_weight_scale` keeps the signal variance at 1."""
+    for firing_prob in (0.1, 0.03):
+        task = _task(n_tasks=2, n_features_per_task=20, n_hidden_per_task=16, seed=1,
+                     firing_prob=firing_prob)
+        assert np.all(np.asarray(task.input_weights.sum(axis=-1)) > 0), 'test needs active units'
+        _, (x, _) = task.generate_batch(200_000)
+        rates = np.asarray(task.hidden_features(x)).mean(axis=0)
+        assert np.allclose(rates, firing_prob, atol=0.005), \
+            f'firing_prob {firing_prob}: rates in [{rates.min():.3f}, {rates.max():.3f}]'
+    variances = [_per_output_signal_variance(seed, firing_prob=0.1) for seed in range(12)]
+    assert abs(np.mean(variances) - 1.0) < 0.06, \
+        f'mean per-output signal variance {np.mean(variances):.3f} is not near 1 at firing_prob 0.1'
+    print('PASS: test_firing_prob_is_exact_per_unit')
 
 
 if __name__ == '__main__':
