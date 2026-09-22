@@ -1,0 +1,33 @@
+# Dense reference at 16 tasks. Only needed if the pilot pushes
+# train.total_steps past the 500,000 of Figure 3 -- at 500k the published
+# Figure 3 runs already cover this arm (transition_step=0) and should be
+# reused rather than recomputed.
+name: 04_dense_n16
+project: paper-weight-pruning-connectivity-sweep
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  model.type: padded_mlp
+  model.init_strategy: dense
+  algorithm.name: static
+
+  # Same grid as the Figure 3 sweep, whose dense winner was at the low end.
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    value: [0, 1, 2, 3, 4]

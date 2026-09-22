@@ -1,0 +1,54 @@
+# SET (Mocanu et al. 2018) at 16 tasks, non-stationary.
+#
+# Published SET: Erdos-Renyi init (`init_mode: epsilon`) and magnitude
+# pruning. `prune_metric: utility` exists in the codebase and won by a wide
+# margin at 8 tasks, but it is a different algorithm and is not swept here.
+#
+# Four axes. `target_hidden_units` is the sparsity axis -- the connection
+# budget is pinned to block-sparse's 203,264, so width alone decides per-unit
+# fan-in (794 weights/unit at H=256, down to 198 at H=1024). zeta and
+# evolve_frequency are partly redundant (what mostly matters is the turnover
+# rate zeta/evolve_frequency, spanning 1e-6 to 8e-4 per step here), but they
+# are not interchangeable: rare large prunes and frequent small ones behave
+# differently against a 2000-step drift period.
+name: 04_set_n16
+project: paper-weight-pruning-connectivity-sweep
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  model.type: padded_mlp
+  model.init_strategy: sparse
+  algorithm.name: set
+  algorithm.prune_metric: magnitude
+
+  # 16, 32, 48, 64 units per task at a fixed 203,264-connection budget.
+  target_hidden_units: [256, 512, 768, 1024]
+
+  # 0.01 won at 8 tasks with 0.05 within noise and 0 far worse; 0.001 extends
+  # the grid downward.
+  algorithm.zeta: [0.001, 0.01, 0.05, 0.1]
+
+  # Must divide train.log_freq (asserted in run_experiment). 125 is one drift
+  # event; 1000 is half the interval between re-permutations of a given task.
+  algorithm.evolve_frequency: [125, 500, 1000]
+
+  # 2^-6 won at both 8 and 32 tasks, interior to this grid.
+  optimizer.learning_rate:
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  # 4 x 4 x 3 x 4 = 192 trials, 5 vmapped seeds each.
+  seed:
+    value: [0, 1, 2, 3, 4]

@@ -1,0 +1,117 @@
+# Learned connectivity vs fixed connectivity, at 16 tasks.
+#
+# The same setting as Figure 3: 16-task non-stationary multi-MNIST, one task
+# re-permuted every 125 steps, so a given task is re-permuted every 2000.
+# Five arms share this base and differ only in model.type + algorithm.name:
+#
+#   dense          padded_mlp (dense)         static
+#   block-sparse   padded_mlp (block_sparse)  static
+#   static sparse  padded_mlp (sparse)        static    <- SET's init, frozen
+#   SET            padded_mlp (sparse)        set
+#   DEEP-R         padded_mlp (sparse)        deep_r
+#
+# Every arm but dense holds the same weight budget: the 203,264 connections of
+# the block-sparse reference (16 units/task x 794 weights). Dense is 16x
+# larger at the same width, exactly as in Figure 3.
+
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+comet_ml: true
+mlflow: false
+wandb: false
+
+task:
+  n_tasks: 16
+  permute_period: ${eval:2000 // ${task.n_tasks}}
+  standardize: true
+
+# Units per task in the block-sparse reference. Sets the shared budget and the
+# width of the two padded_mlp arms.
+block_sparse_units_per_task: 16
+
+# Hidden width, for every arm. For the sparse arms it is also the sparsity
+# knob: at a fixed connection budget it decides how thinly the budget is
+# spread, i.e. the per-unit fan-in. 256 units = 794 W1 weights/unit, which is
+# exactly the block-sparse profile (784 inputs + 10 outputs), only scattered
+# over all 16 images instead of concentrated in one. 1024 units = 198.
+# The default is the block-sparse width, so the dense and block-sparse arms
+# need not touch it.
+target_hidden_units: ${eval:${block_sparse_units_per_task} * ${task.n_tasks}}
+
+model:
+  # padded_mlp for every arm: a mask over a dense matrix. SET and DEEP-R run
+  # here rather than on dynamic_network because the mask preserves the
+  # connection budget per *layer*, as both papers specify, and because
+  # path_purity -- whether a method rediscovers the block-sparse structure --
+  # is only computable from w2_mask @ w1_mask. Switching model.type to
+  # dynamic_network transparently selects the sparse implementations instead;
+  # that is the path for network sizes where the dense matmul is wasteful.
+  type: padded_mlp
+
+  # dense | block_sparse | sparse. `sparse` is the Erdos-Renyi topology SET
+  # and DEEP-R evolve from, and the frozen topology of the static-sparse arm.
+  init_strategy: block_sparse
+  initial_hidden_units: ${target_hidden_units}
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+  sparse:
+    # The published SET initialization: Erdos-Renyi with per-layer edge
+    # probability p = epsilon * (n_in + n_out) / (n_in * n_out). padded_mlp
+    # reads only `epsilon`; the rest sizes dynamic_network's slot arrays.
+    init_mode: epsilon
+    connection_budget: ${eval:${block_sparse_units_per_task} * ${task.n_tasks} * 794}
+    # derive_sizes() computes hidden = floor((budget/epsilon - I - O) / 2), so
+    # epsilon is inverted from the width we want; the +0.5 absorbs the floor.
+    # Sweeping target_hidden_units at a fixed budget IS sweeping epsilon -- the
+    # ER construction is untouched, only its sparsity parameter moves. Grid on
+    # width because epsilon's usable range here is 13.8-15.4 and unreadable.
+    epsilon: "${eval:'${model.sparse.connection_budget} / (2*${target_hidden_units} + 0.5 + ${task.n_tasks}*794)'}"
+    fan_in_safety_factor: 2.0
+
+algorithm:
+  # static | set | deep_r. Every key each algorithm reads is declared below so
+  # a sweep can override it; keys belonging to the other algorithms are simply
+  # ignored.
+  name: static
+
+  # --- set ---
+  # magnitude is published SET. utility is this repository's variant and is not
+  # part of the comparison.
+  prune_metric: magnitude
+  evolve_frequency: 125       # must divide train.log_freq
+  zeta: 0.01                  # fraction pruned and regrown per event, per layer
+  utility_decay: 0.999        # read only when prune_metric: utility
+
+  # --- deep_r ---
+  l1: 1.0e-3                  # alpha in the paper; see sweep/deep_r.yaml
+  temperature: 1.0e-5         # Langevin T; 0 gives deterministic sign-flip pruning
+  evolve_w2: true             # evolve the hidden->output layer too
+  # Steps between reactivation events. 1 is the published per-step sampler,
+  # and with sort-free reactivation it costs only ~17% more than 25, so there
+  # is no reason to coarse-grain. Raising it does not change the weight
+  # dynamics -- zero-crossings are still detected every step -- only how long
+  # a connection stays dormant before a replacement is drawn.
+  event_period: 1
+
+optimizer:
+  # SGD throughout. Figure 3 used it, and DEEP-R's L1 + Langevin terms are
+  # applied outside the optimizer, so they are only correct for plain SGD.
+  name: sgd
+  learning_rate: ${eval:2**-6}
+  weight_decay: 0
+
+train:
+  batch_size: 1
+  total_steps: 500_000    # provisional -- pinned by the pilot, see README
+  log_freq: 1000          # algorithm event periods must divide this
+  eval_freq: 0            # non-stationary: no converged solution to evaluate
+
+seed: [0]
+log_individual_seeds: false
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

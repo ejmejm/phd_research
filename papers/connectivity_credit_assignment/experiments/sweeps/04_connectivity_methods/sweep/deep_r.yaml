@@ -1,0 +1,64 @@
+# DEEP-R (Bellec et al. 2018) at 16 tasks, non-stationary.
+#
+#   w <- w - lr*dL/dw - lr*l1*sign(w) + sqrt(2*lr*T)*nu
+#
+# A connection dies when its weight crosses zero and a dormant one is
+# reactivated at random, so the connection count is constant.
+#
+# GRID ANCHORING. The defaults in the code (l1=1e-5, T=1e-7) produce almost no
+# structural change at this scale, which would make DEEP-R indistinguishable
+# from the static-sparse arm. Both mechanisms have to move a typical weight
+# (|w| ~ 0.031 at H=256, 0.062 at H=1024) on the 2000-step drift timescale:
+#
+#   L1:    steps to reach zero = |w| / (lr*l1)   -> ~2000 at l1=1e-3, lr=2^-6
+#   noise: displacement after N steps = sqrt(N * 2*lr*T)
+#                                      -> ~|w| after 2000 steps at T=1.5e-5
+#
+# so the grid brackets l1=1e-3 and T=1e-5. Note both scale with the learning
+# rate -- the L1 pull linearly, the noise as its square root -- so the corners
+# at lr=2^-8 are 4x and 2x weaker than the same (l1, T) at 2^-6.
+#
+# VERIFY THIS RATHER THAN TRUST IT: every run logs cumulative_pruned and
+# cumulative_regrown. Check that the chosen cells turn connections over at a
+# rate comparable to the SET arm; if the whole grid is flat, extend upward
+# (l1=1e-1, T=1e-4) rather than reading the result as "DEEP-R does nothing".
+name: 04_deep_r_n16
+project: paper-weight-pruning-connectivity-sweep
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  model.type: padded_mlp
+  model.init_strategy: sparse
+  algorithm.name: deep_r
+  # The published per-step sampler. Affordable because reactivation needs no
+  # sort: 61 s per 20k steps at H=768 against 52 s at event_period=25, so the
+  # coarse-grained variant buys nothing.
+  algorithm.event_period: 1
+  algorithm.evolve_w2: true
+
+  # One width fewer than the SET grid; DEEP-R is the costly arm and H=1024 can
+  # be added once the cheaper widths show whether width matters here at all.
+  target_hidden_units: [256, 512, 768]
+
+  algorithm.l1: [1e-4, 1e-3, 1e-2]
+  algorithm.temperature: [0, 1e-6, 1e-5]
+
+  optimizer.learning_rate:
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  # 3 x 3 x 3 x 4 = 108 trials, 5 vmapped seeds each.
+  seed:
+    value: [0, 1, 2, 3, 4]

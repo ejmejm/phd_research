@@ -1,0 +1,40 @@
+# Static sparse: SET's Erdos-Renyi initialization, frozen.
+#
+# The control that separates "sparse connectivity" from "learning the sparse
+# connectivity". Same budget, same degree distribution, same representation as
+# the SET and DEEP-R arms -- only the evolution is removed.
+#
+# Expressed as `algorithm.name: static` on `dynamic_network` rather than SET
+# with zeta=0: event_period is then 0, so the trainer scans a whole log period
+# in one go and computes structure diagnostics once instead of every period.
+# Cheaper, and identical in what it trains.
+name: 04_static_sparse_n16
+project: paper-weight-pruning-connectivity-sweep
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  model.type: padded_mlp
+  model.init_strategy: sparse
+  algorithm.name: static
+
+  target_hidden_units: [256, 512, 768, 1024]
+
+  optimizer.learning_rate:
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+
+  # 4 x 4 = 16 trials, 5 vmapped seeds each.
+  seed:
+    value: [0, 1, 2, 3, 4]
