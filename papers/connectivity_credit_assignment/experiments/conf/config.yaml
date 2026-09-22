@@ -1,0 +1,81 @@
+# Default configuration. Every sweep config overrides a subset of this.
+#
+# The defaults describe the paper's base setting: 4-task multi-MNIST,
+# stationary, a block-sparse network at the ~19k-weight budget, SGD.
+
+project: paper-weight-pruning
+device: null            # null lets JAX pick; set to cuda or cpu to force
+jax_jit_cache_dir: /tmp/jax_cache
+
+# Experiment tracking. The paper's sweeps use Comet.
+comet_ml: false
+mlflow: false
+wandb: false
+
+# --- Problem ---
+task:
+  n_tasks: 4
+  # Steps between label-permutation events. 0 is the stationary problem.
+  # Each event re-permutes one randomly chosen task, so the expected interval
+  # between re-permutations of a *given* task is permute_period * n_tasks.
+  permute_period: 0
+  standardize: true
+
+# --- Model ---
+model:
+  # padded_mlp: masked dense, used for every figure in the paper.
+  # dynamic_network: preallocated sparse, required by SET and DEEP-R.
+  type: padded_mlp
+
+  # padded_mlp only. dense connects everything; block_sparse partitions the
+  # hidden units over tasks, giving n_tasks independent sub-networks.
+  init_strategy: block_sparse
+  initial_hidden_units: 24      # 24 * (784 + 10) = 19,056 weights at n_tasks=4
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+  # dynamic_network only: how the initial sparse topology is sized.
+  sparse:
+    # epsilon:   Erdos-Renyi as in the SET paper. Width is derived from
+    #            connection_budget and epsilon; W1 and W2 end up at different
+    #            densities because their (n_in, n_out) are asymmetric.
+    # uniform_p: both layers share one edge probability, and the width is
+    #            taken from model.initial_hidden_units. Keeps W1/W2 density
+    #            equal at every scale.
+    init_mode: epsilon
+    epsilon: 20
+    connection_budget: 19056
+    # Slack on the per-unit incoming-slot array, so the degree distribution
+    # has room to grow away from its binomial initialization.
+    fan_in_safety_factor: 2.0
+
+# --- Connectivity algorithm ---
+algorithm:
+  # static | dense_transition | set | deep_r
+  name: static
+
+# --- Optimizer ---
+optimizer:
+  name: sgd
+  learning_rate: ${eval:2**-10}
+  weight_decay: 0
+
+# --- Training ---
+train:
+  batch_size: 1                 # single-sample online updates
+  total_steps: 500_000
+  log_freq: 1000
+  # 0 disables test evaluation and trains on the whole pool. The paper's
+  # stationary runs evaluate on a held-out test set; the non-stationary runs
+  # measure online performance instead, because there is no converged
+  # solution to evaluate.
+  eval_freq: 10_000
+  loss: softmax_ce
+
+seed: [0]
+# Upload per-seed curves as one end-of-run asset, for confidence intervals.
+log_individual_seeds: false
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

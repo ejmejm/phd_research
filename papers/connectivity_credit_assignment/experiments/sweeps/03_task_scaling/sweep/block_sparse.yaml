@@ -1,0 +1,32 @@
+# Figure 4 (Block-Sparse panel).
+#
+# task.n_tasks in {2, 4, 8, 16, 32} x hidden units in {4 .. 512} x 4 step-sizes.
+# Cells with initial_hidden_units < n_tasks fail fast by design: block-sparse
+# needs at least one hidden unit per task. That is 12 of the 40 cells.
+name: 04_block_sparse_task_scaling
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train.py --config-path=sweeps/03_task_scaling --config-name=base_block_sparse
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  task.n_tasks: [2, 4, 8, 16, 32]
+  model.initial_hidden_units: [4, 8, 16, 32, 64, 128, 256, 512]
+
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  # 5 seeds vmapped into one trial: 5 x 8 x 4 = 160 trials.
+  seed:
+    value: [0, 1, 2, 3, 4]

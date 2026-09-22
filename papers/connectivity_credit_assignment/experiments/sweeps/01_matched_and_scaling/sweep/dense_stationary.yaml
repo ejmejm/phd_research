@@ -1,0 +1,35 @@
+# Step-size sweep, dense, stationary. Feeds Figure 2 (left).
+#
+# Dense per-unit cost at 4 tasks is 3136 + 40 = 3176 weights, so the budgets
+# {6, 12, 24, 48, 96, 192, 384} units are {1x, 2x, ..., 64x} of the ~19k-weight
+# base that the block-sparse reference sits at.
+name: 01_dense_stationary_lr
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_stationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  model.init_strategy: dense
+  model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
+
+  optimizer.learning_rate:
+    - "${eval:2**-14}"
+    - "${eval:2**-13}"
+    - "${eval:2**-12}"
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+
+  # 5 seeds per cell is enough to pick a step-size; the 30-seed runs that go
+  # into the figures come from the best/ configs.
+  seed:
+    value: [0, 1, 2, 3, 4]

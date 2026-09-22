@@ -1,0 +1,46 @@
+# Figure 4 (Block-Sparse panel): joint scan over task count and network size.
+#
+# The permutation rate is held constant per task. Each event re-permutes one
+# randomly chosen task, so the expected interval between re-permutations of a
+# given task is permute_period * n_tasks; setting permute_period to
+# 2000 // n_tasks fixes that interval at 2000 steps for every task count.
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+comet_ml: true
+mlflow: false
+wandb: false
+
+task:
+  n_tasks: 4                     # overridden by the sweep
+  permute_period: ${eval:2000 // ${task.n_tasks}}
+  standardize: true
+
+model:
+  type: padded_mlp
+  init_strategy: block_sparse
+  initial_hidden_units: 4        # overridden by the sweep
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+algorithm:
+  name: static
+
+optimizer:
+  name: sgd
+  learning_rate: ${eval:2**-9}   # overridden by the sweep
+  weight_decay: 0
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0]
+log_individual_seeds: true
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

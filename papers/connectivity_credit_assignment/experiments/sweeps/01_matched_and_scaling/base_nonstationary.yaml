@@ -1,0 +1,45 @@
+# Figures 1 (right) and 2 (right): non-stationary 4-task multi-MNIST.
+#
+# One task's labels are re-permuted every 800 steps. Test evaluation is off:
+# the network never converges, so the meaningful measure is online accuracy,
+# which reflects how fast it re-adapts. All data is used for training.
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+comet_ml: true
+mlflow: false
+wandb: false
+
+task:
+  n_tasks: 4
+  permute_period: 800
+  standardize: true
+
+model:
+  type: padded_mlp
+  init_strategy: block_sparse   # overridden per sweep
+  initial_hidden_units: 24      # overridden per sweep
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+algorithm:
+  name: static
+
+optimizer:
+  name: sgd
+  learning_rate: ${eval:2**-10}  # overridden per sweep
+  weight_decay: 0
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0]
+log_individual_seeds: true
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

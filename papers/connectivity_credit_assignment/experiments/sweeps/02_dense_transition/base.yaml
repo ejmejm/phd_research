@@ -1,0 +1,49 @@
+# Figure 3: the dense-transition experiment.
+#
+# 16-task non-stationary multi-MNIST at 256 hidden units. permute_period is
+# 2000 // n_tasks = 125, so each individual task is re-permuted once every
+# 2000 steps on average regardless of the task count.
+project: paper-weight-pruning
+device: cuda
+jax_jit_cache_dir: /tmp/jax_cache
+
+comet_ml: true
+mlflow: false
+wandb: false
+
+task:
+  n_tasks: 16
+  permute_period: ${eval:2000 // ${task.n_tasks}}
+  standardize: true
+
+model:
+  type: padded_mlp
+  init_strategy: block_sparse   # the transition starts from block-sparse
+  initial_hidden_units: 256
+  max_hidden_units: ${model.initial_hidden_units}
+  activation: leaky_relu
+
+algorithm:
+  name: dense_transition
+  # Step at which the masks are filled to dense. null never fills, which is
+  # the block-sparse baseline. A value of 0 is dense from the start, with the
+  # cross-task weights beginning at exactly 0.
+  transition_step: null
+
+optimizer:
+  name: sgd
+  learning_rate: ${eval:2**-9}   # overridden by the sweep
+  weight_decay: 0
+
+train:
+  batch_size: 1
+  total_steps: 500_000
+  log_freq: 1000
+  eval_freq: 0
+
+seed: [0]
+log_individual_seeds: true
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

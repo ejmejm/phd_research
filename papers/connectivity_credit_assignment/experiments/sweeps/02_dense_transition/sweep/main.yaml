@@ -1,0 +1,53 @@
+# Figure 3: block-sparse vs dense vs dense-transition at 16 tasks.
+#
+# The three methods are one axis, `transition_step`:
+#   600000  never fills (> total_steps of 500k)  -> block-sparse baseline
+#   0       fills at step 0                      -> dense from the start
+#   250000  fills half way                       -> dense transition
+#
+# 600000 rather than null because Comet's Optimizer rejects null inside a
+# numeric discrete list; the trainer treats any step beyond total_steps as
+# "never", so the two are equivalent.
+name: 03_dense_transition_n16_h256
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train.py --config-path=sweeps/02_dense_transition --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  algorithm.transition_step: [0, 250_000, 600_000]
+
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  # 30 seeds as two 15-seed halves: 3 x 5 x 2 = 30 trials.
+  seed_offset: [0, 15]
+  seed:
+    value:
+      - "${eval:${seed_offset} + 0}"
+      - "${eval:${seed_offset} + 1}"
+      - "${eval:${seed_offset} + 2}"
+      - "${eval:${seed_offset} + 3}"
+      - "${eval:${seed_offset} + 4}"
+      - "${eval:${seed_offset} + 5}"
+      - "${eval:${seed_offset} + 6}"
+      - "${eval:${seed_offset} + 7}"
+      - "${eval:${seed_offset} + 8}"
+      - "${eval:${seed_offset} + 9}"
+      - "${eval:${seed_offset} + 10}"
+      - "${eval:${seed_offset} + 11}"
+      - "${eval:${seed_offset} + 12}"
+      - "${eval:${seed_offset} + 13}"
+      - "${eval:${seed_offset} + 14}"

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-mnist"
+version = "1.0.0"
+description = "Connectivity, Credit Assignment, and the Speed of Learning"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+# Author metadata is generated from identity.yaml by scripts/anonymize.py.
+# Do not edit these two lines by hand.
+authors = [{name = "Edan Meyer", email = "ejmeyer@ualberta.ca"}]
+
+dependencies = [
+    "jax>=0.6.2",
+    "jaxlib>=0.6.2",
+    "jaxtyping==0.3.2",
+    "equinox==0.13.0",
+    "optax",
+    "hydra-core==1.3.2",
+    "omegaconf",
+    "numpy>=2.1",
+    "tqdm",
+    "pyyaml",
+    "comet_ml>=3.49",
+    "torchvision",       # MNIST download only; no training uses torch
+]
+
+[project.optional-dependencies]
+analysis = ["pandas", "matplotlib", "seaborn", "scipy", "jupyter"]
+
+[project.scripts]
+comet_sweep = "multi_mnist.scripts.comet_sweep:main"
+comet_download = "multi_mnist.scripts.comet_download:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

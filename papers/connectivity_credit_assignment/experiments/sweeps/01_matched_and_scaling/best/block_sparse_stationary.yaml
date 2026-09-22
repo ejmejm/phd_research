@@ -1,0 +1,48 @@
+# Figures 1 and 2 (left): block-sparse reference, stationary, 30 seeds.
+#
+# Block-sparse at 24 units = 19,056 weights, the fixed reference the dense
+# scaling curve is compared against.
+#
+# 30 seeds, split into two 15-seed halves by ``seed_offset``. One trial vmaps
+# its 15 seeds; splitting keeps peak memory inside a 10 GB MIG slice at the
+# 384-unit budget. The two halves are concatenated in the analysis notebook.
+name: 01_block_sparse_stationary_best
+project: paper-weight-pruning-scaling-best
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_stationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  # Upload the full (log_periods, seeds) curve arrays as one end-of-run asset,
+  # which is what the confidence intervals in the figures are computed from.
+  log_individual_seeds: true
+
+  model.init_strategy: block_sparse
+  model.initial_hidden_units: 24
+
+  optimizer.learning_rate: "${eval:2**-10}"  # best from sweep/
+
+  seed_offset: [101, 116]
+  seed:
+    value:
+      - "${eval:${seed_offset} + 0}"
+      - "${eval:${seed_offset} + 1}"
+      - "${eval:${seed_offset} + 2}"
+      - "${eval:${seed_offset} + 3}"
+      - "${eval:${seed_offset} + 4}"
+      - "${eval:${seed_offset} + 5}"
+      - "${eval:${seed_offset} + 6}"
+      - "${eval:${seed_offset} + 7}"
+      - "${eval:${seed_offset} + 8}"
+      - "${eval:${seed_offset} + 9}"
+      - "${eval:${seed_offset} + 10}"
+      - "${eval:${seed_offset} + 11}"
+      - "${eval:${seed_offset} + 12}"
+      - "${eval:${seed_offset} + 13}"
+      - "${eval:${seed_offset} + 14}"

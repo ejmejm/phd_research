@@ -1,0 +1,34 @@
+# Step-size sweep, block-sparse, stationary. Feeds Figures 1 and 2 (left).
+#
+# Block-sparse runs at 24 units: 24 * (784 + 10) = 19,056 weights, the same total
+# budget as the 1x dense network but distributed as 4 independent sub-networks
+# of 6 units each.
+name: 01_block_sparse_stationary_lr
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_stationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  model.init_strategy: block_sparse
+  model.initial_hidden_units: 24
+
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  # 5 seeds per cell is enough to pick a step-size; the 30-seed runs that go
+  # into the figures come from the best/ configs.
+  seed:
+    value: [0, 1, 2, 3, 4]

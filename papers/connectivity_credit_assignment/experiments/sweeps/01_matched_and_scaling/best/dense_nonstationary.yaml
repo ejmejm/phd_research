@@ -1,0 +1,51 @@
+# Figure 2 (right): dense scaling, non-stationary, 30 seeds.
+#
+# Dense at all seven budgets {6, 12, 24, 48, 96, 192, 384} units = {1x .. 64x}
+# of the ~19k-weight base.
+#
+# 30 seeds, split into two 15-seed halves by ``seed_offset``. One trial vmaps
+# its 15 seeds; splitting keeps peak memory inside a 10 GB MIG slice at the
+# 384-unit budget. The two halves are concatenated in the analysis notebook.
+name: 02_dense_nonstationary_best
+project: paper-weight-pruning-scaling-best
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_nonstationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  # Upload the full (log_periods, seeds) curve arrays as one end-of-run asset,
+  # which is what the confidence intervals in the figures are computed from.
+  log_individual_seeds: true
+
+  model.init_strategy: dense
+  model.initial_hidden_units: [6, 12, 24, 48, 96, 192, 384]
+
+  # Best step-size per budget, from sweep/dense_nonstationary.yaml. The two
+  # largest budgets need a smaller step-size, so the switch resolver maps each
+  # budget to its own winner rather than splitting this into seven files.
+  optimizer.learning_rate: "${eval:'2**${switch:${model.initial_hidden_units}, 6, -9, 12, -9, 24, -9, 48, -9, 96, -9, 192, -10, 384, -10}'}"
+
+  seed_offset: [101, 116]
+  seed:
+    value:
+      - "${eval:${seed_offset} + 0}"
+      - "${eval:${seed_offset} + 1}"
+      - "${eval:${seed_offset} + 2}"
+      - "${eval:${seed_offset} + 3}"
+      - "${eval:${seed_offset} + 4}"
+      - "${eval:${seed_offset} + 5}"
+      - "${eval:${seed_offset} + 6}"
+      - "${eval:${seed_offset} + 7}"
+      - "${eval:${seed_offset} + 8}"
+      - "${eval:${seed_offset} + 9}"
+      - "${eval:${seed_offset} + 10}"
+      - "${eval:${seed_offset} + 11}"
+      - "${eval:${seed_offset} + 12}"
+      - "${eval:${seed_offset} + 13}"
+      - "${eval:${seed_offset} + 14}"
