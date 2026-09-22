@@ -321,9 +321,9 @@ Registered 2026-09-22 in Comet project `paper-weight-pruning-connectivity-sweep`
 
 | Config | Sweep ID | Trials | Steps/s (4080) | Hrs/trial | Total hrs | Job time | Num jobs |
 |---|---|---|---|---|---|---|---|
-| `set` | `b40b928f37e94ac68b5ceecf36bb1f16` | 64 | 247–1401 | 0.024–0.078 | 3.5 | 6h | 4 |
-| `deep_r` | `a1b76949e3344e64ac2131177c05ddb7` | 144 | 476–991 | 0.028–0.058 | 5.8 | 6h | 6 |
-| `static_sparse` | `55940fef40cd4d2fbe4388816b66b43e` | 16 | 733–3202 | 0.009–0.038 | 0.4 | 3h | 2 |
+| `set` | `b40b928f37e94ac68b5ceecf36bb1f16` | 64 | 247–1401 | 0.024–0.078 | 3.5 | 3h | 3 |
+| `deep_r` | `a1b76949e3344e64ac2131177c05ddb7` | 144 | 476–991 | 0.028–0.058 | 5.8 | 3h | 4 |
+| `static_sparse` | `55940fef40cd4d2fbe4388816b66b43e` | 16 | 733–3202 | 0.009–0.038 | 0.4 | 1h | 1 |
 
 Rates are per-cell measurements at 20k steps with 3 vmapped seeds, so they
 already include the seed dimension; the spread within a sweep is the width
@@ -334,26 +334,49 @@ slice is ample.
 
 Arrays are deliberately over-provisioned: an agent exits when the sweep is
 exhausted, so a spare array task costs a few minutes of queue time, while an
-undersized array costs a whole resubmission. The totals assume the MIG slice
-runs at 4080 speed, which is the optimistic end — calibrate against the first
-job's log before trusting the wall-clock estimate.
+undersized array costs a whole resubmission.
+
+**The MIG slice runs this workload at 4080 speed.** Measured on the same cell
+(static sparse, H=256, 100k steps, 3 seeds): 3216 it/s on
+`nvidia_h100_80gb_hbm3_1g.10gb` against 3202 it/s on the 4080. A batch-1 online
+stream is latency-bound, not throughput-bound, so 1/7 of an H100's SMs costs
+nothing. Local timings can be used for cluster sizing directly, and the jobs fit
+3h slots rather than 6h.
 
 ```bash
 # set
-sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
-  --cpus-per-task=1 --mem=6G --time=06:00:00 \
+sbatch --array=1-3 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+  --cpus-per-task=1 --mem=6G --time=03:00:00 \
   launch_comet_agent.sbatch -s b40b928f37e94ac68b5ceecf36bb1f16 \
   -p $HOME/scratch/phd_research/papers/connectivity_credit_assignment
 
 # deep_r
-sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
-  --cpus-per-task=1 --mem=6G --time=06:00:00 \
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+  --cpus-per-task=1 --mem=6G --time=03:00:00 \
   launch_comet_agent.sbatch -s a1b76949e3344e64ac2131177c05ddb7 \
   -p $HOME/scratch/phd_research/papers/connectivity_credit_assignment
 
-# static_sparse
-sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
-  --cpus-per-task=1 --mem=6G --time=03:00:00 \
+# static_sparse -- one job finishes the whole 16-cell sweep in ~22 min
+sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+  --cpus-per-task=1 --mem=6G --time=01:00:00 \
   launch_comet_agent.sbatch -s 55940fef40cd4d2fbe4388816b66b43e \
   -p $HOME/scratch/phd_research/papers/connectivity_credit_assignment
 ```
+
+### Running these on Nibi
+
+`multi_mnist` is made importable there by a one-line `.pth` in the research
+venv's site-packages pointing at this repo's `src`, **not** by `pip install -e
+.`. An editable install would also install this package's `comet_sweep` console
+script over `~/env/research/bin/comet_sweep`, which every other project uses and
+which resolves to `phd.research_utils.scripts.comet_sweep`. The `.pth` gives the
+same imports and touches no entry points:
+
+```bash
+echo "$HOME/scratch/phd_research/papers/connectivity_credit_assignment/src" \
+  > $HOME/env/research/lib/python3.12/site-packages/multi_mnist_src.pth
+```
+
+The cluster venv already satisfies every pin (jax 0.6.2, equinox 0.13.0).
+`data.py` downloads MNIST to `/tmp/data`, which is per-node, so each job
+re-downloads it; Nibi's compute nodes have the outbound access for that.
