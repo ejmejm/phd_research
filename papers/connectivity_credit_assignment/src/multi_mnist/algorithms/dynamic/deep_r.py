@@ -1,7 +1,30 @@
-"""DEEP-R (Bellec et al., ICLR 2018), on ``DynamicNetwork``.
+"""A DEEP-R *variant* on ``DynamicNetwork``. NOT the published algorithm.
+
+.. warning::
+   This implementation does **not** have the fixed per-connection sign that
+   DEEP-R is built on, so it is not DEEP-R. Use ``algorithms/deep_r.py``, on
+   ``PaddedMLP``, for the published algorithm. This file is kept only as the
+   starting point for a sparse-representation version.
+
+   The paper (Conclusions): "When the absolute value of a weight is moved by
+   backprop through 0, it becomes a weight with the opposite sign. In contrast,
+   in DEEP R a connection vanishes in this case... This setup requires that,
+   like in neurobiology, the sign of a weight does not change during learning."
+   Here ``sign_before`` is recomputed from the post-gradient weight every step,
+   so a weight carried through zero *by the gradient* survives with its sign
+   flipped -- exactly the behaviour DEEP-R is defined against. Only the L1 and
+   noise increment can remove a connection, and reactivated connections take
+   whatever sign the first gradient gives them. The result is closer to "SET
+   with an L1 pull and Langevin noise" than to DEEP-R: it prunes far less and
+   searches a strictly larger space.
+
+   Fixing this needs a sign for every (unit, input) pair, and the point of this
+   representation is not to store a dense matrix -- so it wants a sign derived
+   on the fly from a hash of the position, not a stored array.
+
 
 DEEP-R performs Bayesian sampling over network structure. Each connection
-carries a fixed sign; training does constrained SGD on the magnitude with an
+carries a fixed sign (see the warning above -- not implemented here); training does constrained SGD on the magnitude with an
 L1 pull toward zero and Langevin noise::
 
     w <- w - lr * dL/dw - lr * l1 * sign(w) + sqrt(2 * lr * T) * nu
@@ -156,8 +179,16 @@ def _regrow_w1(network, optimizer, target_fan_in, key):
 
     def regrow_row(row_idx, row_w, n_to_regrow, key):
         active_slot = row_idx >= 0
-        safe_col = jnp.where(active_slot, row_idx, 0)
-        in_use = jnp.zeros(input_dim, dtype=jnp.bool_).at[safe_col].set(active_slot)
+        # Scatter each active slot's column into an input_dim-wide "in use"
+        # flag. Inactive slots park at a sentinel one past the end rather than
+        # at column 0: .at[].set() with duplicate indices has unspecified
+        # resolution order in XLA, so parking them at 0 could let an inactive
+        # slot's False overwrite a genuine True there, and the row could then
+        # grow a duplicate connection to input 0. The pad is dropped by the
+        # slice.
+        safe_col = jnp.where(active_slot, row_idx, input_dim)
+        in_use = (jnp.zeros(input_dim + 1, dtype=jnp.bool_)
+                  .at[safe_col].set(active_slot)[:input_dim])
 
         col_score = jnp.where(
             in_use, -jnp.inf, jax.random.uniform(key, (input_dim,)))

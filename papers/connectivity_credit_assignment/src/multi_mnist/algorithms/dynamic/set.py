@@ -17,8 +17,15 @@ that the static baselines do not: per-step state (the utility traces), a
 traced periodic event, and per-weight optimizer-state resets when a
 connection is regrown. A new method that needs those has a template here.
 
-SET runs on ``DynamicNetwork`` rather than ``PaddedMLP`` because it is only
-worth running at sizes where a masked dense matmul is wasteful.
+.. warning::
+   Regrowth here is confined to the row a connection was pruned from, because
+   storage is per-unit slots. The paper regrows across the whole layer ("an
+   amount of new random connections ... is added to SC_k"), so hidden-unit
+   fan-in is frozen at its Erdos-Renyi draw here and the degree distribution
+   cannot evolve -- meaning this implementation structurally cannot reproduce
+   the paper's Erdos-Renyi-to-scale-free result. Use ``algorithms/set.py``, on
+   ``PaddedMLP``, for layer-global regrowth. This file is for sizes where a
+   masked dense matmul is wasteful.
 """
 
 from typing import Any, Dict, Optional, Tuple
@@ -44,9 +51,7 @@ from ..base import ConnectivityAlgorithm
 class SETState(eqx.Module):
     """Contribution-utility traces and their per-weight step counts.
 
-    Always maintained, but only read when ``prune_metric == 'utility'``. With
-    the default ``magnitude`` metric the behaviour is bit-equivalent to SET as
-    published.
+    Always maintained, but only read when ``prune_metric == 'utility'``.
     """
     util_w1: jax.Array
     util_w2: jax.Array
@@ -118,12 +123,16 @@ def _set_evolve_w1(network, optimizer, util_w1, util_step_w1, rng, zeta, *,
 
     def regrow_row(row_idx, row_w, n_to_regrow, fan_in_target, key):
         active_slot = row_idx >= 0
-        # Build "in_use" over input_dim. Inactive slots write True at column 0
-        # (a harmless overwrite -- if there is any active slot at column 0,
-        # active_slot=True there overrides). Use the per-slot "active" value
-        # so inactive slots write False.
-        safe_col = jnp.where(active_slot, row_idx, 0)
-        in_use = jnp.zeros(input_dim, dtype=jnp.bool_).at[safe_col].set(active_slot)
+        # Scatter each active slot's column into an input_dim-wide "in use"
+        # flag. Inactive slots park at a sentinel one past the end rather than
+        # at column 0: .at[].set() with duplicate indices has unspecified
+        # resolution order in XLA, so parking them at 0 could let an inactive
+        # slot's False overwrite a genuine True there, and the row could then
+        # grow a duplicate connection to input 0. The pad is dropped by the
+        # slice.
+        safe_col = jnp.where(active_slot, row_idx, input_dim)
+        in_use = (jnp.zeros(input_dim + 1, dtype=jnp.bool_)
+                  .at[safe_col].set(active_slot)[:input_dim])
 
         col_key, w_key = jax.random.split(key)
         col_score = jax.random.uniform(col_key, (input_dim,))
