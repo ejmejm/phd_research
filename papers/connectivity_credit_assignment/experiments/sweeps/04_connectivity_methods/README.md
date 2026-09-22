@@ -103,11 +103,28 @@ python experiments/train.py $COMMON model.type=padded_mlp \
   model.init_strategy=dense 'optimizer.learning_rate=${eval:2**-9}'
 ```
 
-Then set `train.total_steps` in `base.yaml` to the longest arm's plateau and
-leave it there for everything — the arms have to share a length to be
-comparable.
+**What the pilot found.** Not a plateau — a divergence. At the first guess,
+H=512 and lr=2⁻⁶, SET diverged at 47k steps and DEEP-R at 21k, both past the
+1e6 loss guard. The static-sparse control, which prunes and regrows nothing,
+diverged at 49k, so the instability is the learning rate for this setting and
+not the rewiring.
 
-### 2. Sweeps — 5 seeds per cell
+A 200,000-step learning-rate probe at H=512 with 3 seeds gives the usable
+window (asymptotic accuracy):
+
+| lr | SET | DEEP-R |
+|---|---|---|
+| 2⁻⁹ | 0.322 | 0.528 |
+| 2⁻⁸ | 0.487 | **0.579** |
+| 2⁻⁷ | **0.507** | 0.564 |
+| 2⁻⁶ | diverged | diverged |
+
+The grids therefore moved to 2⁻⁹–2⁻⁶. Run length is still unanswered: nothing
+had flattened at 200k. Rather than keep guessing one cell at a time, **v1** of
+the sweeps runs the full grid windows at 100,000 steps and 3 seeds, to find
+where the good region is; v2 spends the long runs there.
+
+### 2. Sweeps — v1 is 3 seeds at 100k steps
 
 ```bash
 comet_sweep -c sweeps/04_connectivity_methods/sweep/set.yaml
@@ -192,6 +209,22 @@ the absolute target every event. The exact-size alternative costs a sort of
 the whole matrix -- 521 ms against 15 ms per event at H=768 -- and buys
 nothing here. SET does sort, because "the smallest-magnitude zeta fraction" is
 an order statistic and there is no way around it.
+
+**DEEP-R turns connections over ~12,600× faster than SET here.** Measured at
+H=512, lr=2⁻⁶, per 1000 steps: 1,011 prunes for SET — exactly its derived ζ —
+against 12,782,300 for DEEP-R, which is 6.3% of the whole network every step.
+The mechanism is a birth-death loop rather than trained weights dying. A
+reactivated connection enters at θ=1e-12, and on its very next step the L1 term
+subtracts ηα = 1.56e-5 while the noise std is exactly equal to it (`noise_ratio:
+1.0` defines it that way), so it survives only if gradient plus noise beats the
+drift. Most do not, and are replaced by newborns that also do not.
+
+The `l1` grid was also anchored on |w| ≈ 0.031. DEEP-R's own initialization
+gives mean |w| = 0.0071 in W1 at *every* width — N(0,1)/√n_in at the dense
+fan-in, so width-independent — which puts the time for the L1 pull to walk a
+typical weight to zero at 454 steps, not the ~2000 the anchoring assumed. The
+grid centre is about 4× hotter than intended. `regrow_theta` and `l1` are the
+two knobs; neither has been changed.
 
 **A weak `l1` or `T` does nothing at this scale.** At `l1=1e-5, T=1e-7` both
 terms move a typical weight by ~1% of its magnitude over a whole drift period,
@@ -279,3 +312,48 @@ reference, 0.4757 ± 0.0019 here.
 One difference: the rounding of the prune count, documented in
 `_selection.py:signed_prune_mask`. The pruned set here is always a strict
 subset of the reference's, smaller by exactly one entry per sign.
+
+## Sweep runs
+
+### v1 — 100k steps, 3 seeds, full grid windows
+
+Registered 2026-09-22 in Comet project `paper-weight-pruning-connectivity-sweep`.
+
+| Config | Sweep ID | Trials | Steps/s (4080) | Hrs/trial | Total hrs | Job time | Num jobs |
+|---|---|---|---|---|---|---|---|
+| `set` | `b40b928f37e94ac68b5ceecf36bb1f16` | 64 | 247–1401 | 0.024–0.078 | 3.5 | 6h | 4 |
+| `deep_r` | `a1b76949e3344e64ac2131177c05ddb7` | 144 | 476–991 | 0.028–0.058 | 5.8 | 6h | 6 |
+| `static_sparse` | `55940fef40cd4d2fbe4388816b66b43e` | 16 | 733–3202 | 0.009–0.038 | 0.4 | 3h | 2 |
+
+Rates are per-cell measurements at 20k steps with 3 vmapped seeds, so they
+already include the seed dimension; the spread within a sweep is the width
+axis (and, for SET, `evolve_frequency`, whose prune sort dominates at 125).
+Totals integrate over the whole grid rather than using a single rate. Peak GPU
+memory at the widest cell (SET, H=1024, 3 seeds) is 2.26 GB, so the 10 GB MIG
+slice is ample.
+
+Arrays are deliberately over-provisioned: an agent exits when the sweep is
+exhausted, so a spare array task costs a few minutes of queue time, while an
+undersized array costs a whole resubmission. The totals assume the MIG slice
+runs at 4080 speed, which is the optimistic end — calibrate against the first
+job's log before trusting the wall-clock estimate.
+
+```bash
+# set
+sbatch --array=1-4 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+  --cpus-per-task=1 --mem=6G --time=06:00:00 \
+  launch_comet_agent.sbatch -s b40b928f37e94ac68b5ceecf36bb1f16 \
+  -p $HOME/scratch/phd_research/papers/connectivity_credit_assignment
+
+# deep_r
+sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+  --cpus-per-task=1 --mem=6G --time=06:00:00 \
+  launch_comet_agent.sbatch -s a1b76949e3344e64ac2131177c05ddb7 \
+  -p $HOME/scratch/phd_research/papers/connectivity_credit_assignment
+
+# static_sparse
+sbatch --array=1-2 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 \
+  --cpus-per-task=1 --mem=6G --time=03:00:00 \
+  launch_comet_agent.sbatch -s 55940fef40cd4d2fbe4388816b66b43e \
+  -p $HOME/scratch/phd_research/papers/connectivity_credit_assignment
+```

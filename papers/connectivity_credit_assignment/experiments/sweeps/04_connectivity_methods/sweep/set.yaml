@@ -9,7 +9,7 @@
 # fan-in (794 weights/unit at H=256, down to 198 at H=1024). `evolve_frequency`
 # is the granularity axis, with zeta derived from it so that the paper's
 # per-example rewiring rate is held fixed across the whole grid.
-name: 04_set_n16
+name: 04_set_n16_v1
 project: paper-weight-pruning-connectivity-sweep
 command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
 algorithm: grid
@@ -23,6 +23,11 @@ parameters:
   comet_ml: true
   mlflow: false
   log_individual_seeds: false
+
+  # v1: a short, cheap pass over the full grid windows. 100k steps is not a
+  # steady state -- the pilot never established one -- it is enough to rank
+  # cells and locate the region a v2 should spend real compute on.
+  train.total_steps: 100000
 
   model.type: padded_mlp
   model.init_strategy: sparse
@@ -47,13 +52,17 @@ parameters:
   # All four divide train.log_freq, as run_experiment asserts.
   algorithm.evolve_frequency: [125, 250, 500, 1000]
 
-  # 2^-6 won at both 8 and 32 tasks, interior to this grid.
+  # Shifted down one notch from the 2^-8..2^-5 window this grid first carried.
+  # Measured at H=512, 200k steps: 2^-6 diverges for SET, DEEP-R *and* the
+  # static-sparse control (so it is the rate, not the rewiring), while 2^-7 is
+  # the best stable cell for SET (0.507) and 2^-8 for DEEP-R (0.579). 2^-6 is
+  # kept as the upper edge because the narrower widths may tolerate it.
   optimizer.learning_rate:
+    - "${eval:2**-9}"
     - "${eval:2**-8}"
     - "${eval:2**-7}"
     - "${eval:2**-6}"
-    - "${eval:2**-5}"
 
-  # 4 width x 4 evolve_frequency x 4 LR = 64 trials, 5 vmapped seeds each.
+  # 4 width x 4 evolve_frequency x 4 LR = 64 trials, 3 vmapped seeds each.
   seed:
-    value: [0, 1, 2, 3, 4]
+    value: [0, 1, 2]
