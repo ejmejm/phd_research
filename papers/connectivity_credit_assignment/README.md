@@ -119,11 +119,14 @@ harness to test that in.
 
 Write one file in `src/multi_mnist/algorithms/` implementing
 `ConnectivityAlgorithm`, and add a line to `build_algorithm`. The interface
-has two hooks, and which one you need depends on the method:
+has three hooks, and which one you need depends on the method:
 
 - `event` runs **inside** the jitted, vmapped scan every `event_period` steps.
   It is traced, so it must be shape-stable. This is where prune-and-regrow
   belongs. `algorithms/set.py` is the worked example.
+- `step_update` also runs **inside** the scan, but on every step, and may
+  modify the model. It is for methods whose weight dynamics run faster than
+  their structural bookkeeping. `algorithms/deep_r.py` is the example.
 - `on_log_period` runs **on the host** between log periods, with concrete
   values. Use it for one-shot interventions where a Python flag is clearer
   than a traced counter. `algorithms/dense_transition.py` is the example.

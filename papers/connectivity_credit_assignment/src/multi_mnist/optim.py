@@ -1,6 +1,6 @@
 """Optimizers.
 
-The paper uses plain SGD throughout. Adam is kept because the dynamic-network
+The paper uses plain SGD throughout. Adam is kept because the connectivity
 algorithms (SET, DEEP-R) reset per-weight optimizer state when a connection is
 pruned or regrown, which needs the moment estimates to be addressable per
 weight -- ``AdamState`` exposes them as pytrees shaped like the parameters.

@@ -5,9 +5,9 @@
 # A connection dies when its weight crosses zero and a dormant one is
 # reactivated at random, so the connection count is constant.
 #
-# GRID ANCHORING. The defaults in the code (l1=1e-5, T=1e-7) produce almost no
-# structural change at this scale, which would make DEEP-R indistinguishable
-# from the static-sparse arm. Both mechanisms have to move a typical weight
+# GRID ANCHORING. Weak settings (l1=1e-5, T=1e-7) produce almost no structural
+# change at this scale, which would make DEEP-R indistinguishable from the
+# static-sparse arm. Both mechanisms have to move a typical weight
 # (|w| ~ 0.031 at H=256, 0.062 at H=1024) on the 2000-step drift timescale:
 #
 #   L1:    steps to reach zero = |w| / (lr*l1)   -> ~2000 at l1=1e-3, lr=2^-6

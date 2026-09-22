@@ -3,7 +3,7 @@
 ``experiments/train.py`` is a thin Hydra shell over ``run_config`` here.
 """
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import jax
 import jax.numpy as jnp
@@ -67,7 +67,6 @@ def _build_model_and_specs(cfg: DictConfig, input_dim: int, output_dim: int,
         return model, model_filter_spec(model), structure_diagnostics
 
     if model_type == 'dynamic_network':
-        from .metrics import compute_structure_metrics
         from .models.sparse_init import (
             derive_sizes, init_sparse_model, model_filter_spec)
         hidden, max_conns, max_fan_out, p_w1, p_w2 = derive_sizes(
@@ -142,7 +141,7 @@ def _log_period(metrics: Dict[str, float], per_seed: Dict[str, list],
     log_child_metrics(per_seed, cfg, step=step)
 
 
-def _summarize(cfg: DictConfig, curves: Dict[str, list], train_state) -> dict:
+def _summarize(cfg: DictConfig, curves: Dict[str, list]) -> dict:
     """Build the run summary a sweep optimizes against."""
     losses, accs = curves['loss'], curves['accuracy']
     diverged = bool(
@@ -203,7 +202,7 @@ def run_config(cfg: DictConfig) -> dict:
         diagnostics_fn=diagnostics_fn, log_fn=_log_period,
     )
 
-    summary = _summarize(cfg, curves, train_state)
+    summary = _summarize(cfg, curves)
     print(f'Average loss: {summary["average_loss"]:.4f} | '
           f'Asymptotic loss: {summary["asymptotic_loss"]:.4f} | '
           f'Asymptotic acc: {summary["asymptotic_accuracy"]:.4f}')

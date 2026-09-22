@@ -17,7 +17,6 @@ stops being acceptable; use ``BlockSparseMLP`` for fast block-sparse runs.
 """
 
 import warnings
-from typing import Optional
 
 import equinox as eqx
 import jax

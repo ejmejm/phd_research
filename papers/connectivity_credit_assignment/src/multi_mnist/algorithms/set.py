@@ -34,8 +34,6 @@ optimizer-state resets when a connection is regrown, and -- for the utility
 variant -- per-step state.
 """
 
-from typing import Any, Dict, Optional, Tuple
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -65,7 +63,6 @@ class SETState(eqx.Module):
 
 def _evolve_layer(weights, mask, eligible, score, zeta, key, *, prune_metric):
     """One prune-and-regrow pass over a layer."""
-    k_regrow = key
     active = mask.astype(jnp.bool_)
 
     if prune_metric == 'utility':
@@ -78,7 +75,7 @@ def _evolve_layer(weights, mask, eligible, score, zeta, key, *, prune_metric):
 
     # Global regrowth: a replacement may land anywhere in the layer, subject
     # only to the receiving unit slot being in use.
-    regrow = random_inactive_mask(after_prune | ~eligible, n_prune, k_regrow)
+    regrow = random_inactive_mask(after_prune | ~eligible, n_prune, key)
     new_active = after_prune | regrow
 
     # Regrown connections enter at exactly 0.

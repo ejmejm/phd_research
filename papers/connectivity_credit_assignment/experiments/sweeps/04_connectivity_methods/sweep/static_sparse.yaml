@@ -4,8 +4,8 @@
 # connectivity". Same budget, same degree distribution, same representation as
 # the SET and DEEP-R arms -- only the evolution is removed.
 #
-# Expressed as `algorithm.name: static` on `dynamic_network` rather than SET
-# with zeta=0: event_period is then 0, so the trainer scans a whole log period
+# Expressed as `algorithm.name: static` rather than SET with zeta=0:
+# event_period is then 0, so the trainer scans a whole log period
 # in one go and computes structure diagnostics once instead of every period.
 # Cheaper, and identical in what it trains.
 name: 04_static_sparse_n16

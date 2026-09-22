@@ -76,17 +76,23 @@ COMMON="--config-path=sweeps/04_connectivity_methods --config-name=base \
   project=paper-weight-pruning-connectivity-pilot seed=[0,1,2]"
 
 # SET
-python experiments/train.py $COMMON model.type=dynamic_network \
-  algorithm.name=set algorithm.zeta=0.01 algorithm.evolve_frequency=125 \
+python experiments/train.py $COMMON model.type=padded_mlp \
+  model.init_strategy=sparse model.sparse.init_mode=epsilon \
+  model.sparse.weight_init=glorot \
+  algorithm.name=set algorithm.evolve_frequency=125 \
   target_hidden_units=768 'optimizer.learning_rate=${eval:2**-7}'
 
 # DEEP-R
-python experiments/train.py $COMMON model.type=dynamic_network \
-  algorithm.name=deep_r algorithm.l1=1e-3 algorithm.temperature=1e-5 \
+python experiments/train.py $COMMON model.type=padded_mlp \
+  model.init_strategy=sparse model.sparse.init_mode=uniform_p \
+  model.sparse.weight_init=normal \
+  algorithm.name=deep_r algorithm.l1=1e-3 algorithm.noise_ratio=1.0 \
   target_hidden_units=768 'optimizer.learning_rate=${eval:2**-7}'
 
 # static sparse
-python experiments/train.py $COMMON model.type=dynamic_network \
+python experiments/train.py $COMMON model.type=padded_mlp \
+  model.init_strategy=sparse model.sparse.init_mode=epsilon \
+  model.sparse.weight_init=glorot \
   algorithm.name=static target_hidden_units=768 \
   'optimizer.learning_rate=${eval:2**-7}'
 
@@ -118,14 +124,14 @@ cover both arms and should be reused.
 | `set` | 4 width × 4 ζ × 4 LR | 64 |
 | `static_sparse` | 4 width × 4 LR | 16 |
 | `deep_r` | 3 width × 3 l1 × 4 noise_ratio × 4 LR | 144 |
+| `block_sparse` | 5 LR | 5 |
+| `dense` | 5 LR | 5 |
 
 Throughput at H=768 with 5 vmapped seeds, measured on an RTX 4080: 29 s per
 20k steps for static sparse, 61 s for DEEP-R at the published `event_period:
 1`, 90 s for SET at `evolve_frequency: 125`. SET is the expensive arm here,
 because its prune is an order statistic over the full matrix and so costs a
 sort that DEEP-R avoids entirely.
-| `block_sparse` | 5 LR | 5 |
-| `dense` | 5 LR | 5 |
 
 ### 3. Finals — 30 seeds at each arm's best cell
 
@@ -187,10 +193,10 @@ the whole matrix -- 521 ms against 15 ms per event at H=768 -- and buys
 nothing here. SET does sort, because "the smallest-magnitude zeta fraction" is
 an order statistic and there is no way around it.
 
-**DEEP-R's defaults do nothing at this scale.** `l1=1e-5, T=1e-7` from the
-code's signature move a typical weight by ~1% of its magnitude over a whole
-drift period, so DEEP-R would silently reduce to the static-sparse arm.
-`sweep/deep_r.yaml` brackets `l1=1e-3` and `T=1e-5` instead, which are the
+**A weak `l1` or `T` does nothing at this scale.** At `l1=1e-5, T=1e-7` both
+terms move a typical weight by ~1% of its magnitude over a whole drift period,
+so DEEP-R would silently reduce to the static-sparse arm. `base.yaml` and
+`sweep/deep_r.yaml` anchor on `l1=1e-3` and `T=1e-5` instead, which are the
 values that walk a typical weight to zero in ~2000 steps at lr=2⁻⁶. Confirm
 this rather than trusting it: every run logs `cumulative_pruned` and
 `cumulative_regrown`, and those should be in the same ballpark as SET's. If

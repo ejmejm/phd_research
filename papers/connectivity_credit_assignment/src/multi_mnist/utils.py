@@ -113,17 +113,6 @@ def set_seed(seed: Optional[int]):
         np.random.seed(seed)
 
 
-def seed_from_string(seed: Optional[int], string: str) -> Optional[int]:
-    """Derive a stable sub-seed from a base seed and a label.
-
-    Lets independent components (model init, data stream, ...) draw
-    reproducible but uncorrelated seeds from one config-level seed.
-    """
-    if seed is None:
-        return random.randint(0, 2**32)
-    return seed + int(hashlib.md5(string.encode()).hexdigest(), 16) % (2**32)
-
-
 def rng_from_string(rng: Optional[PRNGKeyArray], string: str) -> PRNGKeyArray:
     """Derive a JAX PRNG key from a base key and a label.
 

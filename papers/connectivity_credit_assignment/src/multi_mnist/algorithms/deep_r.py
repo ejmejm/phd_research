@@ -58,8 +58,6 @@ preconditioned optimizer they are not, so ``optimizer.name: sgd`` is the
 supported setting.
 """
 
-from typing import Any, Dict, Tuple
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -212,15 +210,14 @@ class DeepR(ConnectivityAlgorithm):
         eligible_w2 = model.unit_mask[None, :] > 0
 
         active_w1 = model.w1_mask.astype(jnp.bool_)
+        active_w2 = model.w2_mask.astype(jnp.bool_)
         regrow_w1 = bernoulli_inactive_mask(
             active_w1 | ~eligible_w1, algo_state.target_w1 - active_w1.sum(), k1)
 
         if self.evolve_w2:
-            active_w2 = model.w2_mask.astype(jnp.bool_)
             regrow_w2 = bernoulli_inactive_mask(
                 active_w2 | ~eligible_w2, algo_state.target_w2 - active_w2.sum(), k2)
         else:
-            active_w2 = model.w2_mask.astype(jnp.bool_)
             regrow_w2 = jnp.zeros_like(active_w2)
 
         # Reactivated connections re-enter at theta = regrow_theta, carrying

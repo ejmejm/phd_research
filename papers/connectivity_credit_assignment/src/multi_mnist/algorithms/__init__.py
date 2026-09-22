@@ -17,8 +17,6 @@ SET and DEEP-R each have two implementations, picked by ``model.type``:
     instead, which is a documented deviation.
 """
 
-from typing import Any, Dict
-
 from omegaconf import DictConfig
 
 from .base import ConnectivityAlgorithm

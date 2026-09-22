@@ -23,8 +23,9 @@ task:
 
 # --- Model ---
 model:
-  # padded_mlp: masked dense, used for every figure in the paper.
-  # dynamic_network: preallocated sparse, required by SET and DEEP-R.
+  # padded_mlp: masked dense, used for every figure in the paper and by
+  # SET and DEEP-R. dynamic_network: preallocated sparse, for scales where
+  # the dense matmul is wasteful.
   type: padded_mlp
 
   # padded_mlp only. dense connects everything; block_sparse partitions the
@@ -34,7 +35,8 @@ model:
   max_hidden_units: ${model.initial_hidden_units}
   activation: leaky_relu
 
-  # dynamic_network only: how the initial sparse topology is sized.
+  # init_strategy: sparse (and dynamic_network): how the initial sparse
+  # topology is sized.
   sparse:
     # epsilon:   Erdos-Renyi as in the SET paper. Width is derived from
     #            connection_budget and epsilon; W1 and W2 end up at different

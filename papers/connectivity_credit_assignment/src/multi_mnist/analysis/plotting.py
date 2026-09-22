@@ -9,14 +9,10 @@ paper's figures label series inline, so the legend-free version is what goes
 into the manuscript while the legended one stays readable on its own.
 """
 
-import os
-import warnings
 from pathlib import Path
-from typing import Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import seaborn as sns
 from scipy.stats import t as t_dist
 

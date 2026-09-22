@@ -5,8 +5,6 @@ connection count, so that construction lives here rather than in either
 algorithm.
 """
 
-from typing import Tuple
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp

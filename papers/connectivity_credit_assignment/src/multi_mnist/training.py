@@ -17,7 +17,7 @@ current one runs on the accelerator.
 
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
 
 import equinox as eqx
 import jax

@@ -10,7 +10,8 @@ is captured in the training loop's closure, so it must not hold JAX arrays.
 Mutable per-seed state lives in ``TrainState.algo`` as a pytree, which is what
 gets vmapped over seeds and threaded through the scan.
 
-There are two places structure can change, and they are not interchangeable:
+There are three places structure can change, and they are not
+interchangeable:
 
 ``event``
     Runs *inside* the jitted, vmapped scan, every ``event_period`` steps. It
