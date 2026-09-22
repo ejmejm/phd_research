@@ -73,9 +73,10 @@ def init_model(
     ``dense`` connects every input to every hidden unit and every hidden unit
     to every output. ``block_sparse`` partitions the hidden units evenly over
     tasks and connects each unit only to the inputs and outputs of its task,
-    yielding ``n_tasks`` independent sub-networks. ``sparse`` draws an
-    Erdos-Renyi random topology at the density set by ``model.sparse.epsilon``,
-    which is the starting point SET and DEEP-R evolve from.
+    yielding ``n_tasks`` independent sub-networks. ``sparse`` draws a random
+    topology for SET and DEEP-R to evolve from, at a density set by
+    ``model.sparse.init_mode``: ``epsilon`` is SET's shape-dependent
+    Erdos-Renyi formula, ``uniform_p`` is DEEP-R's flat per-layer density.
     """
     max_hidden = int(cfg.model.max_hidden_units)
     initial = int(cfg.model.initial_hidden_units)
@@ -105,29 +106,84 @@ def init_model(
             w2_mask = w2_mask.at[:, :initial].set(1.0)
 
         elif strategy == 'sparse':
-            # Erdos-Renyi, as in the SET paper: each bipartite layer gets edge
-            # probability p = epsilon * (n_in + n_out) / (n_in * n_out). This
-            # is the same construction as models/sparse_init.py, materialized
-            # as a mask over a dense matrix instead of per-unit slot arrays --
-            # so SET and DEEP-R can run here, with path_purity available and
-            # no per-unit cap on how far a degree distribution can drift.
-            epsilon = float(cfg.model.sparse.epsilon)
-            p_w1 = min(1.0, epsilon * (input_dim + initial) / (input_dim * initial))
-            p_w2 = min(1.0, epsilon * (output_dim + initial) / (output_dim * initial))
+            # --- density, per layer ---
+            mode = str(cfg.model.sparse.get('init_mode', 'epsilon'))
+            if mode == 'epsilon':
+                # SET, Eq. 1: p = eps*(n_in + n_out)/(n_in * n_out) per bipartite
+                # layer. Density depends on layer shape, so W1 and W2 end up at
+                # different densities whenever (n_in, n_out) are asymmetric.
+                epsilon = float(cfg.model.sparse.epsilon)
+                p_w1 = epsilon * (input_dim + initial) / (input_dim * initial)
+                p_w2 = epsilon * (output_dim + initial) / (output_dim * initial)
+                # Clipping a saturated probability to 1 would be silently
+                # destructive: the layer comes out fully dense, so an evolution
+                # step cannot change its connectivity, but pruning still zeroes
+                # zeta of its weights at every event and "regrows" them at 0 --
+                # a periodic partial reset of the layer masquerading as
+                # structure learning. Refuse instead. The paper's own default
+                # epsilon=20 saturates on any layer with few enough outputs.
+                for name, p, n_out in (('W1', p_w1, initial), ('W2', p_w2, output_dim)):
+                    if p >= 1.0:
+                        raise ValueError(
+                            f'model.sparse.epsilon={epsilon} saturates {name}: '
+                            f'p={p:.3f} >= 1 at hidden={initial}, n_out={n_out}, '
+                            f'so the layer would be fully dense and could not '
+                            f'evolve. Lower epsilon, or widen the layer.')
+            elif mode == 'uniform_p':
+                # DEEP-R, Appendix A: a per-layer density, with the output layer
+                # deliberately much denser -- the paper reports 0.75/2.3/22.8 x a
+                # global p0 across its three layers, and warns that "the
+                # performance dropped drastically if the output layer was
+                # initialized to be very sparse". `w2_density_ratio` is that
+                # skew; the two densities are then solved against the shared
+                # connection budget so the arms stay budget-matched:
+                #     p1 * I * H + p2 * O * H = budget,  p2 = ratio * p1
+                ratio = float(cfg.model.sparse.get('w2_density_ratio', 1.0))
+                budget = float(cfg.model.sparse.connection_budget)
+                p_w1 = budget / (initial * (input_dim + ratio * output_dim))
+                p_w2 = ratio * p_w1
+                if p_w2 > 1.0:
+                    raise ValueError(
+                        f'w2_density_ratio={ratio} needs p_w2={p_w2:.3f} <= 1 at '
+                        f'hidden={initial}. The output layer saturates: lower the '
+                        f'ratio, or widen the network.')
+            else:
+                raise ValueError(
+                    f"model.sparse.init_mode must be 'epsilon' or 'uniform_p', "
+                    f'got {mode!r}')
 
             km1, kv1 = jax.random.split(kw1)
             km2, kv2 = jax.random.split(kw2)
             m1 = jax.random.bernoulli(km1, p_w1, (initial, input_dim)).astype(jnp.float32)
             m2 = jax.random.bernoulli(km2, p_w2, (output_dim, initial)).astype(jnp.float32)
 
-            # Scale by the realized per-row fan-in, matching sparse_init.py.
-            v1 = jax.random.uniform(kv1, (initial, input_dim), minval=-1.0, maxval=1.0)
-            v2 = jax.random.uniform(kv2, (output_dim, initial), minval=-1.0, maxval=1.0)
-            b1 = jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(m1.sum(axis=-1), 1.0))
-            b2 = jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(m2.sum(axis=-1), 1.0))
+            # --- weight values ---
+            # Both schemes draw at the DENSE fan-in and then mask, which is what
+            # both papers do -- neither rescales to the realized sparse fan-in.
+            weight_init = str(cfg.model.sparse.get('weight_init', 'glorot'))
+            if weight_init == 'glorot':
+                # SET's runs were Keras with default layer initializers, i.e.
+                # glorot_uniform over the dense shape. The paper itself only
+                # says "initialize ANN model".
+                b1 = jnp.sqrt(6.0 / (input_dim + initial))
+                b2 = jnp.sqrt(6.0 / (initial + output_dim))
+                v1 = jax.random.uniform(kv1, (initial, input_dim), minval=-b1, maxval=b1)
+                v2 = jax.random.uniform(kv2, (output_dim, initial), minval=-b2, maxval=b2)
+            elif weight_init == 'normal':
+                # DEEP-R, Appendix A: "theta = (1/sqrt(n_in)) N(0,1) c where n_in
+                # is the number of afferent neurons" -- the dense layer width.
+                # DEEP-R stores theta = |w_0| with an independent random sign;
+                # drawing w_0 directly is the same distribution, because w_0 is
+                # symmetric about zero. See algorithms/deep_r.py:_init_signs.
+                v1 = jax.random.normal(kv1, (initial, input_dim)) / jnp.sqrt(float(input_dim))
+                v2 = jax.random.normal(kv2, (output_dim, initial)) / jnp.sqrt(float(initial))
+            else:
+                raise ValueError(
+                    f"model.sparse.weight_init must be 'glorot' or 'normal', "
+                    f'got {weight_init!r}')
 
-            W1 = W1.at[:initial].set(v1 * b1[:, None] * m1)
-            W2 = W2.at[:, :initial].set(v2 * b2[:, None] * m2)
+            W1 = W1.at[:initial].set(v1 * m1)
+            W2 = W2.at[:, :initial].set(v2 * m2)
             w1_mask = w1_mask.at[:initial].set(m1)
             w2_mask = w2_mask.at[:, :initial].set(m2)
 

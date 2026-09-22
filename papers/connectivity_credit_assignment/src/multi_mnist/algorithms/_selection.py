@@ -18,6 +18,22 @@ def signed_prune_mask(weights, active, zeta):
     active negative weights closest to zero are selected, by sign separately.
     Thresholds come from a sort over the whole array, so pruning is global
     within the layer -- which is what the SET paper specifies.
+
+    **Rounding differs from the authors' Keras implementation, deliberately.**
+    This prunes ``floor(zeta * n)`` per sign; theirs prunes ``ceil(zeta * n)``,
+    because it indexes the threshold at ``floor`` and then keeps only weights
+    strictly beyond it, so the element sitting at the threshold is removed too.
+    The paper says "remove a fraction zeta of the smallest positive weights",
+    which reads as ``floor``, and their extra one looks like an artifact of the
+    indexing rather than intent -- so this follows the paper.
+
+    Running both implementations on identical state confirms the difference is
+    exactly this and nothing else: their pruned set is always this one plus
+    exactly two entries, one per sign, and never disagrees otherwise. It is
+    negligible at the paper's zeta=0.3 (2 out of ~24,000) but not at the small
+    zeta this repository derives from the paper's per-example rate: on the
+    160-output layer at H=256 with zeta=6.25e-4 it is 2 against 4, a factor of
+    two. If you want their exact behaviour, take ``ceil`` here.
     """
     flat = weights.reshape(-1)
     flat_active = active.reshape(-1)

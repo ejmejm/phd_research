@@ -53,12 +53,17 @@ def _build_model_and_specs(cfg: DictConfig, input_dim: int, output_dim: int,
         if str(cfg.model.init_strategy) == 'sparse':
             # The realized Erdos-Renyi count is random, so report it against
             # the budget the width was derived from rather than assume it.
-            realized = int(model.w1_mask.sum() + model.w2_mask.sum())
+            e1 = int(model.w1_mask.sum())
+            e2 = int(model.w2_mask.sum())
             budget = int(cfg.model.sparse.connection_budget)
-            print(f'sparse init: hidden={int(cfg.model.initial_hidden_units)} '
-                  f'epsilon={float(cfg.model.sparse.epsilon):.4f} '
-                  f'connections={realized} (budget {budget}, '
-                  f'{100.0 * realized / budget:.1f}%)')
+            hidden = int(cfg.model.initial_hidden_units)
+            mode = str(cfg.model.sparse.get('init_mode', 'epsilon'))
+            detail = (f'epsilon={float(cfg.model.sparse.epsilon):.4f}'
+                      if mode == 'epsilon'
+                      else f'p={e1 / (input_dim * hidden):.5f}')
+            print(f'sparse init: mode={mode} hidden={hidden} {detail} '
+                  f'W1={e1} W2={e2} total={e1 + e2} '
+                  f'(budget {budget}, {100.0 * (e1 + e2) / budget:.1f}%)')
         return model, model_filter_spec(model), structure_diagnostics
 
     if model_type == 'dynamic_network':

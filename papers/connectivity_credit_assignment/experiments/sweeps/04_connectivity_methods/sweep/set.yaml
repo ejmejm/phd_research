@@ -4,13 +4,11 @@
 # pruning. `prune_metric: utility` exists in the codebase and won by a wide
 # margin at 8 tasks, but it is a different algorithm and is not swept here.
 #
-# Four axes. `target_hidden_units` is the sparsity axis -- the connection
+# Three axes. `target_hidden_units` is the sparsity axis -- the connection
 # budget is pinned to block-sparse's 203,264, so width alone decides per-unit
-# fan-in (794 weights/unit at H=256, down to 198 at H=1024). zeta and
-# evolve_frequency are partly redundant (what mostly matters is the turnover
-# rate zeta/evolve_frequency, spanning 1e-6 to 8e-4 per step here), but they
-# are not interchangeable: rare large prunes and frequent small ones behave
-# differently against a 2000-step drift period.
+# fan-in (794 weights/unit at H=256, down to 198 at H=1024). `evolve_frequency`
+# is the granularity axis, with zeta derived from it so that the paper's
+# per-example rewiring rate is held fixed across the whole grid.
 name: 04_set_n16
 project: paper-weight-pruning-connectivity-sweep
 command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
@@ -28,19 +26,26 @@ parameters:
 
   model.type: padded_mlp
   model.init_strategy: sparse
+  model.sparse.init_mode: epsilon   # SET's Erdos-Renyi construction
+  model.sparse.weight_init: glorot  # SET's Keras default, dense fan-in
   algorithm.name: set
   algorithm.prune_metric: magnitude
 
   # 16, 32, 48, 64 units per task at a fixed 203,264-connection budget.
   target_hidden_units: [256, 512, 768, 1024]
 
-  # 0.01 won at 8 tasks with 0.05 within noise and 0 far worse; 0.001 extends
-  # the grid downward.
-  algorithm.zeta: [0.001, 0.01, 0.05, 0.1]
-
-  # Must divide train.log_freq (asserted in run_experiment). 125 is one drift
-  # event; 1000 is half the interval between re-permutations of a given task.
-  algorithm.evolve_frequency: [125, 500, 1000]
+  # Evolution granularity, at the paper's turnover rate.
+  #
+  # zeta is not swept: base.yaml derives it as 5e-6 * evolve_frequency, which
+  # holds the paper's per-example rewiring rate (zeta=0.3 once per 60,000-example
+  # epoch) fixed at every cell. What this axis varies is how that fixed budget of
+  # rewiring is granulated -- rare large prunes against frequent small ones.
+  #
+  #   freq  125 -> zeta 6.25e-4      freq  500 -> zeta 2.5e-3
+  #   freq  250 -> zeta 1.25e-3      freq 1000 -> zeta 5.0e-3
+  #
+  # All four divide train.log_freq, as run_experiment asserts.
+  algorithm.evolve_frequency: [125, 250, 500, 1000]
 
   # 2^-6 won at both 8 and 32 tasks, interior to this grid.
   optimizer.learning_rate:
@@ -49,6 +54,6 @@ parameters:
     - "${eval:2**-6}"
     - "${eval:2**-5}"
 
-  # 4 x 4 x 3 x 4 = 192 trials, 5 vmapped seeds each.
+  # 4 width x 4 evolve_frequency x 4 LR = 64 trials, 5 vmapped seeds each.
   seed:
     value: [0, 1, 2, 3, 4]

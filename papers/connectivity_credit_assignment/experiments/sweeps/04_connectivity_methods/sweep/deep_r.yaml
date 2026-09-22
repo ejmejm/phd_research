@@ -39,6 +39,10 @@ parameters:
 
   model.type: padded_mlp
   model.init_strategy: sparse
+  # DEEP-R's own initialization: flat per-layer density, uniformly random
+  # positions. Not SET's epsilon formula, which is specific to SET.
+  model.sparse.init_mode: uniform_p
+  model.sparse.weight_init: normal   # DEEP-R Appendix A: N(0,1)/sqrt(dense n_in)
   algorithm.name: deep_r
   # The published per-step sampler. Affordable because reactivation needs no
   # sort: 61 s per 20k steps at H=768 against 52 s at event_period=25, so the
@@ -51,7 +55,12 @@ parameters:
   target_hidden_units: [256, 512, 768]
 
   algorithm.l1: [1e-4, 1e-3, 1e-2]
-  algorithm.temperature: [0, 1e-6, 1e-5]
+  # Noise-to-drift ratio sqrt(2*eta*T)/(eta*alpha); temperature is derived
+  # from it in base.yaml. 1.0 is the paper's drifting-task setting, below 1 is
+  # the soft-DEEP-R guidance, 0 is deterministic sign-flip pruning (its TIMIT
+  # setting). Gridding absolute T instead would let this ratio drift by 8x
+  # across the learning-rate axis.
+  algorithm.noise_ratio: [0, 0.3, 1.0, 3.0]
 
   optimizer.learning_rate:
     - "${eval:2**-8}"
@@ -59,6 +68,6 @@ parameters:
     - "${eval:2**-6}"
     - "${eval:2**-5}"
 
-  # 3 x 3 x 3 x 4 = 108 trials, 5 vmapped seeds each.
+  # 3 width x 3 l1 x 4 noise_ratio x 4 LR = 144 trials, 5 vmapped seeds each.
   seed:
     value: [0, 1, 2, 3, 4]

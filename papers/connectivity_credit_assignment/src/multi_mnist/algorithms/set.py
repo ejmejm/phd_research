@@ -10,7 +10,12 @@
        same number at random inactive positions.
     3. Hidden units stay permanently active; only connections evolve.
 
-Paper defaults: epsilon=20, zeta=0.3.
+Paper defaults: epsilon=20, zeta=0.3 -- and note the paper's unit of time is an
+**epoch**. Algorithm 1 line 9 is "for each training epoch", so zeta=0.3 rewires
+30% of a layer per pass over the training set, about 5e-6 of it per example on
+MNIST. This repository trains online at batch size 1 with no epoch to key off,
+so the sweeps grid the per-example turnover rate directly and derive zeta from
+it; see experiments/sweeps/04_connectivity_methods/sweep/set.yaml.
 
 Representation
 --------------
@@ -58,19 +63,9 @@ class SETState(eqx.Module):
     step_w2: jax.Array
 
 
-def _regrow_scale(fan_in):
-    """LeCun-uniform bound at the given per-row fan-in."""
-    return jnp.sqrt(3.0) / jnp.sqrt(jnp.maximum(fan_in, 1.0))
-
-
-def _evolve_layer(weights, mask, eligible, score, zeta, key, *, prune_metric,
-                  row_axis):
-    """One prune-and-regrow pass over a layer.
-
-    ``row_axis`` is the axis to sum over to get each receiving unit's fan-in,
-    which sets the scale of the new weights.
-    """
-    k_regrow, k_value = jax.random.split(key)
+def _evolve_layer(weights, mask, eligible, score, zeta, key, *, prune_metric):
+    """One prune-and-regrow pass over a layer."""
+    k_regrow = key
     active = mask.astype(jnp.bool_)
 
     if prune_metric == 'utility':
@@ -86,11 +81,22 @@ def _evolve_layer(weights, mask, eligible, score, zeta, key, *, prune_metric,
     regrow = random_inactive_mask(after_prune | ~eligible, n_prune, k_regrow)
     new_active = after_prune | regrow
 
-    fan_in = new_active.sum(axis=row_axis, keepdims=True)
-    values = jax.random.uniform(
-        k_value, weights.shape, minval=-1.0, maxval=1.0) * _regrow_scale(fan_in)
-
-    new_weights = jnp.where(regrow, values, jnp.where(prune, 0.0, weights))
+    # Regrown connections enter at exactly 0.
+    #
+    # The paper does not say: Algorithm 1 line 16 is "add randomly new weights
+    # (connections) in the same amount as the ones removed previously", where
+    # "randomly" modifies the position, not the value. The authors' two released
+    # implementations disagree -- the Keras one enters at 0 (the new mask is
+    # applied as a constraint, so the position must be grown by gradient), the
+    # sparse-data-structures one at N(0, 0.1^2). This follows the Keras one.
+    #
+    # The consequence is worth knowing: `signed_prune_mask` excludes weights of
+    # exactly 0 from both the positive and negative sets, so a new connection is
+    # unprunable until the first gradient moves it off zero, and is then the
+    # smallest weight in the layer. It therefore gets one event's worth of
+    # gradient steps to establish itself or be removed again -- which is why the
+    # evolution rate, not just zeta, decides whether anything can grow.
+    new_weights = jnp.where(regrow, 0.0, jnp.where(prune, 0.0, weights))
     return (new_weights, new_active.astype(mask.dtype), prune | regrow,
             n_prune, regrow.sum().astype(jnp.int32))
 
@@ -173,12 +179,10 @@ class SET(ConnectivityAlgorithm):
         # Only slots belonging to an active hidden unit are eligible.
         W1, w1_mask, touched_w1, p1, r1 = _evolve_layer(
             model.W1, model.w1_mask, model.unit_mask[:, None] > 0,
-            score_w1, self.zeta, k1,
-            prune_metric=self.prune_metric, row_axis=-1)
+            score_w1, self.zeta, k1, prune_metric=self.prune_metric)
         W2, w2_mask, touched_w2, p2, r2 = _evolve_layer(
             model.W2, model.w2_mask, model.unit_mask[None, :] > 0,
-            score_w2, self.zeta, k2,
-            prune_metric=self.prune_metric, row_axis=-1)
+            score_w2, self.zeta, k2, prune_metric=self.prune_metric)
 
         new_model = tree_replace(
             model, W1=W1, W2=W2, w1_mask=w1_mask, w2_mask=w2_mask)

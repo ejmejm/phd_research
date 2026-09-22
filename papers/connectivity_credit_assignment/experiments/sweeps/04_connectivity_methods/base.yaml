@@ -58,10 +58,32 @@ model:
   activation: leaky_relu
 
   sparse:
-    # The published SET initialization: Erdos-Renyi with per-layer edge
-    # probability p = epsilon * (n_in + n_out) / (n_in * n_out). padded_mlp
-    # reads only `epsilon`; the rest sizes dynamic_network's slot arrays.
+    # Each method starts from the topology its own paper specifies.
+    #
+    # epsilon   SET's Erdos-Renyi formula, p = eps*(n_in+n_out)/(n_in*n_out).
+    #           Density depends on layer shape, so W2 ends up much denser than
+    #           W1 -- and increasingly so as the network widens (W2 takes 3% of
+    #           the budget at H=256, 8% at H=1024).
+    # uniform_p DEEP-R's flat per-layer density, positions drawn uniformly at
+    #           random. One p derived from the shared budget, so the arms stay
+    #           budget-matched. Holds W2 fan-in at 16 per output at every
+    #           width, which is also the block-sparse profile.
+    #
+    # Set per sweep: epsilon for SET and static sparse, uniform_p for DEEP-R.
     init_mode: epsilon
+
+    # uniform_p only. How much denser W2 is than W1. DEEP-R's Appendix A
+    # initializes its three layers at 0.75/2.3/22.8 x a global p0 and warns
+    # that "the performance dropped drastically if the output layer was
+    # initialized to be very sparse". The paper's ~30x is infeasible at these
+    # shapes -- p_w2 would exceed 1 at H=256 -- so 10x, which is feasible
+    # across the whole width sweep and holds W2 fan-in at ~144 per output.
+    w2_density_ratio: 10.0
+
+    # Weight values, drawn at the DENSE fan-in and then masked, as both papers
+    # do. glorot: SET's Keras default, uniform +-sqrt(6/(n_in+n_out)).
+    # normal:  DEEP-R Appendix A, N(0,1)/sqrt(n_in) at the dense afferent count.
+    weight_init: glorot
     connection_budget: ${eval:${block_sparse_units_per_task} * ${task.n_tasks} * 794}
     # derive_sizes() computes hidden = floor((budget/epsilon - I - O) / 2), so
     # epsilon is inverted from the width we want; the +0.5 absorbs the floor.
@@ -81,19 +103,43 @@ algorithm:
   # magnitude is published SET. utility is this repository's variant and is not
   # part of the comparison.
   prune_metric: magnitude
-  evolve_frequency: 125       # must divide train.log_freq
-  zeta: 0.01                  # fraction pruned and regrown per event, per layer
+
+  # Steps between prune-and-regrow events. Must divide train.log_freq. This is
+  # the swept axis; zeta follows from it.
+  evolve_frequency: 1000
+
+  # SET's unit of time is an EPOCH -- Algorithm 1 line 9, "for each training
+  # epoch" -- at zeta = 0.3. On MNIST's 60,000-example training set that is
+  # 0.3/60000 = 5e-6 of a layer rewired per training example. There is no epoch
+  # in a batch-1 online stream, so zeta is derived to hold the paper's rate at
+  # whatever evolve_frequency is in use: the same fraction of the layer is
+  # rewired per example seen, and evolve_frequency only decides how coarsely
+  # that is granulated.
+  turnover_per_example: ${eval:0.3 / 60000}
+  zeta: "${eval:'${algorithm.turnover_per_example} * ${algorithm.evolve_frequency} * ${train.batch_size}'}"
+
   utility_decay: 0.999        # read only when prune_metric: utility
 
   # --- deep_r ---
   l1: 1.0e-3                  # alpha in the paper; see sweep/deep_r.yaml
-  temperature: 1.0e-5         # Langevin T; 0 gives deterministic sign-flip pruning
+  # Langevin T, derived from the noise-to-drift ratio rather than set directly.
+  # The paper's drifting-task experiment sets T = eta*alpha^2/2, so that the
+  # noise increment sqrt(2*eta*T) exactly equals the L1 drift eta*alpha; the
+  # soft-DEEP-R guidance is that sqrt(2*T*eta) "should ideally be slightly
+  # below alpha". Gridding that ratio keeps the relationship intact as the
+  # learning rate varies across the sweep, which gridding T in absolute units
+  # does not.
+  noise_ratio: 1.0
+  temperature: "${eval:'${algorithm.noise_ratio}**2 * ${optimizer.learning_rate} * ${algorithm.l1}**2 / 2'}"
+  # Magnitude a reactivated connection re-enters at, matching the reference
+  # implementation. Cannot be 0: with a fixed sign that sits on the boundary.
+  regrow_theta: 1.0e-12
   evolve_w2: true             # evolve the hidden->output layer too
-  # Steps between reactivation events. 1 is the published per-step sampler,
-  # and with sort-free reactivation it costs only ~17% more than 25, so there
-  # is no reason to coarse-grain. Raising it does not change the weight
-  # dynamics -- zero-crossings are still detected every step -- only how long
-  # a connection stays dormant before a replacement is drawn.
+  # Steps between reactivation events. 1 is the published per-step sampler and
+  # what the sweeps use. Raising it leaves the per-connection update rule
+  # unchanged -- zero-crossings are still detected every step -- but a
+  # connection left dormant longer is absent from the forward pass longer,
+  # which does change the gradients.
   event_period: 1
 
 optimizer:

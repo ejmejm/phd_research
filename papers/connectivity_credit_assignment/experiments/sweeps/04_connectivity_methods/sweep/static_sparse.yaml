@@ -25,6 +25,8 @@ parameters:
 
   model.type: padded_mlp
   model.init_strategy: sparse
+  model.sparse.init_mode: epsilon   # SET's Erdos-Renyi construction
+  model.sparse.weight_init: glorot  # SET's Keras default, dense fan-in
   algorithm.name: static
 
   target_hidden_units: [256, 512, 768, 1024]

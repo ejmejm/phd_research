@@ -69,7 +69,8 @@ def build_algorithm(cfg: DictConfig) -> ConnectivityAlgorithm:
             l1=float(cfg.algorithm.get('l1', 1e-3)),
             temperature=float(cfg.algorithm.get('temperature', 1e-5)),
             evolve_w2=bool(cfg.algorithm.get('evolve_w2', True)),
-            event_period=int(cfg.algorithm.get('event_period', 25)),
+            event_period=int(cfg.algorithm.get('event_period', 1)),
+            regrow_theta=float(cfg.algorithm.get('regrow_theta', 1e-12)),
         )
         if on_dynamic:
             from .dynamic import DeepRDynamic
