@@ -1,0 +1,55 @@
+# SET v3 at 16 tasks: close the bowl on width and evolution granularity.
+#
+# v2 put SET's best at H=256 and evolve_frequency=1000 -- both on the EDGE of
+# their grids (256 was the narrowest width, 1000 the least frequent), so the
+# optimum was bracketed on one side only. v3 shifts both windows down/up to put
+# the v2 winner in the interior.
+#
+# The learning rate is fixed at 2^-8, which won or tied at every arm in v2 and
+# was interior there, so it is no longer swept.
+#
+# evolve_frequency 2000 and 4000 exceed train.log_freq. That used to be
+# rejected outright; training.py now applies such events from the host loop,
+# on the k-th log period, which lands them on exactly the same steps. Verified
+# equal: 40,277 connections pruned over 40k steps either way.
+name: 04_set_n16_v3
+project: paper-weight-pruning-connectivity-sweep
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  train.total_steps: 800000
+
+  model.type: padded_mlp
+  model.init_strategy: sparse
+  model.sparse.init_mode: epsilon   # SET's Erdos-Renyi construction
+  model.sparse.weight_init: glorot  # SET's Keras default, dense fan-in
+  algorithm.name: set
+  algorithm.prune_metric: magnitude
+
+  optimizer.learning_rate: "${eval:2**-8}"
+
+  # v2 window was 256..1024 and the winner was 256. Shifted down; 256 is now
+  # interior. At a fixed 203,264-connection budget, narrower means a larger
+  # per-unit fan-in: H=64 gives ~3176 weights/unit against 794 at H=256.
+  target_hidden_units: [64, 128, 256, 512]
+
+  # v2 window was 125..1000 and the winner was 1000. Shifted up; 1000 is now
+  # interior. zeta stays derived in base.yaml, so the paper's per-example
+  # rewiring rate is held fixed and this axis varies only granularity:
+  #   freq  500 -> zeta 2.5e-3      freq 2000 -> zeta 1.0e-2
+  #   freq 1000 -> zeta 5.0e-3      freq 4000 -> zeta 2.0e-2
+  algorithm.evolve_frequency: [500, 1000, 2000, 4000]
+
+  # 4 width x 4 evolve_frequency = 16 trials, 5 vmapped seeds each.
+  seed:
+    value: [0, 1, 2, 3, 4]

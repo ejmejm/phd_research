@@ -167,18 +167,38 @@ def build_scan_log_period(
 ):
     """Build the jitted function that advances one log period.
 
-    When the algorithm has no in-scan event, a log period is a single scan.
-    When it does, the period is split into ``log_freq // event_period``
-    cycles, each a scan followed by one structure event.
+    Returns ``(scan_log_period, periods_per_event)``.
+
+    An event period shorter than a log period is handled inside the scan: the
+    period is split into ``log_freq // event_period`` cycles, each a scan
+    followed by one structure event. An event period *longer* than a log period
+    cannot be, since the event would fall outside the chunk being scanned --
+    there the scan runs eventless and ``periods_per_event`` tells the caller to
+    apply the event itself every k-th period. Either way an event lands exactly
+    every ``event_period`` steps; only who applies it moves.
     """
     if not algorithm.event_period:
         def scan_log_period(state, data):
             state, metrics = jax.lax.scan(
                 train_step_fn, state, data, unroll=SCAN_UNROLL)
             return state, metrics, {}
-        return scan_log_period
+        return scan_log_period, 1
 
     event_period = int(algorithm.event_period)
+    if event_period > log_freq:
+        assert event_period % log_freq == 0, (
+            f'algorithm event period {event_period} exceeds train.log_freq='
+            f'{log_freq}, so it must be a multiple of it for events to land on '
+            f'log boundaries'
+        )
+
+        def scan_log_period(state, data):
+            state, metrics = jax.lax.scan(
+                train_step_fn, state, data, unroll=SCAN_UNROLL)
+            return state, metrics, {}
+
+        return scan_log_period, event_period // log_freq
+
     assert log_freq % event_period == 0, (
         f'train.log_freq={log_freq} must be divisible by the algorithm event '
         f'period {event_period}, so that events align with log boundaries'
@@ -202,7 +222,7 @@ def build_scan_log_period(
                 fused_step, state, data, unroll=SCAN_UNROLL)
             return state, metrics, info
 
-        return scan_log_period
+        return scan_log_period, 1
 
     cycles_per_log = log_freq // event_period
 
@@ -222,7 +242,7 @@ def build_scan_log_period(
         state, (metrics, info) = jax.lax.scan(event_cycle, state, data)
         return state, metrics.reshape(-1, *metrics.shape[2:]), info
 
-    return scan_log_period
+    return scan_log_period, 1
 
 
 def run_experiment(
@@ -255,8 +275,20 @@ def run_experiment(
         train_step, algorithm=algorithm,
         num_classes=num_classes, n_tasks=n_tasks, loss_type=loss_type,
     )
-    vmapped_scan = jax.jit(jax.vmap(build_scan_log_period(
-        algorithm, train_step_fn, log_freq)))
+    scan_log_period, periods_per_event = build_scan_log_period(
+        algorithm, train_step_fn, log_freq)
+    vmapped_scan = jax.jit(jax.vmap(scan_log_period))
+
+    # An event period longer than a log period fires here instead of in-scan.
+    def _apply_event(state):
+        next_rng, event_key = jax.random.split(state.rng)
+        model, optimizer, algo_state, info = algorithm.event(
+            state.model, state.optimizer, state.algo, key=event_key)
+        return tree_replace(
+            state, model=model, optimizer=optimizer, algo=algo_state,
+            rng=next_rng), info
+
+    vmapped_event = jax.jit(jax.vmap(_apply_event)) if periods_per_event > 1 else None
 
     curves = {k: [] for k in (
         'loss', 'accuracy', 'per_seed_loss', 'per_seed_accuracy',
@@ -291,12 +323,17 @@ def run_experiment(
     next_batch_future = prefetch_executor.submit(_prepare_batch)
 
     pbar = tqdm(total=cfg.train.total_steps, desc='Training')
-    for _ in range(num_log_periods):
+    for period in range(num_log_periods):
         imgs_np, lbls_np = next_batch_future.result()
         next_batch_future = prefetch_executor.submit(_prepare_batch)
 
         train_state, metrics, info = vmapped_scan(
             train_state, (jnp.array(imgs_np), jnp.array(lbls_np)))
+
+        # Event periods longer than a log period fire here, on the k-th period,
+        # which is the same step the in-scan path would have fired on.
+        if vmapped_event is not None and (period + 1) % periods_per_event == 0:
+            train_state, info = vmapped_event(train_state)
 
         # metrics: (n_seeds, log_freq, 2)
         per_seed_loss = metrics[..., 0].mean(axis=1)
@@ -320,7 +357,11 @@ def run_experiment(
         for key, value in info.items():
             cumulative_info[key] = cumulative_info.get(key, 0.0) + float(
                 np.asarray(value).sum(axis=-1).mean())
-            structure_metrics[f'cumulative_{key}'] = cumulative_info[key]
+        # Emit every counter seen so far, not just those touched this period --
+        # with a long event period most periods carry no event, and a metric
+        # that disappears leaves holes in the logged series.
+        for key, total in cumulative_info.items():
+            structure_metrics[f'cumulative_{key}'] = total
 
         test_metrics, per_seed_test_metrics = {}, {}
         if eval_freq > 0 and step % eval_freq == 0:

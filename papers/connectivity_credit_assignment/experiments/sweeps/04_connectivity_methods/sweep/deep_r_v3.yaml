@@ -1,0 +1,57 @@
+# DEEP-R v3 at 16 tasks: close the bowl on l1.
+#
+# v2 put DEEP-R's best at l1=1e-4, the LOW edge of its 1e-4..1e-2 window, which
+# is consistent with the turnover diagnosis -- at 1e-3 the L1 pull walks a
+# typical weight (mean |w| = 0.0071) to zero in ~450 steps and the arm spends
+# itself on birth-death churn. v3 extends below: 1e-5, 1e-6 and 0. Together
+# with v2's lr=2^-8 cells, l1 is then bracketed across 0 .. 1e-2.
+#
+# noise_ratio is NOT swept. It returned a null at both horizons -- 0, 0.3, 1
+# and 3 spanned 0.577-0.585 at 100k and 0.6110-0.6115 at 800k, inside seed
+# noise -- so it is pinned at the paper's drifting-task setting of 1.0, which
+# is where T = eta*alpha^2/2 and the noise increment equals the L1 drift.
+#
+# NOTE: temperature is derived as noise_ratio^2 * lr * l1^2 / 2, so l1=0 gives
+# T=0 regardless of noise_ratio. That cell is therefore DEEP-R with neither L1
+# nor Langevin noise: connections die only where the gradient itself carries a
+# weight across zero. It is the natural zero-point of this axis, not a
+# misconfiguration -- but it is a different algorithm from the published one,
+# and should be read as the ablation it is.
+name: 04_deep_r_n16_v3
+project: paper-weight-pruning-connectivity-sweep
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  train.total_steps: 800000
+
+  model.type: padded_mlp
+  model.init_strategy: sparse
+  model.sparse.init_mode: uniform_p
+  model.sparse.weight_init: normal   # DEEP-R Appendix A: N(0,1)/sqrt(dense n_in)
+  algorithm.name: deep_r
+  algorithm.event_period: 1
+  algorithm.evolve_w2: true
+  algorithm.noise_ratio: 1.0
+
+  optimizer.learning_rate: "${eval:2**-8}"
+
+  # Unchanged from v2.
+  target_hidden_units: [256, 512, 768]
+
+  # Quoted so the list is uniformly typed: YAML reads 1e-5 as a string but 0.0
+  # as a float, and Comet rejects a categorical mixing the two.
+  algorithm.l1: ['1e-5', '1e-6', '0.0']
+
+  # 3 width x 3 l1 = 9 trials, 5 vmapped seeds each.
+  seed:
+    value: [0, 1, 2, 3, 4]
