@@ -39,8 +39,11 @@ def _dynamic_network_diagnostics(model, n_tasks: int) -> Dict[str, Any]:
 
 
 def _build_model_and_specs(cfg: DictConfig, input_dim: int, output_dim: int,
-                           n_tasks: int, key):
+                           n_tasks: int, algorithm: ConnectivityAlgorithm, key):
     """Build the model named by ``model.type``, with its filter and diagnostics.
+
+    The algorithm gets to adjust the model before the filter spec is taken
+    from it, so anything it installs there is fixed for the whole run.
 
     Returns ``(model, filter_spec, diagnostics_fn)``.
     """
@@ -64,6 +67,7 @@ def _build_model_and_specs(cfg: DictConfig, input_dim: int, output_dim: int,
             print(f'sparse init: mode={mode} hidden={hidden} {detail} '
                   f'W1={e1} W2={e2} total={e1 + e2} '
                   f'(budget {budget}, {100.0 * (e1 + e2) / budget:.1f}%)')
+        model = algorithm.prepare_model(model)
         return model, model_filter_spec(model), structure_diagnostics
 
     if model_type == 'dynamic_network':
@@ -76,6 +80,7 @@ def _build_model_and_specs(cfg: DictConfig, input_dim: int, output_dim: int,
         model = init_sparse_model(
             cfg, input_dim, output_dim, hidden, max_conns, max_fan_out,
             p_w1, p_w2, key=key)
+        model = algorithm.prepare_model(model)
         return model, model_filter_spec(model), _dynamic_network_diagnostics
 
     raise ValueError(
@@ -114,7 +119,8 @@ def prepare_experiment(cfg: DictConfig, algorithm: ConnectivityAlgorithm):
         ))
 
         model, filter_spec, diagnostics_fn = _build_model_and_specs(
-            cfg, input_dim, output_dim, n_tasks, key=rng_from_string(rng, 'model'))
+            cfg, input_dim, output_dim, n_tasks, algorithm,
+            key=rng_from_string(rng, 'model'))
         optimizer = prepare_optimizer(
             model, cfg.optimizer.name, cfg.optimizer, filter_spec=filter_spec)
         train_states.append(TrainState(

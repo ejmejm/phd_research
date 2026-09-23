@@ -30,6 +30,11 @@ algorithm:
   # cross-task weights beginning at exactly 0.
   transition_step: null
 
+  # When true, the connections the flip adds feed forward and learn their own
+  # weights but return no error to the hidden layer, so only the forward half
+  # of the distractor effect is present. See sweep/forward_only.yaml.
+  forward_only_distractors: false
+
 optimizer:
   name: sgd
   learning_rate: ${eval:2**-9}   # overridden by the sweep

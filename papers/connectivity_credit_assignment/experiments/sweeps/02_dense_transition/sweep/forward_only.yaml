@@ -1,0 +1,61 @@
+# Figure 3 addendum: distractor connections that only act forwards.
+#
+# Same transition as sweep/main.yaml -- block-sparse to step 250,000, then the
+# masks are filled to all-ones -- except that the connections the flip adds
+# are barred from carrying gradient back into the hidden layer. They still run
+# in the forward pass and still learn their own weights; what they no longer
+# do is hand a hidden unit the error of a task that is not its own.
+#
+# A distractor connection can hurt in two directions at once, and the main
+# sweep cannot tell them apart:
+#
+#   forward    another task's signal now reaches this unit's activation
+#   backward   another task's error now reaches this unit's incoming weights
+#
+# The gap between this arm and the ordinary transition at the same step-size
+# is the backward channel; whatever degradation is left here is the forward
+# one. Only W2 needs the intervention -- a new W1 connection's backward path
+# ends at an input, so it is already forward-only.
+#
+# Not a sweep. Two cells, the two step-sizes Figure 3 plots the transition at:
+#
+#   2^-10  the transition's own best, from the main sweep
+#   2^-8   block-sparse's best, which is the curve that shows the flip alone
+#
+# 3 x 5 x 2 of the main sweep already covers both at the same seeds, so these
+# runs drop straight alongside them.
+name: 03_dense_transition_forward_only_n16_h256
+project: paper-weight-pruning-scaling-sweep
+command: python experiments/train.py --config-path=sweeps/02_dense_transition --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  algorithm.transition_step: [250_000]
+  algorithm.forward_only_distractors: true
+
+  optimizer.learning_rate:
+    - "${eval:2**-10}"
+    - "${eval:2**-8}"
+
+  # 30 seeds as six 5-seed blocks: 2 x 6 = 12 trials. The main sweep uses two
+  # 15-seed halves, but 15 seeds vmapped at H=256 does not fit alongside a
+  # Comet trial on a 16 GB card -- the per-log-period batch alone is
+  # 1000 x 15 x 16 x 784 x 4 B = 752 MB. Blocks of 5 leave room, and
+  # `stack_per_seed` rejoins any number of blocks along the seed axis.
+  seed_offset: [0, 5, 10, 15, 20, 25]
+  seed:
+    value:
+      - "${eval:${seed_offset} + 0}"
+      - "${eval:${seed_offset} + 1}"
+      - "${eval:${seed_offset} + 2}"
+      - "${eval:${seed_offset} + 3}"
+      - "${eval:${seed_offset} + 4}"

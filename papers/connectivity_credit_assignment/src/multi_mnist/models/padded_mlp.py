@@ -17,6 +17,7 @@ stops being acceptable; use ``BlockSparseMLP`` for fast block-sparse runs.
 """
 
 import warnings
+from typing import Optional
 
 import equinox as eqx
 import jax
@@ -45,11 +46,23 @@ class PaddedMLP(eqx.Module):
     output_dim: int = eqx.field(static=True)
     max_hidden: int = eqx.field(static=True)
     activation: str = eqx.field(static=True)
+    #: Subset of ``w2_mask`` allowed to carry gradient back into the hidden
+    #: layer. ``None`` -- the usual case -- means every active connection
+    #: does. See ``freeze_gradient_mask``.
+    w2_grad_mask: Optional[jax.Array] = None
 
     def __call__(self, x):
         h = ACTIVATION_MAP[self.activation]((self.W1 * self.w1_mask) @ x)
         h = h * self.unit_mask
-        out = (self.W2 * self.w2_mask) @ h
+        if self.w2_grad_mask is None:
+            return (self.W2 * self.w2_mask) @ h, h
+        # Split W2 into the connections that may send error back into h and
+        # the ones that only feed forward. Both halves see the same h, so
+        # both still learn their own weights from dL/do * h -- only the path
+        # from the loss back into the hidden layer differs.
+        w2_forward_only = self.w2_mask * (1.0 - self.w2_grad_mask)
+        out = ((self.W2 * self.w2_grad_mask) @ h
+               + (self.W2 * w2_forward_only) @ jax.lax.stop_gradient(h))
         return out, h
 
 
@@ -274,6 +287,26 @@ def fill_masks_to_dense(model: PaddedMLP, initial_hidden_units: int) -> PaddedML
         model,
         w1_mask=model.w1_mask.at[:h, :].set(1.0),
         w2_mask=model.w2_mask.at[:, :h].set(1.0),
+    )
+
+
+def freeze_gradient_mask(model: PaddedMLP) -> PaddedMLP:
+    """Pin the current ``w2_mask`` as the set that may carry gradient to h.
+
+    Connections added to ``w2_mask`` after this still contribute to the
+    forward pass and still learn their own weights, but no longer send error
+    back into the hidden layer. Combined with ``fill_masks_to_dense`` it gives
+    a dense transition whose new connections act only in the forward
+    direction, which is what separates the two ways a distractor connection
+    can hurt.
+
+    Installed before training rather than at the transition, so the model's
+    pytree structure -- and with it the optimizer's filter spec -- is fixed
+    for the whole run.
+    """
+    return eqx.tree_at(
+        lambda m: m.w2_grad_mask, model, model.w2_mask,
+        is_leaf=lambda x: x is None,
     )
 
 

@@ -15,15 +15,15 @@ from .sparse_init import (
     StructureModel, derive_sizes, init_sparse_model,
 )
 from .padded_mlp import (
-    PaddedMLP, fill_masks_to_dense, init_model, model_filter_spec,
-    structure_diagnostics,
+    PaddedMLP, fill_masks_to_dense, freeze_gradient_mask, init_model,
+    model_filter_spec, structure_diagnostics,
 )
 
 __all__ = [
     'BlockSparseMLP', 'DynamicNetwork', 'PaddedMLP',
     'build_outgoing_indices', 'compute_hidden_dim_for_params',
     'count_active_connections', 'count_active_units', 'fill_masks_to_dense',
-    'init_model', 'init_random_dynamic_network', 'model_filter_spec',
+    'freeze_gradient_mask', 'init_model', 'init_random_dynamic_network', 'model_filter_spec',
     'structure_diagnostics', 'sync_outgoing_weights',
     'StructureModel', 'derive_sizes', 'init_sparse_model',
 ]

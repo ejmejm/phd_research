@@ -1,0 +1,65 @@
+# DEEP-R (Bellec et al. 2018) at its best cell.
+#
+# 30 seeds at the best cell from the sweeps, split into two 15-seed halves by
+# ``seed_offset``; one trial vmaps its 15 seeds and the halves are concatenated
+# in the analysis notebook. 800,000 steps, the same horizon the sweeps used.
+#
+# 0.6115 at l1=1e-4, which v3 confirmed is an interior optimum: extending the
+# axis down to 1e-5, 1e-6 and 0 made it strictly worse, and at l1<=1e-6 the
+# arm collapses to ~0.10, below even the frozen static-sparse control.
+#
+# noise_ratio=3 is the argmax, but the axis is a measured null at BOTH
+# horizons: 0, 0.3, 1 and 3 span 0.6099-0.6115 here (seed sd +-0.021) and
+# 0.577-0.585 at 100k. The paper's drifting-task value is 1.0. Taking the
+# argmax keeps one rule across all five arms; switching to 1.0 would cost
+# 0.0005 accuracy and gain a principled justification.
+
+name: 04_deep_r_n16_best
+project: paper-weight-pruning-connectivity-best
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  # Upload the full (log_periods, seeds) curve arrays as one end-of-run asset,
+  # which is what the confidence intervals in the figures are computed from.
+  log_individual_seeds: true
+
+  train.total_steps: 800000
+
+  model.type: padded_mlp
+  model.init_strategy: sparse
+  model.sparse.init_mode: uniform_p  # DEEP-R's own flat per-layer density
+  model.sparse.weight_init: normal   # DEEP-R Appendix A: N(0,1)/sqrt(dense n_in)
+  algorithm.name: deep_r
+  algorithm.event_period: 1
+  algorithm.evolve_w2: true
+  target_hidden_units: 768
+  algorithm.l1: 1e-4
+  algorithm.noise_ratio: 3.0
+  optimizer.learning_rate: "${eval:2**-7}"
+
+  seed_offset: [101, 116]
+  seed:
+    value:
+      - "${eval:${seed_offset} + 0}"
+      - "${eval:${seed_offset} + 1}"
+      - "${eval:${seed_offset} + 2}"
+      - "${eval:${seed_offset} + 3}"
+      - "${eval:${seed_offset} + 4}"
+      - "${eval:${seed_offset} + 5}"
+      - "${eval:${seed_offset} + 6}"
+      - "${eval:${seed_offset} + 7}"
+      - "${eval:${seed_offset} + 8}"
+      - "${eval:${seed_offset} + 9}"
+      - "${eval:${seed_offset} + 10}"
+      - "${eval:${seed_offset} + 11}"
+      - "${eval:${seed_offset} + 12}"
+      - "${eval:${seed_offset} + 13}"
+      - "${eval:${seed_offset} + 14}"

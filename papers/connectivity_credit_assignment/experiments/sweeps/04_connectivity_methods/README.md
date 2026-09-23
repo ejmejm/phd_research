@@ -508,3 +508,39 @@ Running these **locally** needs the jax env first on PATH -- `comet_sweep` shell
 out to plain `python`, so a bare `comet_sweep -s ...` picks up whichever
 interpreter is first and fails with `ModuleNotFoundError: multi_mnist`. The
 cluster launcher activates the venv itself and is unaffected.
+
+## Finals — 30 seeds at each arm's best cell
+
+Registered 2026-09-23 in `paper-weight-pruning-connectivity-best`. 800,000
+steps, the same horizon as the sweeps. 30 seeds per arm, split into two
+15-seed halves by `seed_offset` (101 and 116); `stack_per_seed` rejoins them
+along the seed axis in the analysis, so the confidence intervals are over 30
+seeds with 29 degrees of freedom, not over two half-means. Group cells by
+everything **except** `seed_offset` or the halves stay separate.
+
+| Arm | Sweep ID | Best cell | Sweep acc |
+|---|---|---|---|
+| `block_sparse` | `a48fb14a8d6c4d24bdee5bdff01e49e3` | lr=2^-8 | 0.8634 |
+| `set` | `84943d05db9d41baa97621b234c4a283` | H=256, evolve_freq=1000, lr=2^-8 | 0.6329 |
+| `deep_r` | `7148816646bb405290719d647692b8cd` | H=768, l1=1e-4, noise_ratio=3, lr=2^-7 | 0.6115 |
+| `static_sparse` | `5910112ceeb245a1858831d4c123afab` | H=768, lr=2^-7 | 0.4764 |
+| `dense` | `383038124bc24994826da88ab22dc32d` | lr=2^-10, H=16 derived | 0.1915 |
+
+Peak GPU memory at 15 vmapped seeds is 6.8 GB for DEEP-R at H=768, the
+heaviest arm; the others are well under. That fits an L40S with room to spare.
+
+**Two of these choices are argmaxes of flat axes, not tuned values.** SET's
+`evolve_frequency` spans 0.6262-0.6329 across 500/1000/2000/4000, inside the
++-0.020 seed spread. DEEP-R's `noise_ratio` spans 0.6099-0.6115 across
+0/0.3/1/3 here and 0.577-0.585 at 100k. Both are reported as nulls rather than
+as findings, and the configs say so at the line where the value is set.
+
+```bash
+P=$HOME/scratch/phd_research/papers/connectivity_credit_assignment
+for S in a48fb14a8d6c4d24bdee5bdff01e49e3 84943d05db9d41baa97621b234c4a283 \
+         7148816646bb405290719d647692b8cd 5910112ceeb245a1858831d4c123afab \
+         383038124bc24994826da88ab22dc32d; do
+  sbatch --array=1-2 --gpus-per-node=1 --cpus-per-task=1 --mem=8G --time=03:00:00 \
+    launch_comet_agent.sbatch -s $S -p $P
+done
+```

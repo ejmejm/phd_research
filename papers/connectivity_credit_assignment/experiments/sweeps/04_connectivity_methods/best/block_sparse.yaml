@@ -1,0 +1,51 @@
+# Block-sparse reference: the known-ideal connectivity.
+#
+# 30 seeds at the best cell from the sweeps, split into two 15-seed halves by
+# ``seed_offset``; one trial vmaps its 15 seeds and the halves are concatenated
+# in the analysis notebook. 800,000 steps, the same horizon the sweeps used.
+#
+# Best of 4 learning rates at 0.8634 accuracy, a clear interior win -- 2^-9
+# gives 0.8113 and 2^-7 0.7268, and above that it breaks.
+
+name: 04_block_sparse_n16_best
+project: paper-weight-pruning-connectivity-best
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  # Upload the full (log_periods, seeds) curve arrays as one end-of-run asset,
+  # which is what the confidence intervals in the figures are computed from.
+  log_individual_seeds: true
+
+  train.total_steps: 800000
+
+  model.type: padded_mlp
+  model.init_strategy: block_sparse
+  algorithm.name: static
+  optimizer.learning_rate: "${eval:2**-8}"
+
+  seed_offset: [101, 116]
+  seed:
+    value:
+      - "${eval:${seed_offset} + 0}"
+      - "${eval:${seed_offset} + 1}"
+      - "${eval:${seed_offset} + 2}"
+      - "${eval:${seed_offset} + 3}"
+      - "${eval:${seed_offset} + 4}"
+      - "${eval:${seed_offset} + 5}"
+      - "${eval:${seed_offset} + 6}"
+      - "${eval:${seed_offset} + 7}"
+      - "${eval:${seed_offset} + 8}"
+      - "${eval:${seed_offset} + 9}"
+      - "${eval:${seed_offset} + 10}"
+      - "${eval:${seed_offset} + 11}"
+      - "${eval:${seed_offset} + 12}"
+      - "${eval:${seed_offset} + 13}"
+      - "${eval:${seed_offset} + 14}"

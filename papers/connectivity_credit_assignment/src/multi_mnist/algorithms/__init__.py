@@ -47,6 +47,8 @@ def build_algorithm(cfg: DictConfig) -> ConnectivityAlgorithm:
         return DenseTransition(
             transition_step=None if step is None else int(step),
             initial_hidden_units=int(cfg.model.initial_hidden_units),
+            forward_only_distractors=bool(
+                cfg.algorithm.get('forward_only_distractors', False)),
         )
 
     if name == 'set':

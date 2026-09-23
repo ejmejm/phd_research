@@ -34,6 +34,9 @@ interchangeable:
     is the motivating case.
 
 An algorithm may use either, both, or neither.
+
+``prepare_model`` sits outside that list: it runs once at setup, before the
+optimizer exists, for structure that must be in place for the whole run.
 """
 
 from typing import Any, Dict, Optional, Tuple
@@ -52,6 +55,16 @@ class ConnectivityAlgorithm:
 
     #: Human-readable name, used in logs and run summaries.
     name: str = 'static'
+
+    def prepare_model(self, model: eqx.Module) -> eqx.Module:
+        """Adjust the freshly built model, before the optimizer is built.
+
+        Runs once per seed on the host at setup. Use it for structure the
+        algorithm needs in place for the whole run, so that the model's pytree
+        stays fixed once training starts -- the optimizer's filter spec is
+        built from what this returns.
+        """
+        return model
 
     def init_state(self, model: eqx.Module, *, key: PRNGKeyArray) -> Any:
         """Build the algorithm's per-seed state. ``None`` means stateless."""
