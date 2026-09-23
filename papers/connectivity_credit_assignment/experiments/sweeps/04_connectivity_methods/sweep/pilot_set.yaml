@@ -1,0 +1,37 @@
+# SET at its best v1 cell, run long, to find where the curve flattens.
+#
+# Not a sweep -- a single configuration wrapped in the sweep machinery so it can
+# use the cluster's comet agent launcher. The v1 grid (100k steps, 3 seeds)
+# picked this cell: lr=2^-7 won every top row, and width and evolve_frequency
+# barely separated (0.457-0.465 across the top eight), so the middle of each is
+# taken. The question here is only run length, not ranking.
+name: 04_set_n16_pilot2m
+project: paper-weight-pruning-connectivity-pilot
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true   # per-seed curves: a steady state has to hold per seed
+
+  train.total_steps: 2000000
+
+  model.type: padded_mlp
+  model.init_strategy: sparse
+  model.sparse.init_mode: epsilon
+  model.sparse.weight_init: glorot
+  algorithm.name: set
+  algorithm.prune_metric: magnitude
+
+  target_hidden_units: 768
+  algorithm.evolve_frequency: 250
+  optimizer.learning_rate: "${eval:2**-7}"
+
+  seed:
+    value: [0, 1, 2]
