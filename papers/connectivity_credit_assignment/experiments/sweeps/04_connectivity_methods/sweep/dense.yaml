@@ -1,8 +1,13 @@
-# Dense reference at 16 tasks. Only needed if the pilot pushes
-# train.total_steps past the 500,000 of Figure 3 -- at 500k the published
-# Figure 3 runs already cover this arm (transition_step=0) and should be
-# reused rather than recomputed.
-name: 04_dense_n16
+# Dense reference at 16 tasks, at the SHARED connection budget.
+#
+# Every arm in this family holds the same 203,264 connections -- the
+# block-sparse reference's 16 units/task x 794. Dense is fully connected, so it
+# pays (784 + 10) * n_tasks = 12,704 weights per hidden unit and the budget buys
+# only 16 hidden units in total. That is the point of the comparison: the same
+# wire, spent differently. Figure 3 instead matched dense on *width* and let it
+# carry 16x the budget, so this arm is not the Figure 3 dense arm and its runs
+# cannot be reused.
+name: 04_dense_n16_v2
 project: paper-weight-pruning-connectivity-sweep
 command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
 algorithm: grid
@@ -17,17 +22,35 @@ parameters:
   mlflow: false
   log_individual_seeds: false
 
+  # 800k steps. The 2M pilot at lr=2^-7 put SET's gain at under half a percent
+  # per 100k by 700-800k (block means 0.5742 -> 0.5800 -> 0.5833), and DEEP-R
+  # flat from 200k on, so 800k catches the slower arm just as it levels off.
+  train.total_steps: 800000
+
   model.type: padded_mlp
   model.init_strategy: dense
   algorithm.name: static
 
-  # Same grid as the Figure 3 sweep, whose dense winner was at the low end.
+  # Width is DERIVED from the shared budget, not swept -- see dense_hidden_units
+  # in base.yaml. A dense unit costs (784 + 10) * n_tasks = 12,704 weights, so
+  # the budget buys exactly block_sparse_units_per_task = 16 of them.
+  target_hidden_units: "${dense_hidden_units}"
+
+  # Dense at 16 units has its own usable range, measured at 20k steps with 3
+  # seeds: 2^-8 and 2^-7 diverge outright, and the peak is interior at 2^-10.
+  #
+  #   2^-12  0.1536    2^-9  0.1721
+  #   2^-11  0.1568    2^-8  diverged
+  #   2^-10  0.1888    2^-7  diverged
+  #
+  # The other arms run 2^-10..2^-7; using that window here would spend half the
+  # grid on rates that blow up. Figure 3's dense winner was also at the low end,
+  # but that dense was 16x wider, so these are not comparable.
   optimizer.learning_rate:
+    - "${eval:2**-12}"
     - "${eval:2**-11}"
     - "${eval:2**-10}"
     - "${eval:2**-9}"
-    - "${eval:2**-8}"
-    - "${eval:2**-7}"
 
   seed:
     value: [0, 1, 2, 3, 4]

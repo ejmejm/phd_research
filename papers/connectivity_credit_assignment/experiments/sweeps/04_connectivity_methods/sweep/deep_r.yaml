@@ -22,7 +22,7 @@
 # cumulative_regrown. Check that the chosen cells turn connections over at a
 # rate comparable to the SET arm; if the whole grid is flat, extend upward
 # (l1=1e-1, T=1e-4) rather than reading the result as "DEEP-R does nothing".
-name: 04_deep_r_n16_v1
+name: 04_deep_r_n16_v2
 project: paper-weight-pruning-connectivity-sweep
 command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
 algorithm: grid
@@ -37,10 +37,10 @@ parameters:
   mlflow: false
   log_individual_seeds: false
 
-  # v1: a short, cheap pass over the full grid windows. 100k steps is not a
-  # steady state -- the pilot never established one -- it is enough to rank
-  # cells and locate the region a v2 should spend real compute on.
-  train.total_steps: 100000
+  # 800k steps. The 2M pilot at lr=2^-7 put SET's gain at under half a percent
+  # per 100k by 700-800k (block means 0.5742 -> 0.5800 -> 0.5833), and DEEP-R
+  # flat from 200k on, so 800k catches the slower arm just as it levels off.
+  train.total_steps: 800000
 
   model.type: padded_mlp
   model.init_strategy: sparse
@@ -73,11 +73,11 @@ parameters:
   # the best stable cell for SET (0.507) and 2^-8 for DEEP-R (0.579). 2^-6 is
   # kept as the upper edge because the narrower widths may tolerate it.
   optimizer.learning_rate:
+    - "${eval:2**-10}"
     - "${eval:2**-9}"
     - "${eval:2**-8}"
     - "${eval:2**-7}"
-    - "${eval:2**-6}"
 
   # 3 width x 3 l1 x 4 noise_ratio x 4 LR = 144 trials, 3 vmapped seeds each.
   seed:
-    value: [0, 1, 2]
+    value: [0, 1, 2, 3, 4]

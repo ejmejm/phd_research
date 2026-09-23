@@ -1,8 +1,11 @@
-# Block-sparse reference at 16 tasks. Only needed if the pilot pushes
-# train.total_steps past the 500,000 of Figure 3 -- at 500k the published
-# Figure 3 runs already cover this arm (transition_step=600000) and should be
-# reused rather than recomputed.
-name: 04_block_sparse_n16
+# Block-sparse reference at 16 tasks. This is the arm that defines the shared
+# budget -- 16 units/task x 794 weights = 203,264 connections -- which every
+# other arm then matches. Width is therefore fixed at the base default of
+# block_sparse_units_per_task * n_tasks = 256; only the learning rate is swept.
+#
+# Figure 3 covers this arm at 500k steps, but v2 runs at 800k, so it is
+# re-swept rather than reused.
+name: 04_block_sparse_n16_v2
 project: paper-weight-pruning-connectivity-sweep
 command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
 algorithm: grid
@@ -17,13 +20,24 @@ parameters:
   mlflow: false
   log_individual_seeds: false
 
+  # 800k steps. The 2M pilot at lr=2^-7 put SET's gain at under half a percent
+  # per 100k by 700-800k (block means 0.5742 -> 0.5800 -> 0.5833), and DEEP-R
+  # flat from 200k on, so 800k catches the slower arm just as it levels off.
+  train.total_steps: 800000
+
   model.type: padded_mlp
   model.init_strategy: block_sparse
   algorithm.name: static
 
-  # Same grid as the Figure 3 sweep, whose winner was 2^-8.
+  # 2^-7 is the top of this arm's usable range, not an arbitrary edge. Measured
+  # at 20k steps with 3 seeds: accuracy rises monotonically to 2^-7 (0.8413) and
+  # then breaks -- 2^-6 is already unstable (loss 1179), 2^-5 and 2^-4 blow up.
+  # So the winner may sit on the top edge here, with nothing above it to find.
+  #
+  #   2^-11  0.4610    2^-8  0.8118
+  #   2^-10  0.5858    2^-7  0.8413
+  #   2^-9   0.7070    2^-6  unstable
   optimizer.learning_rate:
-    - "${eval:2**-11}"
     - "${eval:2**-10}"
     - "${eval:2**-9}"
     - "${eval:2**-8}"

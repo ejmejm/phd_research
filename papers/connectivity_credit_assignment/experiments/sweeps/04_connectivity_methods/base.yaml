@@ -40,6 +40,15 @@ block_sparse_units_per_task: 16
 # need not touch it.
 target_hidden_units: ${eval:${block_sparse_units_per_task} * ${task.n_tasks}}
 
+# Dense width at the SHARED budget. A fully connected hidden unit costs
+# (784 + 10) * n_tasks = 12,704 weights, so the 203,264-connection budget buys
+# exactly block_sparse_units_per_task = 16 of them. The dense arm sets
+# target_hidden_units to this, which is what makes it budget-matched rather
+# than width-matched -- Figure 3 did the latter and let dense carry 16x the
+# wire. Verified against the model: 203,264 active connections, the same number
+# block-sparse holds at H=256.
+dense_hidden_units: ${eval:'${model.sparse.connection_budget} // (794 * ${task.n_tasks})'}
+
 model:
   # padded_mlp for every arm: a mask over a dense matrix. SET and DEEP-R run
   # here rather than on dynamic_network because the mask preserves the

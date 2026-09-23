@@ -5,6 +5,11 @@
 # picked this cell: lr=2^-7 won every top row, and width and evolve_frequency
 # barely separated (0.457-0.465 across the top eight), so the middle of each is
 # taken. The question here is only run length, not ranking.
+# lr is 2^-7, the rate that won the 100k grid outright. 2^-8 was tried first,
+# on the reasoning that a short run flatters a too-high rate, and its curve was
+# read off the pilot; this run is the 2x-higher counterpart. Note 2^-6 diverges
+# here for every arm, static-sparse control included, so 2^-7 is the top of the
+# usable range rather than a midpoint.
 name: 04_set_n16_pilot2m
 project: paper-weight-pruning-connectivity-pilot
 command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base

@@ -380,3 +380,67 @@ echo "$HOME/scratch/phd_research/papers/connectivity_credit_assignment/src" \
 The cluster venv already satisfies every pin (jax 0.6.2, equinox 0.13.0).
 `data.py` downloads MNIST to `/tmp/data`, which is per-node, so each job
 re-downloads it; Nibi's compute nodes have the outbound access for that.
+
+### v2 — the real sweeps: 800k steps, 5 seeds, all five arms
+
+Registered 2026-09-23 in `paper-weight-pruning-connectivity-sweep`.
+
+| Config | Sweep ID | Cells | Grid | lr window | Est. hrs | Jobs |
+|---|---|---|---|---|---|---|
+| `set` | `6fca8ba0fae244c68e711d3d89e57f08` | 64 | 4 width x 4 freq x 4 lr | 2^-10..2^-7 | 42 | 8 x 6h |
+| `deep_r` | `4e7b82838da849e7b152372e2a6ab459` | 144 | 3 width x 3 l1 x 4 nr x 4 lr | 2^-10..2^-7 | 70 | 14 x 6h |
+| `static_sparse` | `adb83b0fadb94523be3dc09e2fd9701b` | 16 | 4 width x 4 lr | 2^-10..2^-7 | 5 | 2 x 3h |
+| `dense` | `00a30ebc5e9d4c4b9dc8d396f5935746` | 4 | lr only, H=16 | 2^-12..2^-9 | 0.5 | 1 x 1h |
+| `block_sparse` | `c6af1bf158a046d5837afa21b6cdc940` | 4 | lr only, H=256 | 2^-10..2^-7 | 0.6 | 1 x 1h |
+
+**Why 800k.** The 2M pilot at lr=2^-7, H=768, 3 seeds, block-mean accuracy:
+
+| steps | SET | DEEP-R |
+|---|---|---|
+| 0-100k | 0.4237 | 0.5762 |
+| 100-200k | 0.4968 | 0.5815 |
+| 300-400k | 0.5522 | 0.5673 |
+| 500-600k | 0.5742 | 0.5622 |
+| 700-800k | 0.5833 | 0.5632 |
+
+DEEP-R is at its level inside 100k and then drifts *down*, peaking near 200k.
+SET climbs throughout but its increments collapse -- +73 points per 100k early,
+then +11, +6, +3 over the last three blocks -- so 800k catches the slower arm as
+it levels off. Two caveats. Within-block noise is larger than the between-block
+trend (SET's last block spans 0.555-0.617), so ranking needs the asymptotic tail
+average, not a final value. And this is one learning rate: the low-lr corners of
+each grid will not have converged at 800k, so v2 answers "best by 800k" rather
+than "best asymptotically".
+
+**All five arms hold the same 203,264 connections.** That is what makes dense a
+*16-unit* network: a fully connected hidden unit costs (784+10) x n_tasks =
+12,704 weights, so the budget buys 16 of them. `base.yaml:dense_hidden_units`
+derives this rather than hardcoding it. Figure 3 matched dense on width instead
+and let it carry 16x the wire, so **the Figure 3 dense runs are not reusable
+here** -- this is a different arm.
+
+**The learning-rate windows are per-arm, and measured.** At 20k steps, 3 seeds:
+
+| arm | finding |
+|---|---|
+| dense (H=16) | diverges at 2^-8 and 2^-7; interior peak at 2^-10 |
+| block-sparse | rises monotonically to 2^-7 (0.8413); 2^-6 unstable, 2^-5 blows up |
+| SET / DEEP-R / static | v1 at 100k: 2^-7 wins, 2^-6 diverges for all three |
+
+A single shared window would have spent half of dense's grid on blow-ups.
+Block-sparse's winner may sit on its top edge, but nothing above it is stable,
+so there is nothing there to find.
+
+```bash
+P=$HOME/scratch/phd_research/papers/connectivity_credit_assignment
+sbatch --array=1-8  --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s 6fca8ba0fae244c68e711d3d89e57f08 -p $P
+sbatch --array=1-14 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=06:00:00 launch_comet_agent.sbatch -s 4e7b82838da849e7b152372e2a6ab459 -p $P
+sbatch --array=1-2  --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=03:00:00 launch_comet_agent.sbatch -s adb83b0fadb94523be3dc09e2fd9701b -p $P
+sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=01:00:00 launch_comet_agent.sbatch -s 00a30ebc5e9d4c4b9dc8d396f5935746 -p $P
+sbatch --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 --mem=6G --time=01:00:00 launch_comet_agent.sbatch -s c6af1bf158a046d5837afa21b6cdc940 -p $P
+```
+
+Running these **locally** needs the jax env first on PATH -- `comet_sweep` shells
+out to plain `python`, so a bare `comet_sweep -s ...` picks up whichever
+interpreter is first and fails with `ModuleNotFoundError: multi_mnist`. The
+cluster launcher activates the venv itself and is unaffected.
