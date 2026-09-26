@@ -204,3 +204,124 @@ def format_step_axis(ax, scale=1e5):
     ax.xaxis.set_major_formatter(mticker.ScalarFormatter(useMathText=True))
     ax.ticklabel_format(axis='x', style='sci', scilimits=(0, 0), useMathText=True)
     return ax
+
+
+# ---------------------------------------------------------------------------
+# Inline series labels
+# ---------------------------------------------------------------------------
+
+#: The paper carries no legends: every series names itself in the empty space
+#: beside its own curve, in that curve's color. These are the two numbers that
+#: style does not get to vary per figure.
+INLINE_LABEL_SIZE = 18            # above the tick labels (16), below the axis labels (20)
+INLINE_LABEL_REF = (5.06, 15)     # the clearance that read right, and the size it was set at
+
+INLINE_LABEL_FONT = dict(fontfamily='DejaVu Sans', fontstyle='italic',
+                         fontstretch='condensed')
+
+
+def label_curves_inline(ax, specs, size=INLINE_LABEL_SIZE, gap_pt=None,
+                        sub_scale=0.72):
+    """Name each series inline, clear of its own curve, and drop the legend.
+
+    ``specs`` is a sequence of ``(text, x, side, color, curve)``, where ``side``
+    is ``'above'`` or ``'below'`` and ``curve`` is the ``(x, y)`` the label has
+    to clear. A sixth element adds a smaller parenthetical after the name, set
+    on the same baseline.
+
+    Two things make the spacing awkward enough to be worth centralising. The
+    clearance has to be to the extreme of the curve spanned by the *whole*
+    label, because a rising curve passes under its own name and closes a gap
+    set at the anchor alone. And it is not knowable until the text has been
+    laid out, so this places, draws, measures, and shifts by the shortfall --
+    one pass is exact, since moving a label vertically does not change its
+    width. Every label ends up the same number of points clear.
+    """
+    ref_gap, ref_size = INLINE_LABEL_REF
+    gap_pt = ref_gap * size / ref_size if gap_pt is None else gap_pt
+    fig = ax.figure
+    px_per_pt = fig.dpi / 72
+    y0 = float(np.mean(ax.get_ylim()))
+
+    placed = []
+    for text, x, side, color, curve, *rest in specs:
+        main = ax.text(x, y0, text, color=color, ha='left', va='baseline',
+                       fontsize=size, **INLINE_LABEL_FONT)
+        placed.append([main, None, x, side, color, curve, rest[0] if rest else None])
+
+    # The parenthetical starts where the name ends, so the name has to be
+    # measured before it can be positioned.
+    fig.canvas.draw()
+    inv = ax.transData.inverted()
+    for p in placed:
+        if p[6] is None:
+            continue
+        bb = p[0].get_window_extent()
+        x_sub = inv.transform((bb.x1 + 0.25 * size * px_per_pt, bb.y0))[0]
+        p[1] = ax.text(x_sub, y0, p[6], color=p[4], ha='left', va='baseline',
+                       fontsize=size * sub_scale, **INLINE_LABEL_FONT)
+        # The pair is positioned and measured as one word.
+        p[0]._inline_sub = p[1]
+
+    # A name wider than the space to its right would otherwise stick out past
+    # the axes, and the figure would be saved wider to fit it -- which reads as
+    # the data having a longer x range than it does. Pull it back inside first,
+    # before any height is worked out, since moving it changes what it spans.
+    fig.canvas.draw()
+    right = ax.get_window_extent().x1
+    for p in placed:
+        bb = p[0].get_window_extent()
+        if p[1] is not None:
+            bb = bb.union([bb, p[1].get_window_extent()])
+        if bb.x1 <= right:
+            continue
+        for artist in (p[0], p[1]):
+            if artist is None:
+                continue
+            ax_x, ax_y = artist.get_position()
+            dx, dy = ax.transData.transform((ax_x, ax_y))
+            artist.set_x(inv.transform((dx - (bb.x1 - right), dy))[0])
+
+    fig.canvas.draw()
+    for main, sub, x, side, _, (cx, cy), _ in placed:
+        bb = main.get_window_extent()
+        if sub is not None:
+            bb = bb.union([bb, sub.get_window_extent()])
+        disp = ax.transData.transform(np.column_stack([np.asarray(cx), np.asarray(cy)]))
+        under = disp[(disp[:, 0] >= bb.x0) & (disp[:, 0] <= bb.x1), 1]
+        if not len(under):
+            continue
+        sign = 1 if side == 'above' else -1
+        gap = sign * (bb.y0 - under.max() if side == 'above' else under.min() - bb.y1)
+        shift = sign * gap_pt * px_per_pt - gap
+        for artist in (main, sub):
+            if artist is None:
+                continue
+            ax_x, ax_y = artist.get_position()
+            dx, dy = ax.transData.transform((ax_x, ax_y))
+            artist.set_y(inv.transform((dx, dy + shift))[1])
+
+    legend = ax.get_legend()
+    if legend is not None:
+        legend.remove()
+    for lg in list(fig.legends):
+        lg.remove()
+    return [p[0] for p in placed]
+
+
+def measure_inline_labels(ax, specs, texts):
+    """Clearance of each inline label from its curve, in points. A check."""
+    ax.figure.canvas.draw()
+    px_per_pt = ax.figure.dpi / 72
+    out = []
+    for (text, x, side, color, curve, *_), artist in zip(specs, texts):
+        bb = artist.get_window_extent()
+        sub = getattr(artist, '_inline_sub', None)
+        if sub is not None:
+            bb = bb.union([bb, sub.get_window_extent()])
+        cx, cy = curve
+        disp = ax.transData.transform(np.column_stack([np.asarray(cx), np.asarray(cy)]))
+        under = disp[(disp[:, 0] >= bb.x0) & (disp[:, 0] <= bb.x1), 1]
+        gap = (bb.y0 - under.max()) if side == 'above' else (under.min() - bb.y1)
+        out.append((text, round(gap / px_per_pt, 3)))
+    return out

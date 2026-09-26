@@ -10,14 +10,14 @@ from .loading import (
     normalize_columns, stack_per_seed,
 )
 from .plotting import (
-    COLOR_PALETTE, get_color_palette, plot_ci_curve, plot_sensitivity,
-    save_fig, set_style,
+    COLOR_PALETTE, INLINE_LABEL_SIZE, get_color_palette, label_curves_inline,
+    measure_inline_labels, plot_ci_curve, plot_sensitivity, save_fig, set_style,
 )
 
 __all__ = [
-    'COLOR_PALETTE', 'asymptotic_metric', 'dedupe_trials', 'diverged_run_ids',
-    'download_project', 'fetch_per_seed_arrays', 'filter_sweep',
-    'filter_to_best', 'get_color_palette', 'load_export', 'normalize_columns',
-    'plot_ci_curve',
+    'COLOR_PALETTE', 'INLINE_LABEL_SIZE', 'asymptotic_metric', 'dedupe_trials',
+    'diverged_run_ids', 'download_project', 'fetch_per_seed_arrays', 'filter_sweep',
+    'filter_to_best', 'get_color_palette', 'label_curves_inline',
+    'load_export', 'measure_inline_labels', 'normalize_columns', 'plot_ci_curve',
     'plot_sensitivity', 'save_fig', 'set_style', 'stack_per_seed',
 ]
