@@ -1,41 +1,42 @@
-Experiments I want to run:
-- How does LMS perform (sweep step-size)?
-- How does Autostep perform (sweep step-size and meta step-size)?
-- How does continual backprop perform (sweep step-size, replacement rate, and utility ema decay rate)?
-- Test Fable method (sweep step-size and maybe something else)?
+# Feature sifting
 
-Notebook structure:
-- Imports
-- Define portion of sweep config that is unchanging (experiments, optuna_storage, mlflow_storage, output_dir, spec, algorithm), and uses optuna and mlflow local file storage relative to the notebook
-- Create a run experiment function that handles creating the environment and running the learning step function provided by the user as a parameter
-    - Reports metrics at end following MLFlow Sweeper
-    - Accepts hyperparameters in the MLFlow Sweeper format
-    - Scans over all steps, jitting the entire training loop
-    - Supports batching over multiple seeds, and reports mean and standard deviation of metrics in this case
-- LMS sweep, plot hyperparameter sensitivity
-- LMS best hyperparameter configuration run and learning curve
-- Autostep sweep, plot hyperparameter sensitivity
-- Autostep best hyperparameter configuration run and learning curve
-- Continual backprop sweep, plot hyperparameter sensitivity
-- Continual backprop best hyperparameter configuration run and learning curve
-- Fable method sweep, plot hyperparameter sensitivity
-- Fable method best hyperparameter configuration run and learning curve
-- Learning curves for all methods with best hyperparameter configurations in one plot (data is already collected, so just plot it)
+A linear learner holds a fixed number of candidate feature slots and must keep the useful ones,
+pruning slots so the task (`phd/jax_core/tasks/feature_sifting.py`) redraws them.
 
-Structure of a sweep cell:
-- Define parameters for the sweep and combine with the base config, using 5 seeds per configuration
-- Use MLFlow Sweeper's `run_sweep` function with the run experiment function to run the sweep
-- Plot the hyperparameter sensitivity curves for each hyperparameter
-    - Do not ignore nans, a nan for one configuration
-    - If there is a single var, just do a single line plot
-    - If there are 2 vars, put one on the x axis and the other as hue
-    - If there are 3 vars, make one plot for each, and for each point, take the best performing configuration given that set hyperparameter
-- Check which runs ran to convergence algorithmically, and change points that did not converge in some way (like make them smaller or change the alpha or something) to indicate that they did not converge
+## clean_or_noise/
+Each candidate is either an exact copy of a signal or pure noise (`phd/jax_core/tasks/clean_or_noise_sifting.py`).
 
-Structure of a learning curve cell:
-- Load the best hyperparameter configuration from the sweep
-- Run again the best hyperparameter configuration with 30 seeds
-- Plot a learning curve with error bars made using the standard deviation reported
+- `clean_or_noise.ipynb` — Autostep + G&T vs. + L1 + G&T vs. the band test, and how each handles signals with small ideal weights.
 
-If done in this way with MLFlow Sweeper, the experiments should only need to run in the first execution of the notebook.
-Subsequent executions should just load the data from the first execution, as that is what naturally happens when running a sweep with MLFlow Sweeper.
+## corrupted_signal/
+Each candidate is `(1 - c)·signal + c·noise` with `c ~ U[0, 1]`; the target is a ±1-weighted sum of the signals.
+
+- `corrupted_signal.ipynb` — Autostep vs. Autostep + CI vs. Autostep + utility threshold (competitive pruning).
+- `optimal_scaling.ipynb` — the best MSE any method can reach as a function of how many candidates it draws.
+- `pruning_rules.ipynb` — which pruning rule finds the good features: G&T, w zero-crossings, w-or-h zero-crossings.
+- `stepsize_protection.ipynb` — Autostep pruning rules protected by step-size jitter bands, plus an L1 variant.
+- `adaptive_gt.ipynb` — generate-and-test whose prune period grows when it keeps pruning the same slot, vs. a fixed period.
+
+## sign_flips/
+The corrupted-signal problem where one target weight flips sign every `FLIP_PERIOD` steps.
+
+- `sign_flips.ipynb` — the corrupted-signal methods on this nonstationary version.
+
+## analysis/
+One- or two-feature toy problems (except `l1_jitter_bands`).
+
+- `step_size_analysis.ipynb` — weight, IDBD `h` and step-size dynamics for a single feature and for blocking by an
+  established feature. `step_size_analysis/` holds the same experiments as scripts, plus `verified_flip` and the
+  blocking EMA-indicator notebook.
+- `weight_h_dynamics.ipynb` — weight and `h` of one weight whose target flips sign, with a Gaussian-closure model.
+- `ci_estimator_suite.ipynb` — test harness for online confidence intervals on a feature's utility.
+- `l1_jitter_bands.ipynb` — noise-floor bands for a dead feature's weight and `h` under LMS, L1 and Autostep.
+
+## old/
+June work that the current methods no longer build on.
+
+- `algorithm_testing/`, `algorithm_comparison/` — Hydra harness and analysis for LMS vs. CBP + Autostep sweeps.
+- `baseline_comparison.ipynb` — LMS, CBP + Adam, CBP + Autostep, Fable and hybrid on the original task.
+- `utility_pruning.ipynb` — first vmapped utility-based pruning and adaptive pruning rate.
+- `confidence_pruning.ipynb` — first confidence-based pruning tests.
+- `cbp_lms_demo.py`, `algorithm.md` — numpy CBP + LMS demo; reservoir-index pruning spec.
