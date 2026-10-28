@@ -32,3 +32,5 @@ Correct-initialization retention tests are diagnostics alongside this progressio
 
 Add one difficulty at a time. Fixed, representable targets have ideal RMSE 1.
 Changing targets need achievable references; their optimal online performance is unknown.
+
+Earlier two-layer work (02a–02e, 03, long_absence) is archived in [old_02/](old_02/).
