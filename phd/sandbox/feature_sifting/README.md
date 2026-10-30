@@ -22,6 +22,13 @@ The corrupted-signal problem where one target weight flips sign every `FLIP_PERI
 
 - `sign_flips.ipynb` — the corrupted-signal methods on this nonstationary version.
 
+## networks/
+Feature sifting in a two-layer network on parallel MNIST: every unit runs the CI test on its own input slots.
+
+- `parallel_mnist.ipynb` — CI connectivity learning one layer at a time and then both, with shadow weights and an
+  adaptive bar, against SET, utility-pruning and DEEP R baselines.
+- `parallel_mnist_label_changes.ipynb` — the same, with one task's labels permuted every 500 steps.
+
 ## analysis/
 One- or two-feature toy problems (except `l1_jitter_bands`).
 
