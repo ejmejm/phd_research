@@ -53,3 +53,4 @@ phd/sandbox/feature_sifting/**/data/
 # Build artifacts
 build/
 .claude/
+phd/sandbox/unit_search/demo/data.js

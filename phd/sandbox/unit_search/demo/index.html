@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unit Search Demo</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; color: #cfd6e4;
+               font: 13px/1.5 system-ui, sans-serif; }
+  #view { position: absolute; left: 0; top: 0; width: 100%; height: calc(100% - 200px); display: block; }
+  #loss { position: absolute; left: 0; bottom: 44px; width: 100%; height: 156px; display: block; cursor: pointer; }
+  #bar { position: absolute; left: 0; bottom: 0; width: 100%; height: 44px; box-sizing: border-box; padding: 0 12px;
+         display: flex; gap: 12px; align-items: center; background: #121722; }
+  #bar input[type=range] { flex: 1; }
+  .title { position: absolute; top: 8px; font-size: 16px; font-weight: 600; pointer-events: none; }
+  #hud { position: absolute; top: 34px; left: 12px; white-space: pre; font-variant-numeric: tabular-nums;
+         pointer-events: none; }
+  #legend { position: absolute; top: 34px; right: 12px; text-align: right; pointer-events: none; }
+  button, select { background: #1c2331; color: #cfd6e4; border: 1px solid #2c3546; border-radius: 4px; padding: 3px 8px; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div class="title" style="left: 12px">Ours: unit search</div>
+<div class="title" style="left: calc(50% + 12px)">Target network</div>
+<div id="hud"></div>
+<div id="legend"></div>
+<canvas id="loss"></canvas>
+<div id="bar">
+  <button id="play">Pause</button>
+  <select id="speed">
+    <option value="500">500 steps/s</option><option value="1000">1k steps/s</option>
+    <option value="2000">2k steps/s</option><option value="5000" selected>5k steps/s</option>
+    <option value="10000">10k steps/s</option><option value="20000">20k steps/s</option>
+    <option value="50000">50k steps/s</option>
+  </select>
+  <input id="time" type="range" min="0" max="1" step="any" value="0">
+  <select id="mode"><option value="sign">edge color: sign</option><option value="step">edge color: step-size</option></select>
+</div>
+<script src="data.js"></script>
+<script>
+// ---- Data (written by record.py): frame f is the network after f * snap steps ----
+const D = window.DATA;
+const NI = D.n_inputs, NL = D.n_ltus, NO = D.n_outputs, NT = D.n_target, NS = NI + NL, F = D.n_frames;
+const HALF = NL / 2, TH = NT / 2, NE = NL * NS + NO * NS;   // learner edges: hidden (LTU, source), then output (output, source)
+const bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const int8 = s => new Int8Array(bytes(s).buffer);
+const hidden = int8(D.hidden), output = int8(D.output), betaH = bytes(D.beta_hidden), betaO = bytes(D.beta_output);
+const readBits = bytes(D.reads), match = bytes(D.match), corr = bytes(D.corr);
+const isNew = bytes(D.new), movedFrom = int8(D.moved_from), tW = int8(D.target_hidden), tO = int8(D.target_output);
+const read = (f, u, j) => { const i = (f * NL + u) * NS + j; return (readBits[i >> 3] >> (7 - (i & 7))) & 1; };
+const logStep = b => D.log_range[0] + b / 255 * (D.log_range[1] - D.log_range[0]);
+const p95 = v => v.sort((a, b) => a - b)[Math.floor(v.length * 0.95)];
+const lastAbs = (a, n, scale) => Array.from(a.subarray((F - 1) * n * NS, F * n * NS), x => Math.abs(x) * scale).filter(x => x > 0);
+const clamp01 = v => Math.min(Math.max(v, 0), 1);
+
+const W_HIDDEN = p95(lastAbs(hidden, NL, D.hidden_scale));   // |weight| drawn at full width, the 95th percentile at the end
+const W_OUTPUT = p95(lastAbs(output, NO, D.output_scale));
+const SHOWN = 0.1;                     // edges fade in as |weight| rises from SHOWN to 2 SHOWN
+const STEP_RANGE = [-4, -1.5];         // log10 step-sizes spanning the color map
+const EFFECT = 0.8;                    // seconds an event's effect lasts
+const FOUND = 0.9;                     // |correlation| at which a learned LTU counts as a target LTU found
+
+// Per-frame counts for the HUD
+const connections = new Int32Array(F), replaced = new Int32Array(F), found = new Int32Array(F);
+for (let f = 0; f < F; f++) {
+  for (let u = 0; u < NL; u++) for (let j = 0; j < NS; j++) connections[f] += read(f, u, j);
+  if (f > 0) { replaced[f] = replaced[f - 1]; for (let u = 0; u < NL; u++) replaced[f] += isNew[(f - 1) * NL + u]; }
+  const hit = new Set();
+  for (let u = 0; u < NL; u++) if (corr[f * NL + u] / 255 > FOUND) hit.add(match[f * NL + u]);
+  found[f] = hit.size;
+}
+
+// ---- Layout: units as [x from 0 to 1, y], y in rows: 0 inputs, 1 depth 1, 2 depth 2, 3 outputs ----
+// Inputs and outputs sit in strict rows at their positions (record.py). LTUs have mass: each is accelerated toward the
+// |weight|-weighted mean position of the units it connects to, toward its own height near its row (drawn at random, so
+// that two LTUs meeting pass one above the other), and away from LTUs closer than SEPARATION, staying within BAND of its
+// row; its velocity is damped, and a resting LTU stays put until the net force on it passes STICK. Forces act in
+// widths, a row being A widths high.
+const A = 0.26, BAND = 0.35;
+const PULL = 3.0, PULL_Y = 0.6;        // per second squared
+const ROW = 6.0;                       // per second squared
+const REPEL = 18.0, SEPARATION = 0.07; // per second squared, widths
+const DAMPING = 4.0;                   // per second
+const STICK = 0.06, REST = 0.01;       // widths per second squared, widths per second
+const MAX_SPEED = 0.3;                 // widths per second
+function random(seed) {
+  return () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+                 t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function layoutStep(p, v, rows, offset, links, dt) {   // p: positions, v: velocities, links: [unit, unit, strength]
+  const n = p.length, sx = new Float64Array(n), sy = new Float64Array(n), sw = new Float64Array(n);
+  for (const [i, j, s] of links) {
+    sx[i] += s * p[j][0]; sy[i] += s * p[j][1]; sw[i] += s;
+    sx[j] += s * p[i][0]; sy[j] += s * p[i][1]; sw[j] += s;
+  }
+  const fx = new Float64Array(n), fy = new Float64Array(n), moving = rows.map(r => r === 1 || r === 2);
+  for (let i = 0; i < n; i++) if (moving[i]) {
+    if (sw[i] > 0) { fx[i] += PULL * (sx[i] / sw[i] - p[i][0]); fy[i] += PULL_Y * A * (sy[i] / sw[i] - p[i][1]); }
+    fy[i] += ROW * A * (rows[i] + offset[i] - p[i][1]);
+    for (let j = i + 1; j < n; j++) if (moving[j]) {
+      const dx = p[j][0] - p[i][0], dy = (p[j][1] - p[i][1]) * A, d = Math.hypot(dx, dy) || 1e-9;
+      if (d >= SEPARATION) continue;
+      const push = REPEL * (SEPARATION - d) / d;   // REPEL * (SEPARATION - d) along the line between them
+      fx[i] -= push * dx; fy[i] -= push * dy; fx[j] += push * dx; fy[j] += push * dy;
+    }
+  }
+  const damp = Math.exp(-DAMPING * dt);
+  for (let i = 0; i < n; i++) if (moving[i]) {
+    if (Math.hypot(v[i][0], v[i][1]) < REST && Math.hypot(fx[i], fy[i]) < STICK) { v[i][0] = v[i][1] = 0; continue; }
+    v[i][0] = (v[i][0] + fx[i] * dt) * damp; v[i][1] = (v[i][1] + fy[i] * dt) * damp;
+    const speed = Math.hypot(v[i][0], v[i][1]);
+    if (speed > MAX_SPEED) { v[i][0] *= MAX_SPEED / speed; v[i][1] *= MAX_SPEED / speed; }
+    const x = p[i][0] + v[i][0] * dt, y = p[i][1] + v[i][1] * dt / A;
+    p[i][0] = clamp01(x);
+    if (p[i][0] !== x) v[i][0] = 0;
+    p[i][1] = Math.min(Math.max(y, Math.min(rows[i] - BAND, p[i][1])), Math.max(rows[i] + BAND, p[i][1]));   // never further out
+    if (p[i][1] !== y) v[i][1] = 0;
+  }
+}
+
+// Target: fixed, its LTUs settled from their positions
+const targetEdges = [];               // [source, unit, weight] over [inputs, target LTUs, outputs]
+for (let u = 0; u < NT; u++) for (let j = 0; j < NI + NT; j++) if (tW[u * (NI + NT) + j]) targetEdges.push([j, NI + u, tW[u * (NI + NT) + j]]);
+for (let o = 0; o < NO; o++) for (let j = 0; j < NI + NT; j++) if (tO[o * (NI + NT) + j]) targetEdges.push([j, NI + NT + o, tO[o * (NI + NT) + j]]);
+const targetRows = D.position.map((_, i) => i < NI ? 0 : i < NI + TH ? 1 : i < NI + NT ? 2 : 3);
+const randomT = random(1), targetOffset = targetRows.map(() => (randomT() - 0.5) * BAND);
+const targetP = D.position.map((x, i) => [x / (NI - 1), targetRows[i] + (targetRows[i] % 3 ? targetOffset[i] : 0)]);
+const targetV = targetP.map(() => [0, 0]), targetLinks = targetEdges.map(([j, u]) => [j, u, 1]);
+for (let k = 0; k < 600; k++) layoutStep(targetP, targetV, targetRows, targetOffset, targetLinks, 0.05);
+
+// Learner: inputs and outputs where the target's are, LTU slots starting evenly spread
+const learnerRows = Array.from({ length: NS + NO }, (_, i) => i < NI ? 0 : i < NI + HALF ? 1 : i < NS ? 2 : 3);
+const randomL = random(2), learnerOffset = learnerRows.map(() => (randomL() - 0.5) * BAND);
+const learnerP = learnerRows.map((r, i) => r === 0 || r === 3 ? [...targetP[r === 0 ? i : i - NL + NT]]
+  : [((i - NI) % HALF) / (HALF - 1), r + learnerOffset[i]]);
+
+// The learner's LTU positions at every frame, precomputed by running the layout along the run, one step of D.snap / 5000
+// seconds per frame (real time at 5k steps per second), the links being the edges drawn at that frame. An LTU moved from
+// a depth-2 slot glides down from where it was; a new LTU starts above the |weight|-weighted mean position of its
+// sources. prunes[f]: where the LTUs pruned at frame f were.
+function frameLinks(f) {
+  const l = [];
+  for (let u = 0; u < NL; u++) for (let j = 0; j < NS; j++) {
+    const w = Math.abs(hidden[(f * NL + u) * NS + j]) * D.hidden_scale;
+    if (read(f, u, j) && w > SHOWN) l.push([j, NI + u, Math.min(w / W_HIDDEN, 1) * clamp01((w - SHOWN) / SHOWN)]);
+  }
+  for (let o = 0; o < NO; o++) for (let j = NI; j < NS; j++) {
+    const w = Math.abs(output[(f * NO + o) * NS + j]) * D.output_scale;
+    if (w > SHOWN) l.push([j, NS + o, Math.min(w / W_OUTPUT, 1) * clamp01((w - SHOWN) / SHOWN)]);
+  }
+  return l;
+}
+function rearrange(f, v) {             // the moves and new LTUs of frame f
+  const old = learnerP.map(q => [...q]);
+  for (let u = 0; u < NL; u++) {
+    const from = movedFrom[(f - 1) * NL + u];
+    if (from >= 0) { learnerP[NI + u] = [...old[NI + from]]; v[NI + u] = [0, 0]; }
+  }
+  for (let u = 0; u < NL; u++) if (isNew[(f - 1) * NL + u]) {
+    let pruned = u;                    // the LTU pruned in slot u, unless an LTU swapped into u from a depth-1 slot
+    for (let i = 0; i < NL; i++) if (movedFrom[(f - 1) * NL + i] === u) pruned = i;
+    prunes[f].push(old[NI + pruned]);
+    let sx = 0, sw = 0;
+    for (let j = 0; j < NS; j++) if (read(f, u, j)) {
+      const s = Math.abs(hidden[(f * NL + u) * NS + j]) + 1e-6; sx += s * learnerP[j][0]; sw += s;
+    }
+    if (sw > 0) { learnerP[NI + u] = [sx / sw, learnerRows[NI + u] + learnerOffset[NI + u]]; v[NI + u] = [0, 0]; }
+  }
+}
+const layout = new Float32Array(F * NL * 2), prunes = Array.from({ length: F }, () => []);
+{
+  const v = learnerP.map(() => [0, 0]), first = frameLinks(0);
+  for (let k = 0; k < 300; k++) layoutStep(learnerP, v, learnerRows, learnerOffset, first, 0.05);
+  for (let f = 0; f < F; f++) {
+    if (f > 0) { rearrange(f, v); layoutStep(learnerP, v, learnerRows, learnerOffset, frameLinks(f), D.snap / 5000); }
+    for (let u = 0; u < NL; u++) layout.set(learnerP[NI + u], (f * NL + u) * 2);
+  }
+}
+function learnerPositions(t) {         // at time t, interpolated between frames, jumping at moves and new LTUs
+  const f = Math.floor(t), g = Math.min(f + 1, F - 1), a = t - f;
+  return learnerP.map((q, i) => {
+    if (i < NI || i >= NS) return q;
+    const u = i - NI, b = f < F - 1 && (isNew[f * NL + u] || movedFrom[f * NL + u] >= 0) ? 0 : a;
+    const k0 = (f * NL + u) * 2, k1 = (g * NL + u) * 2;
+    return [layout[k0] + b * (layout[k1] - layout[k0]), layout[k0 + 1] + b * (layout[k1 + 1] - layout[k0 + 1])];
+  });
+}
+
+// ---- Colors ----
+const POS = [184, 138, 50], NEG = [74, 143, 214], WHITE = [255, 255, 255], REMOVED = [150, 158, 175];
+const GREEN = [61, 255, 122], RED = [255, 77, 77], MOVED = [199, 146, 255], INPUT = [125, 135, 155], OUTPUT = [232, 236, 244], SPARE = [110, 116, 132];
+const PLASMA = [[13, 8, 135], [106, 0, 168], [177, 42, 144], [225, 100, 98], [252, 166, 54], [240, 249, 33]];
+const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+const css = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+function hsl(h, s, l) {
+  const a = s * Math.min(l, 1 - l), f = n => { const k = (n + h * 12) % 12; return 255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))); };
+  return [f(0), f(8), f(4)];
+}
+const targetColor = Array.from({ length: NT }, (_, u) => hsl((u * 0.618) % 1, 0.8, 0.6));
+function plasma(t) {
+  t = clamp01(t) * (PLASMA.length - 1);
+  const i = Math.min(Math.floor(t), PLASMA.length - 2);
+  return mix(PLASMA[i], PLASMA[i + 1], t - i);
+}
+const stepT = logS => (logS / Math.LN10 - STEP_RANGE[0]) / (STEP_RANGE[1] - STEP_RANGE[0]);
+
+// ---- Drawing ----
+const view = document.getElementById('view'), ctx = view.getContext('2d');
+const TOP = 150, BOTTOM = 20, SIDE = 40;
+let W = 0, H = 0;
+function fit(canvas, c) {
+  const dpr = devicePixelRatio, w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  }
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, w, h);
+  return [w, h];
+}
+const screen = ([x, y], half) => [half * W / 2 + SIDE + x * (W / 2 - 2 * SIDE),
+                                  H - BOTTOM - (y + BAND) / (3 + 2 * BAND) * (H - TOP - BOTTOM)];
+function line(a, b, width, color, alpha) {
+  ctx.globalAlpha = alpha; ctx.strokeStyle = css(color); ctx.lineWidth = width;
+  ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+}
+function dot(p, r, color) {
+  ctx.globalAlpha = 1; ctx.fillStyle = css(color);
+  ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, 2 * Math.PI); ctx.fill();
+}
+function ring(p, r, color, alpha) {
+  ctx.globalAlpha = alpha; ctx.strokeStyle = css(color); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, 2 * Math.PI); ctx.stroke();
+}
+
+// ---- Events: effects start when playback reaches the frame they happen in ----
+const tAdd = new Float64Array(NE).fill(-1e9), tDie = new Float64Array(NE).fill(-1e9), wDie = new Float32Array(NE);
+const tBorn = new Float64Array(NL).fill(-1e9), tMoved = new Float64Array(NL).fill(-1e9);
+let pops = [];                         // {p, t0}: where an LTU was pruned, and when
+const ends = e => { const isHidden = e < NL * NS, row = Math.floor((isHidden ? e : e - NL * NS) / NS);
+                    return [e % NS, isHidden ? NI + row : NS + row, isHidden, row]; };   // [source, unit, hidden?, row]
+function dying(e, w, scale, now) { if (Math.abs(w) > SHOWN) { tDie[e] = now; wDie[e] = Math.min(Math.abs(w) / scale, 1); } }
+function events(f, now) {
+  for (let u = 0; u < NL; u++) for (let j = 0; j < NS; j++) {
+    const was = read(f - 1, u, j), is = read(f, u, j);
+    if (!was && is) tAdd[u * NS + j] = now;
+    if (was && !is) dying(u * NS + j, hidden[((f - 1) * NL + u) * NS + j] * D.hidden_scale, W_HIDDEN, now);
+  }
+  for (let u = 0; u < NL; u++) {
+    if (movedFrom[(f - 1) * NL + u] >= 0) tMoved[u] = now;
+    if (!isNew[(f - 1) * NL + u]) continue;
+    tBorn[u] = now;                    // a new LTU: its output weights restart at 0
+    for (let o = 0; o < NO; o++)
+      dying(NL * NS + o * NS + NI + u, output[((f - 1) * NO + o) * NS + NI + u] * D.output_scale, W_OUTPUT, now);
+  }
+  for (const p of prunes[f]) pops.push({ p, t0: now });
+}
+function clearEffects() { tAdd.fill(-1e9); tDie.fill(-1e9); tBorn.fill(-1e9); tMoved.fill(-1e9); pops = []; }
+
+// The learner's edges drawn at time t (fractional frame): {j: source, k: unit, w, m: |w| share, fade, add, logS}
+function learnerEdges(t, now) {
+  const f = Math.floor(t), g = Math.min(f + 1, F - 1), a = t - f, edges = [];
+  for (let e = 0; e < NE; e++) {
+    const [j, k, isHidden, row] = ends(e);
+    if (isHidden && !read(f, row, j)) continue;
+    let w, logS, scale;
+    if (isHidden) {
+      const i = (f * NL + row) * NS + j, l = read(g, row, j) ? (g * NL + row) * NS + j : i;
+      w = (hidden[i] + a * (hidden[l] - hidden[i])) * D.hidden_scale; scale = W_HIDDEN;
+      logS = logStep(betaH[i] + a * (betaH[l] - betaH[i]));
+    } else {
+      const i = (f * NO + row) * NS + j, l = (g * NO + row) * NS + j;
+      w = (output[i] + a * (output[l] - output[i])) * D.output_scale; scale = W_OUTPUT;
+      logS = logStep(betaO[i] + a * (betaO[l] - betaO[i]));
+    }
+    const add = clamp01(1 - (now - tAdd[e]) / EFFECT), fade = clamp01((Math.abs(w) - SHOWN) / SHOWN) * (1 - add);
+    if (fade > 0 || add > 0) edges.push({ j, k, w, m: Math.min(Math.abs(w) / scale, 1), fade, add, logS });
+  }
+  return edges;
+}
+
+let mode = 'sign';
+function drawLearner(edges, t, f, now) {
+  const P = learnerPositions(t).map(u => screen(u, 0));
+  for (let e = 0; e < NE; e++) {       // removed: shrinks and fades
+    const die = clamp01(1 - (now - tDie[e]) / EFFECT);
+    if (die > 0) { const [j, k] = ends(e); line(P[j], P[k], 0.5 + 2.2 * wDie[e] * die, REMOVED, 0.8 * die); }
+  }
+  for (const { j, k, w, m, fade, logS } of edges) if (fade > 0)
+    line(P[j], P[k], 0.5 + 2.2 * m, mode === 'sign' ? (w > 0 ? POS : NEG) : plasma(stepT(logS)), (0.2 + 0.8 * m) * fade);
+  for (const { j, k, add } of edges) if (add > 0) line(P[j], P[k], 1 + 2 * add, WHITE, add);   // new: a white flash
+  for (let i = 0; i < P.length; i++) {
+    if (i < NI) { dot(P[i], 3.5, INPUT); continue; }
+    if (i >= NS) { dot(P[i], 8, OUTPUT); continue; }
+    const u = i - NI, q = clamp01((corr[f * NL + u] / 255 - 0.5) / (FOUND - 0.5));
+    let c = mix(SPARE, targetColor[match[f * NL + u]], q);
+    const born = clamp01(1 - (now - tBorn[u]) / EFFECT), moved = clamp01(1 - (now - tMoved[u]) / EFFECT);
+    if (born > 0) { c = mix(c, GREEN, born); ring(P[i], 7 + 18 * (1 - born), GREEN, born); }
+    if (moved > 0) { c = mix(c, MOVED, moved); ring(P[i], 7 + 18 * (1 - moved), MOVED, moved); }
+    dot(P[i], 7, c);
+  }
+  pops = pops.filter(pop => now - pop.t0 < EFFECT);
+  for (const pop of pops) {            // pruned: a red pop where the LTU was
+    const k = 1 - (now - pop.t0) / EFFECT, p = screen(pop.p, 0);
+    ring(p, 7 + 18 * (1 - k), RED, k); dot(p, 7 * k, RED);
+  }
+}
+
+function drawTarget() {
+  const P = targetP.map(u => screen(u, 1));
+  for (const [j, k, w] of targetEdges) line(P[j], P[k], 1.6, w > 0 ? POS : NEG, 0.8);
+  P.forEach((p, i) => dot(p, i < NI ? 3.5 : i < NI + NT ? 7 : 8, i < NI ? INPUT : i < NI + NT ? targetColor[i - NI] : OUTPUT));
+}
+
+// ---- Loss panel ----
+const lossCanvas = document.getElementById('loss'), lctx = lossCanvas.getContext('2d');
+const PAD = { l: 56, r: 16, t: 12, b: 26 }, Y_MAX = 1.0, STEPS = (F - 1) * D.snap, SMOOTH = Math.max(1000 / D.snap, 1);
+// RMSE over the last 1,000 steps
+const RMSE = D.rmse.map((_, k) => { const w = D.rmse.slice(Math.max(k - SMOOTH + 1, 0), k + 1); return Math.sqrt(w.reduce((s, v) => s + v * v, 0) / w.length); });
+function drawLoss(t) {
+  const [w, h] = fit(lossCanvas, lctx);
+  const x = s => PAD.l + s / STEPS * (w - PAD.l - PAD.r), y = v => PAD.t + (1 - v / Y_MAX) * (h - PAD.t - PAD.b);
+  lctx.font = '11px system-ui'; lctx.fillStyle = '#7d879b'; lctx.strokeStyle = '#1e2533'; lctx.lineWidth = 1;
+  for (let v = 0; v <= Y_MAX + 1e-9; v += 0.2) {
+    lctx.beginPath(); lctx.moveTo(PAD.l, y(v)); lctx.lineTo(w - PAD.r, y(v)); lctx.stroke();
+    lctx.textAlign = 'right'; lctx.fillText(v.toFixed(1), PAD.l - 6, y(v) + 4);
+  }
+  for (let s = 0; s <= STEPS; s += 50000) {
+    lctx.beginPath(); lctx.moveTo(x(s), PAD.t); lctx.lineTo(x(s), h - PAD.b); lctx.stroke();
+    lctx.textAlign = 'center'; lctx.fillText(`${s / 1000}k`, x(s), h - 8);
+  }
+  lctx.save(); lctx.translate(14, (h - PAD.b + PAD.t) / 2); lctx.rotate(-Math.PI / 2); lctx.textAlign = 'center';
+  lctx.fillText('RMSE', 0, 0); lctx.restore();
+  lctx.setLineDash([4, 4]); lctx.strokeStyle = '#5c6478';
+  lctx.beginPath(); lctx.moveTo(PAD.l, y(D.noise)); lctx.lineTo(w - PAD.r, y(D.noise)); lctx.stroke();
+  lctx.setLineDash([]); lctx.textAlign = 'left'; lctx.fillText('noise floor', w - PAD.r - 64, y(D.noise) - 5);
+  const curve = (upTo, style, width) => {
+    lctx.strokeStyle = style; lctx.lineWidth = width; lctx.beginPath();
+    RMSE.forEach((v, k) => { if ((k + 1) * D.snap <= upTo) lctx[k ? 'lineTo' : 'moveTo'](x((k + 1) * D.snap), y(Math.min(v, Y_MAX))); });
+    lctx.stroke();
+  };
+  curve(STEPS, '#2a3242', 1.5);
+  curve(t * D.snap, '#5aa9ff', 2);
+  lctx.strokeStyle = '#cfd6e4'; lctx.lineWidth = 1;
+  lctx.beginPath(); lctx.moveTo(x(t * D.snap), PAD.t); lctx.lineTo(x(t * D.snap), h - PAD.b); lctx.stroke();
+}
+function seekFromLoss(ev) {
+  const r = lossCanvas.getBoundingClientRect();
+  seek((ev.clientX - r.left - PAD.l) / (r.width - PAD.l - PAD.r) * (F - 1));
+}
+lossCanvas.addEventListener('pointerdown', ev => { seekFromLoss(ev); lossCanvas.setPointerCapture(ev.pointerId); });
+lossCanvas.addEventListener('pointermove', ev => { if (ev.buttons) seekFromLoss(ev); });
+
+// ---- HUD, legend and controls ----
+const hud = document.getElementById('hud'), legend = document.getElementById('legend');
+const swatch = c => `<span style="color:${css(c)}">&#9632;</span>`;
+function drawLegend() {
+  const edge = mode === 'sign'
+    ? `${swatch(POS)} positive ${swatch(NEG)} negative weight`
+    : `step-size 10<sup>${STEP_RANGE[0]}</sup> <span style="background:linear-gradient(90deg,${PLASMA.map(css).join(',')});display:inline-block;width:80px;height:9px"></span> 10<sup>${STEP_RANGE[1]}</sup>`;
+  legend.innerHTML = [
+    `edges: |weight| above ${SHOWN}, wider and brighter when larger`, edge,
+    'LTU color: the target LTU it matches (|correlation|)',
+    `${swatch(WHITE)} new connection &nbsp; ${swatch(REMOVED)} removed connection`,
+    `${swatch(GREEN)} new LTU &nbsp; ${swatch(RED)} pruned LTU &nbsp; ${swatch(MOVED)} LTU moved to depth 1`].join('<br>');
+}
+const timeSlider = document.getElementById('time'), playButton = document.getElementById('play');
+timeSlider.max = F - 1;
+let t = 0, playing = true, speed = 5000, last = performance.now();   // speed: steps per second
+function seek(to) { t = Math.min(Math.max(to, 0), F - 1); clearEffects(); }
+timeSlider.addEventListener('input', () => seek(+timeSlider.value));
+function togglePlay() {
+  if (!playing && t >= F - 1) seek(0);
+  playing = !playing; playButton.textContent = playing ? 'Pause' : 'Play';
+}
+playButton.addEventListener('click', togglePlay);
+addEventListener('keydown', ev => { if (ev.code === 'Space') { ev.preventDefault(); togglePlay(); } });
+document.getElementById('speed').addEventListener('change', ev => speed = +ev.target.value);
+document.getElementById('mode').addEventListener('change', ev => { mode = ev.target.value; drawLegend(); });
+drawLegend();
+
+function animate(nowMs) {
+  const now = nowMs / 1000, dt = Math.min(Math.max(nowMs - last, 0) / 1000, 0.05);
+  last = nowMs;
+  if (playing) {
+    const next = Math.min(t + dt * speed / D.snap, F - 1);
+    for (let f = Math.floor(t) + 1; f <= Math.floor(next); f++) events(f, now);
+    t = next;
+    if (t >= F - 1) { playing = false; playButton.textContent = 'Play'; }
+  }
+  timeSlider.value = t;
+  const f = Math.floor(t), edges = learnerEdges(t, now);
+  hud.textContent = `step        ${(t * D.snap / 1000).toFixed(0)}k\nRMSE        ${RMSE[Math.max(f - 1, 0)].toFixed(3)}\n` +
+    `connections ${connections[f]}\nLTUs replaced ${replaced[f]}\ntarget LTUs found ${found[f]} / ${NT}`;
+  [W, H] = fit(view, ctx);
+  line([W / 2, 0], [W / 2, H], 1, [34, 42, 56], 1);
+  drawLearner(edges, t, f, now);
+  drawTarget();
+  drawLoss(t);
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

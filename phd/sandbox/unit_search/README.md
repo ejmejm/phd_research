@@ -11,6 +11,12 @@ prunes whole units and generates new ones in the budget they free. Connection-le
   lower depth.
 - `sparse_teacher_dense_units.ipynb` — the same target, with unit search whose new units connect to everything
   before and after them, and connection pruning removes the connections that do not matter.
+- `demo/` — a demo of unit search on a small random sparse, locally connected target network (33 inputs, 2 × 7 LTUs,
+  7 outputs):
+  - `sparse_target_demo.ipynb` — unit search against fully connected networks (SGD, Adam, batched Adam, network
+    Autostep), each at its best step-size.
+  - `record.py` — records one run of unit search (the notebook's code) to `data.js`, for `index.html`, a playback
+    of the network as it learns (2D, layers as rows), beside the target network, with its RMSE.
 - `blocked_unit/` — steps from a minimal test toward the sparse target, in order:
   - `01_blocked_unit.ipynb` — whether a learned mediocre solution blocks a new unit: one target LTU on 10 inputs,
     and a hidden unit reading all of them added before or after a linear readout of the inputs has converged, with
