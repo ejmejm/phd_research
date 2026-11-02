@@ -6,24 +6,26 @@
 <title>Unit Search Demo</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; color: #cfd6e4;
-               font: 13px/1.5 system-ui, sans-serif; }
+               font: 15px/1.5 system-ui, sans-serif; }
   #view { position: absolute; left: 0; top: 0; width: 100%; height: calc(100% - 200px); display: block; }
   #loss { position: absolute; left: 0; bottom: 44px; width: 100%; height: 156px; display: block; cursor: pointer; }
   #bar { position: absolute; left: 0; bottom: 0; width: 100%; height: 44px; box-sizing: border-box; padding: 0 12px;
          display: flex; gap: 12px; align-items: center; background: #121722; }
   #bar input[type=range] { flex: 1; }
-  .title { position: absolute; top: 8px; font-size: 16px; font-weight: 600; pointer-events: none; }
-  #hud { position: absolute; top: 34px; left: 12px; white-space: pre; font-variant-numeric: tabular-nums;
-         pointer-events: none; }
-  #legend { position: absolute; top: 34px; right: 12px; text-align: right; pointer-events: none; }
+  .title { position: absolute; top: 8px; font-size: 18px; font-weight: 600; pointer-events: none; }
+  .stats { position: absolute; top: 38px; white-space: pre; font-variant-numeric: tabular-nums; pointer-events: none; }
+  #step { min-width: 80px; font-variant-numeric: tabular-nums; }
+  #legend { position: absolute; top: 38px; right: 12px; text-align: right; pointer-events: none; }
   button, select { background: #1c2331; color: #cfd6e4; border: 1px solid #2c3546; border-radius: 4px; padding: 3px 8px; }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
-<div class="title" style="left: 12px">Ours: unit search</div>
-<div class="title" style="left: calc(50% + 12px)">Target network</div>
-<div id="hud"></div>
+<div class="title" id="title-ours">Ours: unit search (proposed)</div>
+<div class="title" id="title-adam">Adam, fully connected (baseline)</div>
+<div class="title" id="title-target">Target network</div>
+<div class="stats" id="stats-ours"></div>
+<div class="stats" id="stats-adam"></div>
 <div id="legend"></div>
 <canvas id="loss"></canvas>
 <div id="bar">
@@ -34,7 +36,11 @@
     <option value="10000">10k steps/s</option><option value="20000">20k steps/s</option>
     <option value="50000">50k steps/s</option>
   </select>
+  <span id="step"></span>
   <input id="time" type="range" min="0" max="1" step="any" value="0">
+  <label><input type="checkbox" id="show-ours" checked> ours</label>
+  <label><input type="checkbox" id="show-adam" checked> Adam</label>
+  <label><input type="checkbox" id="show-target" checked> target</label>
   <select id="mode"><option value="sign">edge color: sign</option><option value="step">edge color: step-size</option></select>
 </div>
 <script src="data.js"></script>
@@ -48,6 +54,7 @@ const int8 = s => new Int8Array(bytes(s).buffer);
 const hidden = int8(D.hidden), output = int8(D.output), betaH = bytes(D.beta_hidden), betaO = bytes(D.beta_output);
 const readBits = bytes(D.reads), match = bytes(D.match), corr = bytes(D.corr);
 const isNew = bytes(D.new), movedFrom = int8(D.moved_from), tW = int8(D.target_hidden), tO = int8(D.target_output);
+const aHidden = int8(D.adam_hidden), aOutput = int8(D.adam_output), aMatch = bytes(D.adam_match), aCorr = bytes(D.adam_corr);
 const read = (f, u, j) => { const i = (f * NL + u) * NS + j; return (readBits[i >> 3] >> (7 - (i & 7))) & 1; };
 const logStep = b => D.log_range[0] + b / 255 * (D.log_range[1] - D.log_range[0]);
 const p95 = v => v.sort((a, b) => a - b)[Math.floor(v.length * 0.95)];
@@ -56,27 +63,30 @@ const clamp01 = v => Math.min(Math.max(v, 0), 1);
 
 const W_HIDDEN = p95(lastAbs(hidden, NL, D.hidden_scale));   // |weight| drawn at full width, the 95th percentile at the end
 const W_OUTPUT = p95(lastAbs(output, NO, D.output_scale));
+const A_HIDDEN = p95(lastAbs(aHidden, NL, D.adam_hidden_scale)), A_OUTPUT = p95(lastAbs(aOutput, NO, D.adam_output_scale));
 const SHOWN = 0.1;                     // edges fade in as |weight| rises from SHOWN to 2 SHOWN
 const STEP_RANGE = [-4, -1.5];         // log10 step-sizes spanning the color map
 const EFFECT = 0.8;                    // seconds an event's effect lasts
 const FOUND = 0.9;                     // |correlation| at which a learned LTU counts as a target LTU found
 
-// Per-frame counts for the HUD
-const connections = new Int32Array(F), replaced = new Int32Array(F), found = new Int32Array(F);
+// Per-frame target LTUs found, for the stats under each title
+const found = new Int32Array(F), aFound = new Int32Array(F);
 for (let f = 0; f < F; f++) {
-  for (let u = 0; u < NL; u++) for (let j = 0; j < NS; j++) connections[f] += read(f, u, j);
-  if (f > 0) { replaced[f] = replaced[f - 1]; for (let u = 0; u < NL; u++) replaced[f] += isNew[(f - 1) * NL + u]; }
   const hit = new Set();
   for (let u = 0; u < NL; u++) if (corr[f * NL + u] / 255 > FOUND) hit.add(match[f * NL + u]);
   found[f] = hit.size;
+  const aHit = new Set();
+  for (let u = 0; u < NL; u++) if (aCorr[f * NL + u] / 255 > FOUND) aHit.add(aMatch[f * NL + u]);
+  aFound[f] = aHit.size;
 }
 
 // ---- Layout: units as [x from 0 to 1, y], y in rows: 0 inputs, 1 depth 1, 2 depth 2, 3 outputs ----
-// Inputs and outputs sit in strict rows at their positions (record.py). LTUs have mass: each is accelerated toward the
-// |weight|-weighted mean position of the units it connects to, toward its own height near its row (drawn at random, so
-// that two LTUs meeting pass one above the other), and away from LTUs closer than SEPARATION, staying within BAND of its
-// row; its velocity is damped, and a resting LTU stays put until the net force on it passes STICK. Forces act in
-// widths, a row being A widths high.
+// Inputs and outputs sit in strict rows at their positions (record.py). LTUs have mass, growing with age from 1 by one
+// every MASS_TIME seconds up to MAX_MASS, so new LTUs settle around old ones rather than shove them. Each is pushed
+// toward the |weight|-weighted mean position of the units it connects to, toward its own height near its row (drawn at
+// random, so that two LTUs meeting pass one above the other), and away from LTUs closer than SEPARATION, staying within
+// BAND of its row; its velocity is damped, and a resting LTU stays put until its acceleration passes STICK. Forces act
+// in widths, a row being A widths high.
 const A = 0.26, BAND = 0.35;
 const PULL = 3.0, PULL_Y = 0.6;        // per second squared
 const ROW = 6.0;                       // per second squared
@@ -84,11 +94,13 @@ const REPEL = 18.0, SEPARATION = 0.07; // per second squared, widths
 const DAMPING = 4.0;                   // per second
 const STICK = 0.06, REST = 0.01;       // widths per second squared, widths per second
 const MAX_SPEED = 0.3;                 // widths per second
+const MASS_TIME = 2.0, MAX_MASS = 6;   // seconds
+const mass = age => Math.min(1 + age / MASS_TIME, MAX_MASS);
 function random(seed) {
   return () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
                  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
 }
-function layoutStep(p, v, rows, offset, links, dt) {   // p: positions, v: velocities, links: [unit, unit, strength]
+function layoutStep(p, v, rows, offset, links, dt, age) {   // p: positions, v: velocities, links: [unit, unit, strength]
   const n = p.length, sx = new Float64Array(n), sy = new Float64Array(n), sw = new Float64Array(n);
   for (const [i, j, s] of links) {
     sx[i] += s * p[j][0]; sy[i] += s * p[j][1]; sw[i] += s;
@@ -107,6 +119,8 @@ function layoutStep(p, v, rows, offset, links, dt) {   // p: positions, v: veloc
   }
   const damp = Math.exp(-DAMPING * dt);
   for (let i = 0; i < n; i++) if (moving[i]) {
+    const m = age ? mass(age[i]) : 1;
+    fx[i] /= m; fy[i] /= m;
     if (Math.hypot(v[i][0], v[i][1]) < REST && Math.hypot(fx[i], fy[i]) < STICK) { v[i][0] = v[i][1] = 0; continue; }
     v[i][0] = (v[i][0] + fx[i] * dt) * damp; v[i][1] = (v[i][1] + fy[i] * dt) * damp;
     const speed = Math.hypot(v[i][0], v[i][1]);
@@ -138,7 +152,8 @@ const learnerP = learnerRows.map((r, i) => r === 0 || r === 3 ? [...targetP[r ==
 // The learner's LTU positions at every frame, precomputed by running the layout along the run, one step of D.snap / 5000
 // seconds per frame (real time at 5k steps per second), the links being the edges drawn at that frame. An LTU moved from
 // a depth-2 slot glides down from where it was; a new LTU starts above the |weight|-weighted mean position of its
-// sources. prunes[f]: where the LTUs pruned at frame f were.
+// sources. prunes[f]: where the LTUs pruned at frame f were. Velocities and ages are kept per frame so that the layout
+// can be rerun from any frame, as when an LTU is dragged.
 function frameLinks(f) {
   const l = [];
   for (let u = 0; u < NL; u++) for (let j = 0; j < NS; j++) {
@@ -151,16 +166,17 @@ function frameLinks(f) {
   }
   return l;
 }
-function rearrange(f, v) {             // the moves and new LTUs of frame f
-  const old = learnerP.map(q => [...q]);
+function rearrange(f, v, age) {        // the moves and new LTUs of frame f
+  const old = learnerP.map(q => [...q]), oldAge = [...age];
   for (let u = 0; u < NL; u++) {
     const from = movedFrom[(f - 1) * NL + u];
-    if (from >= 0) { learnerP[NI + u] = [...old[NI + from]]; v[NI + u] = [0, 0]; }
+    if (from >= 0) { learnerP[NI + u] = [...old[NI + from]]; v[NI + u] = [0, 0]; age[NI + u] = oldAge[NI + from]; }
   }
   for (let u = 0; u < NL; u++) if (isNew[(f - 1) * NL + u]) {
     let pruned = u;                    // the LTU pruned in slot u, unless an LTU swapped into u from a depth-1 slot
     for (let i = 0; i < NL; i++) if (movedFrom[(f - 1) * NL + i] === u) pruned = i;
     prunes[f].push(old[NI + pruned]);
+    age[NI + u] = 0;
     let sx = 0, sw = 0;
     for (let j = 0; j < NS; j++) if (read(f, u, j)) {
       const s = Math.abs(hidden[(f * NL + u) * NS + j]) + 1e-6; sx += s * learnerP[j][0]; sw += s;
@@ -168,14 +184,31 @@ function rearrange(f, v) {             // the moves and new LTUs of frame f
     if (sw > 0) { learnerP[NI + u] = [sx / sw, learnerRows[NI + u] + learnerOffset[NI + u]]; v[NI + u] = [0, 0]; }
   }
 }
-const layout = new Float32Array(F * NL * 2), prunes = Array.from({ length: F }, () => []);
+const layout = new Float32Array(F * NL * 2), vel = new Float32Array(F * NL * 2), ages = new Float32Array(F * NL);
+const prunes = Array.from({ length: F }, () => []);
+function record(f, v, age) {
+  for (let u = 0; u < NL; u++) {
+    layout.set(learnerP[NI + u], (f * NL + u) * 2); vel.set(v[NI + u], (f * NL + u) * 2); ages[f * NL + u] = age[NI + u];
+  }
+}
+function simulate(from) {              // reruns the layout after frame `from`
+  const v = learnerP.map(() => [0, 0]), age = learnerP.map(() => 0), dt = D.snap / 5000;
+  for (let u = 0, k = from * NL; u < NL; u++, k++) {
+    learnerP[NI + u] = [layout[2 * k], layout[2 * k + 1]]; v[NI + u] = [vel[2 * k], vel[2 * k + 1]]; age[NI + u] = ages[k];
+  }
+  for (let f = from + 1; f < F; f++) {
+    prunes[f] = [];
+    rearrange(f, v, age);
+    layoutStep(learnerP, v, learnerRows, learnerOffset, frameLinks(f), dt, age);
+    for (let i = 0; i < age.length; i++) age[i] += dt;
+    record(f, v, age);
+  }
+}
 {
   const v = learnerP.map(() => [0, 0]), first = frameLinks(0);
   for (let k = 0; k < 300; k++) layoutStep(learnerP, v, learnerRows, learnerOffset, first, 0.05);
-  for (let f = 0; f < F; f++) {
-    if (f > 0) { rearrange(f, v); layoutStep(learnerP, v, learnerRows, learnerOffset, frameLinks(f), D.snap / 5000); }
-    for (let u = 0; u < NL; u++) layout.set(learnerP[NI + u], (f * NL + u) * 2);
-  }
+  record(0, v, learnerP.map(() => 0));
+  simulate(0);
 }
 function learnerPositions(t) {         // at time t, interpolated between frames, jumping at moves and new LTUs
   const f = Math.floor(t), g = Math.min(f + 1, F - 1), a = t - f;
@@ -187,9 +220,22 @@ function learnerPositions(t) {         // at time t, interpolated between frames
   });
 }
 
+// Adam: every connection a fully connected network has, [index into its weights, source, unit, hidden?], at positions
+// settled once from its final weights
+const adamEdges = [];
+for (let u = 0; u < NL; u++) for (let j = 0; j < (u < HALF ? NI : NI + HALF); j++) adamEdges.push([u * NS + j, j, NI + u, true]);
+for (let o = 0; o < NO; o++) for (let j = 0; j < NS; j++) adamEdges.push([o * NS + j, j, NS + o, false]);
+const adamM = (f, e, hid) => Math.min(Math.abs((hid ? aHidden : aOutput)[f * (hid ? NL : NO) * NS + e]) *
+                                      (hid ? D.adam_hidden_scale / A_HIDDEN : D.adam_output_scale / A_OUTPUT), 1);
+const adamP = learnerRows.map((r, i) => r === 0 || r === 3 ? [...learnerP[i]] : [((i - NI) % HALF) / (HALF - 1), r + learnerOffset[i]]);
+{
+  const v = adamP.map(() => [0, 0]), links = adamEdges.map(([e, j, k, hid]) => [j, k, adamM(F - 1, e, hid)]);
+  for (let k = 0; k < 600; k++) layoutStep(adamP, v, learnerRows, learnerOffset, links, 0.05);
+}
+
 // ---- Colors ----
 const POS = [184, 138, 50], NEG = [74, 143, 214], WHITE = [255, 255, 255], REMOVED = [150, 158, 175];
-const GREEN = [61, 255, 122], RED = [255, 77, 77], MOVED = [199, 146, 255], INPUT = [125, 135, 155], OUTPUT = [232, 236, 244], SPARE = [110, 116, 132];
+const BG = [11, 14, 20], SOURCE = [150, 230, 220], GREEN = [61, 255, 122], RED = [255, 77, 77], MOVED = [199, 146, 255], INPUT = [125, 135, 155], OUTPUT = [232, 236, 244], SPARE = [110, 116, 132];
 const PLASMA = [[13, 8, 135], [106, 0, 168], [177, 42, 144], [225, 100, 98], [252, 166, 54], [240, 249, 33]];
 const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
 const css = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
@@ -198,6 +244,7 @@ function hsl(h, s, l) {
   return [f(0), f(8), f(4)];
 }
 const targetColor = Array.from({ length: NT }, (_, u) => hsl((u * 0.618) % 1, 0.8, 0.6));
+const matchColor = (m, c) => mix(SPARE, targetColor[m], clamp01((c / 255 - 0.5) / (FOUND - 0.5)));   // by |correlation|
 function plasma(t) {
   t = clamp01(t) * (PLASMA.length - 1);
   const i = Math.min(Math.floor(t), PLASMA.length - 2);
@@ -207,7 +254,7 @@ const stepT = logS => (logS / Math.LN10 - STEP_RANGE[0]) / (STEP_RANGE[1] - STEP
 
 // ---- Drawing ----
 const view = document.getElementById('view'), ctx = view.getContext('2d');
-const TOP = 150, BOTTOM = 20, SIDE = 40;
+const TOP = 170, BOTTOM = 20, SIDE = 40;
 let W = 0, H = 0;
 function fit(canvas, c) {
   const dpr = devicePixelRatio, w = canvas.clientWidth, h = canvas.clientHeight;
@@ -218,8 +265,10 @@ function fit(canvas, c) {
   c.clearRect(0, 0, w, h);
   return [w, h];
 }
-const screen = ([x, y], half) => [half * W / 2 + SIDE + x * (W / 2 - 2 * SIDE),
-                                  H - BOTTOM - (y + BAND) / (3 + 2 * BAND) * (H - TOP - BOTTOM)];
+const PANELS = ['ours', 'adam', 'target'];
+let active = [...PANELS];             // the panels shown, side by side across the full width
+const screen = ([x, y], panel) => { const n = active.length, c = active.indexOf(panel);
+  return [c * W / n + SIDE + x * (W / n - 2 * SIDE), H - BOTTOM - (y + BAND) / (3 + 2 * BAND) * (H - TOP - BOTTOM)]; };
 function line(a, b, width, color, alpha) {
   ctx.globalAlpha = alpha; ctx.strokeStyle = css(color); ctx.lineWidth = width;
   ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
@@ -228,8 +277,11 @@ function dot(p, r, color) {
   ctx.globalAlpha = 1; ctx.fillStyle = css(color);
   ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, 2 * Math.PI); ctx.fill();
 }
-function ring(p, r, color, alpha) {
-  ctx.globalAlpha = alpha; ctx.strokeStyle = css(color); ctx.lineWidth = 2;
+function ltu(p, c) {                  // a hidden unit: a thick outline around a duller fill
+  dot(p, 7, mix(c, BG, 0.3)); ring(p, 6, c, 1, 3);
+}
+function ring(p, r, color, alpha, width = 2) {
+  ctx.globalAlpha = alpha; ctx.strokeStyle = css(color); ctx.lineWidth = width;
   ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, 2 * Math.PI); ctx.stroke();
 }
 
@@ -281,7 +333,8 @@ function learnerEdges(t, now) {
 
 let mode = 'sign';
 function drawLearner(edges, t, f, now) {
-  const P = learnerPositions(t).map(u => screen(u, 0));
+  const P = learnerPositions(t).map(u => screen(u, 'ours'));
+  if (drag && drag.panel === 'ours') P[drag.i] = screen(drag.p, 'ours');
   for (let e = 0; e < NE; e++) {       // removed: shrinks and fades
     const die = clamp01(1 - (now - tDie[e]) / EFFECT);
     if (die > 0) { const [j, k] = ends(e); line(P[j], P[k], 0.5 + 2.2 * wDie[e] * die, REMOVED, 0.8 * die); }
@@ -292,35 +345,117 @@ function drawLearner(edges, t, f, now) {
   for (let i = 0; i < P.length; i++) {
     if (i < NI) { dot(P[i], 3.5, INPUT); continue; }
     if (i >= NS) { dot(P[i], 8, OUTPUT); continue; }
-    const u = i - NI, q = clamp01((corr[f * NL + u] / 255 - 0.5) / (FOUND - 0.5));
-    let c = mix(SPARE, targetColor[match[f * NL + u]], q);
+    const u = i - NI;
+    let c = matchColor(match[f * NL + u], corr[f * NL + u]);
     const born = clamp01(1 - (now - tBorn[u]) / EFFECT), moved = clamp01(1 - (now - tMoved[u]) / EFFECT);
     if (born > 0) { c = mix(c, GREEN, born); ring(P[i], 7 + 18 * (1 - born), GREEN, born); }
     if (moved > 0) { c = mix(c, MOVED, moved); ring(P[i], 7 + 18 * (1 - moved), MOVED, moved); }
-    dot(P[i], 7, c);
+    ltu(P[i], c);
   }
+  highlight('ours', P, f);
   pops = pops.filter(pop => now - pop.t0 < EFFECT);
   for (const pop of pops) {            // pruned: a red pop where the LTU was
-    const k = 1 - (now - pop.t0) / EFFECT, p = screen(pop.p, 0);
+    const k = 1 - (now - pop.t0) / EFFECT, p = screen(pop.p, 'ours');
     ring(p, 7 + 18 * (1 - k), RED, k); dot(p, 7 * k, RED);
   }
 }
 
-function drawTarget() {
-  const P = targetP.map(u => screen(u, 1));
-  for (const [j, k, w] of targetEdges) line(P[j], P[k], 1.6, w > 0 ? POS : NEG, 0.8);
-  P.forEach((p, i) => dot(p, i < NI ? 3.5 : i < NI + NT ? 7 : 8, i < NI ? INPUT : i < NI + NT ? targetColor[i - NI] : OUTPUT));
+// Adam: every connection drawn, its width and opacity in proportion to |weight|, colored by sign
+function drawAdam(t, f) {
+  const g = Math.min(f + 1, F - 1), a = t - f, P = adamP.map(u => screen(u, 'adam'));
+  for (const [e, j, k, hid] of adamEdges) {
+    const arr = hid ? aHidden : aOutput, i = f * (hid ? NL : NO) * NS + e, l = i + (g - f) * (hid ? NL : NO) * NS;
+    const m = adamM(f, e, hid) + a * (adamM(g, e, hid) - adamM(f, e, hid));
+    if (m > 0.01) line(P[j], P[k], 2.7 * m, arr[i] + a * (arr[l] - arr[i]) > 0 ? POS : NEG, 0.9 * m);
+  }
+  for (let i = 0; i < P.length; i++)
+    i < NI ? dot(P[i], 3.5, INPUT) : i >= NS ? dot(P[i], 8, OUTPUT) : ltu(P[i], matchColor(aMatch[f * NL + i - NI], aCorr[f * NL + i - NI]));
+  highlight('adam', P, f);
 }
+
+function drawTarget(f) {
+  const P = targetP.map(u => screen(u, 'target'));
+  for (const [j, k, w] of targetEdges) line(P[j], P[k], 1.6, w > 0 ? POS : NEG, 0.8);
+  P.forEach((p, i) => i < NI ? dot(p, 3.5, INPUT) : i < NI + NT ? ltu(p, targetColor[i - NI]) : dot(p, 8, OUTPUT));
+  highlight('target', P, f);
+}
+
+// Hovering a unit rings it and the units equivalent to it in the other panels in white, and their sources in SOURCE:
+// a learned LTU's equivalent is the target LTU it matches; a target LTU's, the learned LTUs found for it (|correlation|
+// above FOUND); an output's, the same output.
+const hiddenCount = panel => panel === 'target' ? NT : NL;
+function sources(panel, i, f) {       // [source, strength] of unit i of the panel at frame f
+  if (panel === 'target') return targetEdges.filter(([, u]) => u === i).map(([j]) => [j, 1]);
+  if (panel === 'adam') return adamEdges.filter(([, , k]) => k === i).map(([e, j, , hid]) => [j, adamM(f, e, hid)]);
+  const l = [];
+  for (let j = 0; j < NS; j++)
+    if (i < NS ? read(f, i - NI, j) : Math.abs(output[(f * NO + i - NS) * NS + j]) * D.output_scale > SHOWN) l.push([j, 1]);
+  return l;
+}
+function equivalents(panel, f) {      // the panel's units equivalent to the hovered one
+  const { panel: from, i } = hover, out = i - NI - hiddenCount(from);
+  if (out >= 0) return [NI + hiddenCount(panel) + out];
+  if (from !== 'target') return panel === 'target' ? [NI + (from === 'ours' ? match : aMatch)[f * NL + i - NI]] : [];
+  const [m, c] = panel === 'ours' ? [match, corr] : [aMatch, aCorr];
+  return Array.from({ length: NL }, (_, u) => NI + u).filter(k => m[f * NL + k - NI] === i - NI && c[f * NL + k - NI] / 255 > FOUND);
+}
+function highlight(panel, P, f) {
+  if (!hover) return;
+  for (const i of hover.panel === panel ? [hover.i] : equivalents(panel, f)) {
+    ring(P[i], 12, WHITE, 1);
+    for (const [j, a] of sources(panel, i, f)) ring(P[j], j < NI ? 6 : 12, SOURCE, 0.8 * a, 1.5);
+  }
+}
+
+// ---- Dragging LTUs: a dragged LTU of ours is dropped at the current frame and the layout rerun from there; Adam's
+// and the target's stay where dropped ----
+let drag = null, hover = null;         // drag: {panel, i, p}; hover: {panel, i}, the LTU or output under the pointer
+const unscreen = ([sx, sy], panel) => { const n = active.length, c = active.indexOf(panel);
+  return [(sx - c * W / n - SIDE) / (W / n - 2 * SIDE), (H - BOTTOM - sy) / (H - TOP - BOTTOM) * (3 + 2 * BAND) - BAND]; };
+const positions = panel => panel === 'ours' ? learnerPositions(t) : panel === 'adam' ? adamP : targetP;
+function dragTo(ev) {
+  const r = view.getBoundingClientRect(), [x, y] = unscreen([ev.clientX - r.left, ev.clientY - r.top], drag.panel);
+  const row = (drag.panel === 'target' ? targetRows : learnerRows)[drag.i];
+  drag.p = [clamp01(x), Math.min(Math.max(y, row - BAND), row + BAND)];
+  if (drag.panel !== 'ours') positions(drag.panel)[drag.i] = drag.p;
+}
+function pick(ev) {                    // the LTU or output under the pointer: {panel, i}, or null
+  const r = view.getBoundingClientRect(), m = [ev.clientX - r.left, ev.clientY - r.top];
+  for (const panel of active) {
+    const P = positions(panel);
+    for (let i = NI; i < P.length; i++)
+      if (Math.hypot(...screen(P[i], panel).map((c, k) => c - m[k])) < 10) return { panel, i };
+  }
+  return null;
+}
+view.addEventListener('pointerdown', ev => {
+  drag = pick(ev);
+  if (drag && drag.i >= NI + hiddenCount(drag.panel)) drag = null;   // outputs stay put
+  if (drag) { view.setPointerCapture(ev.pointerId); dragTo(ev); }
+});
+view.addEventListener('pointermove', ev => {
+  if (drag) return dragTo(ev);
+  hover = pick(ev);
+});
+view.addEventListener('pointerleave', () => hover = null);
+view.addEventListener('pointerup', () => {
+  if (drag && drag.panel === 'ours') {
+    const k = (Math.floor(t) * NL + drag.i - NI) * 2;
+    layout.set(drag.p, k); vel.set([0, 0], k); simulate(Math.floor(t));
+  }
+  drag = null;
+});
 
 // ---- Loss panel ----
 const lossCanvas = document.getElementById('loss'), lctx = lossCanvas.getContext('2d');
 const PAD = { l: 56, r: 16, t: 12, b: 26 }, Y_MAX = 1.0, STEPS = (F - 1) * D.snap, SMOOTH = Math.max(1000 / D.snap, 1);
 // RMSE over the last 1,000 steps
-const RMSE = D.rmse.map((_, k) => { const w = D.rmse.slice(Math.max(k - SMOOTH + 1, 0), k + 1); return Math.sqrt(w.reduce((s, v) => s + v * v, 0) / w.length); });
+const smooth = r => r.map((_, k) => { const w = r.slice(Math.max(k - SMOOTH + 1, 0), k + 1); return Math.sqrt(w.reduce((s, v) => s + v * v, 0) / w.length); });
+const RMSE = smooth(D.rmse), ADAM_RMSE = smooth(D.adam_rmse);
 function drawLoss(t) {
   const [w, h] = fit(lossCanvas, lctx);
   const x = s => PAD.l + s / STEPS * (w - PAD.l - PAD.r), y = v => PAD.t + (1 - v / Y_MAX) * (h - PAD.t - PAD.b);
-  lctx.font = '11px system-ui'; lctx.fillStyle = '#7d879b'; lctx.strokeStyle = '#1e2533'; lctx.lineWidth = 1;
+  lctx.font = '13px system-ui'; lctx.fillStyle = '#7d879b'; lctx.strokeStyle = '#1e2533'; lctx.lineWidth = 1;
   for (let v = 0; v <= Y_MAX + 1e-9; v += 0.2) {
     lctx.beginPath(); lctx.moveTo(PAD.l, y(v)); lctx.lineTo(w - PAD.r, y(v)); lctx.stroke();
     lctx.textAlign = 'right'; lctx.fillText(v.toFixed(1), PAD.l - 6, y(v) + 4);
@@ -333,14 +468,17 @@ function drawLoss(t) {
   lctx.fillText('RMSE', 0, 0); lctx.restore();
   lctx.setLineDash([4, 4]); lctx.strokeStyle = '#5c6478';
   lctx.beginPath(); lctx.moveTo(PAD.l, y(D.noise)); lctx.lineTo(w - PAD.r, y(D.noise)); lctx.stroke();
-  lctx.setLineDash([]); lctx.textAlign = 'left'; lctx.fillText('noise floor', w - PAD.r - 64, y(D.noise) - 5);
-  const curve = (upTo, style, width) => {
+  lctx.setLineDash([]); lctx.textAlign = 'left'; lctx.fillText('noise floor', w - PAD.r - 76, y(D.noise) - 5);
+  const curve = (R, upTo, style, width) => {
     lctx.strokeStyle = style; lctx.lineWidth = width; lctx.beginPath();
-    RMSE.forEach((v, k) => { if ((k + 1) * D.snap <= upTo) lctx[k ? 'lineTo' : 'moveTo'](x((k + 1) * D.snap), y(Math.min(v, Y_MAX))); });
+    R.forEach((v, k) => { if ((k + 1) * D.snap <= upTo) lctx[k ? 'lineTo' : 'moveTo'](x((k + 1) * D.snap), y(Math.min(v, Y_MAX))); });
     lctx.stroke();
   };
-  curve(STEPS, '#2a3242', 1.5);
-  curve(t * D.snap, '#5aa9ff', 2);
+  curve(ADAM_RMSE, STEPS, '#3d2c26', 1.5); curve(RMSE, STEPS, '#2a3242', 1.5);
+  curve(ADAM_RMSE, t * D.snap, '#e8875a', 2); curve(RMSE, t * D.snap, '#5aa9ff', 2);
+  lctx.textAlign = 'right';
+  lctx.fillStyle = '#5aa9ff'; lctx.fillText('ours: unit search (proposed)', w - PAD.r - 8, PAD.t + 14);
+  lctx.fillStyle = '#e8875a'; lctx.fillText('Adam, fully connected (baseline)', w - PAD.r - 8, PAD.t + 31);
   lctx.strokeStyle = '#cfd6e4'; lctx.lineWidth = 1;
   lctx.beginPath(); lctx.moveTo(x(t * D.snap), PAD.t); lctx.lineTo(x(t * D.snap), h - PAD.b); lctx.stroke();
 }
@@ -352,7 +490,8 @@ lossCanvas.addEventListener('pointerdown', ev => { seekFromLoss(ev); lossCanvas.
 lossCanvas.addEventListener('pointermove', ev => { if (ev.buttons) seekFromLoss(ev); });
 
 // ---- HUD, legend and controls ----
-const hud = document.getElementById('hud'), legend = document.getElementById('legend');
+const statsOurs = document.getElementById('stats-ours'), statsAdam = document.getElementById('stats-adam');
+const stepText = document.getElementById('step'), legend = document.getElementById('legend');
 const swatch = c => `<span style="color:${css(c)}">&#9632;</span>`;
 function drawLegend() {
   const edge = mode === 'sign'
@@ -362,7 +501,8 @@ function drawLegend() {
     `edges: |weight| above ${SHOWN}, wider and brighter when larger`, edge,
     'LTU color: the target LTU it matches (|correlation|)',
     `${swatch(WHITE)} new connection &nbsp; ${swatch(REMOVED)} removed connection`,
-    `${swatch(GREEN)} new LTU &nbsp; ${swatch(RED)} pruned LTU &nbsp; ${swatch(MOVED)} LTU moved to depth 1`].join('<br>');
+    `${swatch(GREEN)} new LTU &nbsp; ${swatch(RED)} pruned LTU &nbsp; ${swatch(MOVED)} LTU moved to depth 1`,
+    `hover an LTU: ${swatch(WHITE)} it and its target match &nbsp; ${swatch(SOURCE)} their sources`].join('<br>');
 }
 const timeSlider = document.getElementById('time'), playButton = document.getElementById('play');
 timeSlider.max = F - 1;
@@ -377,6 +517,9 @@ playButton.addEventListener('click', togglePlay);
 addEventListener('keydown', ev => { if (ev.code === 'Space') { ev.preventDefault(); togglePlay(); } });
 document.getElementById('speed').addEventListener('change', ev => speed = +ev.target.value);
 document.getElementById('mode').addEventListener('change', ev => { mode = ev.target.value; drawLegend(); });
+for (const panel of PANELS) document.getElementById('show-' + panel).addEventListener('change', () => {
+  active = PANELS.filter(p => document.getElementById('show-' + p).checked); hover = null;
+});
 drawLegend();
 
 function animate(nowMs) {
@@ -390,12 +533,23 @@ function animate(nowMs) {
   }
   timeSlider.value = t;
   const f = Math.floor(t), edges = learnerEdges(t, now);
-  hud.textContent = `step        ${(t * D.snap / 1000).toFixed(0)}k\nRMSE        ${RMSE[Math.max(f - 1, 0)].toFixed(3)}\n` +
-    `connections ${connections[f]}\nLTUs replaced ${replaced[f]}\ntarget LTUs found ${found[f]} / ${NT}`;
+  const hovered = (panel, c) => hover && hover.panel === panel && hover.i < NS
+    ? `\nhovered LTU |correlation| with its match ${(c[f * NL + hover.i - NI] / 255).toFixed(2)}` : '';
+  stepText.textContent = `step ${(t * D.snap / 1000).toFixed(0)}k`;
+  statsOurs.textContent = `RMSE ${RMSE[Math.max(f - 1, 0)].toFixed(3)}\ntarget LTUs found ${found[f]} / ${NT}` + hovered('ours', corr);
+  statsAdam.textContent = `RMSE ${ADAM_RMSE[Math.max(f - 1, 0)].toFixed(3)}\ntarget LTUs found ${aFound[f]} / ${NT}` +
+    hovered('adam', aCorr);
   [W, H] = fit(view, ctx);
-  line([W / 2, 0], [W / 2, H], 1, [34, 42, 56], 1);
-  drawLearner(edges, t, f, now);
-  drawTarget();
+  for (let c = 1; c < active.length; c++) line([c * W / active.length, 0], [c * W / active.length, H], 1, [34, 42, 56], 1);
+  for (const panel of PANELS) {
+    const c = active.indexOf(panel);
+    for (const el of [document.getElementById('title-' + panel), document.getElementById('stats-' + panel)]) if (el) {
+      el.style.display = c < 0 ? 'none' : ''; el.style.left = `${c * W / active.length + 12}px`;
+    }
+  }
+  if (active.includes('ours')) drawLearner(edges, t, f, now);
+  if (active.includes('adam')) drawAdam(t, f);
+  if (active.includes('target')) drawTarget(f);
   drawLoss(t);
   requestAnimationFrame(animate);
 }

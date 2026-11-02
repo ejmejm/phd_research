@@ -1,5 +1,5 @@
-"""Records one run of our method on sparse_target_demo.ipynb's target network for the viewer (index.html): a snapshot of
-the network every SNAP steps, written to data.js. The method's code is run from the notebook's cells."""
+"""Records one run of our method, and one of Adam on a fully connected network, on sparse_target_demo.ipynb's target
+network for the viewer (index.html): a snapshot of each network every SNAP steps, written to data.js. The method's code is run from the notebook's cells."""
 import base64
 import json
 from pathlib import Path
@@ -12,6 +12,7 @@ np.asarray(jnp.zeros(1))   # a tiny device-to-host copy first avoids a pinned-me
 
 SNAP = 100                  # steps between snapshots
 STEP_SIZE = 2.0 ** -11      # ours' best step-size in the notebook
+ADAM_STEP_SIZE = 2.0 ** -11 # Adam's best step-size in the notebook
 SEED = 0
 N_MATCH = 2000              # inputs on which each learned LTU is matched to the target LTU it correlates with most
 
@@ -92,8 +93,38 @@ def record():
     return frames, rmse, new, moved_from
 
 
+def plain_frame(state):
+    # Adam's frame: its weights and each hidden LTU's best match among the target LTUs.
+    w, _ = state
+    x, a = x_match, jnp.zeros((N_MATCH, N_LTUS))
+    for rows in DEPTHS:
+        a = a.at[:, rows].set(ltu(jnp.concatenate([x, a, jnp.ones((N_MATCH, 1))], 1) @ (w['hidden'][rows] * LOWER[rows]).T))
+    corr = jnp.abs(normalized(a).T @ target_match)
+    return dict(hidden=w['hidden'][:, :-1] * LOWER[:, :-1], output=w['output'][:, :-1], match=jnp.argmax(corr, 1), corr=jnp.max(corr, 1))
+
+
+@jax.jit
+def record_adam():
+    # Adam as in the notebook's train, on the same samples as ours.
+    optimizer = optax.adam(ADAM_STEP_SIZE)
+    w = init_plain(keys(0))
+    n, per = NUM_STEPS // WINDOW, SNAP // WINDOW
+    step = lambda state, k: learn_plain(state, *jax.vmap(sample, (None, 0))(target, k[None]), optimizer)
+
+    def chunk(state, ks):
+        state, errors = jax.lax.scan(step, state, jax.vmap(lambda k: jax.random.split(k, WINDOW))(ks).reshape(-1, 2))
+        return state, (plain_frame(state), jnp.sqrt(errors.mean()))
+
+    state = (w, optimizer.init(w))
+    _, (frames, rmse) = jax.lax.scan(chunk, state, jax.random.split(keys(1), n).reshape(-1, per, 2))
+    frames = jax.tree.map(lambda a, b: jnp.concatenate([a[None], b]), plain_frame(state), frames)
+    return frames, rmse
+
+
 frames, rmse, new, moved_from = jax.tree.map(np.asarray, record())
 print(f'final RMSE {rmse[-len(rmse) // 10:].mean():.3f}, {new.sum()} new LTUs, {(moved_from >= 0).sum()} moved')
+adam, adam_rmse = jax.tree.map(np.asarray, record_adam())
+print(f'Adam final RMSE {adam_rmse[-len(adam_rmse) // 10:].mean():.3f}')
 
 b64 = lambda a: base64.b64encode(np.ascontiguousarray(a).tobytes()).decode()
 quantize = lambda a: (np.round(a / np.abs(a).max() * 127).astype(np.int8), float(np.abs(a).max() / 127))
@@ -107,8 +138,12 @@ data = dict(n_inputs=N_INPUTS, n_ltus=N_LTUS, n_outputs=N_OUTPUTS, n_target=2 * 
             corr=b64(np.round(frames['corr'] * 255).astype(np.uint8)),
             beta_hidden=b64(log_step(frames['beta_hidden'])), beta_output=b64(log_step(frames['beta_output'])),
             target_hidden=b64(np.asarray(target.w).astype(np.int8)), target_output=b64(np.asarray(target.out).astype(np.int8)))
+data.update(adam_rmse=np.round(adam_rmse, 4).tolist(), adam_match=b64(adam['match'].astype(np.uint8)),
+            adam_corr=b64(np.round(adam['corr'] * 255).astype(np.uint8)))
 for name in ('hidden', 'output'):
     data[name], data[name + '_scale'] = quantize(frames[name])
     data[name] = b64(data[name])
+    data['adam_' + name], data['adam_' + name + '_scale'] = quantize(adam[name])
+    data['adam_' + name] = b64(data['adam_' + name])
 (HERE / 'data.js').write_text('window.DATA = ' + json.dumps(data) + ';\n')
 print(f"wrote data.js ({(HERE / 'data.js').stat().st_size / 1e6:.1f} MB)")
