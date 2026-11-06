@@ -49,6 +49,8 @@ def build_algorithm(cfg: DictConfig) -> ConnectivityAlgorithm:
             initial_hidden_units=int(cfg.model.initial_hidden_units),
             forward_only_distractors=bool(
                 cfg.algorithm.get('forward_only_distractors', False)),
+            post_transition_learning_rate=cfg.algorithm.get(
+                'post_transition_learning_rate', None),
         )
 
     if name == 'set':

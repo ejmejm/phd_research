@@ -24,6 +24,11 @@ the gap to the ordinary transition is the backward one.
 Only W2 needs the treatment. A new W1 connection's backward path ends at an
 input, which is not a parameter, so W1 distractors are already forward-only.
 
+``post_transition_learning_rate`` changes the step-size at the flip. A dense
+network tolerates a smaller step-size than a block-sparse one, so this asks
+whether the transition still hurts once the step-size is also moved to suit
+the dense network.
+
 Implemented as a host-side one-shot rather than an in-scan event: it fires
 once per run, so a Python flag is clearer than a traced step counter, and the
 host round-trip costs nothing at this frequency.
@@ -32,8 +37,11 @@ host round-trip costs nothing at this frequency.
 from typing import Any, Dict, Optional, Tuple
 
 import equinox as eqx
+import jax
+import optax
 
 from ..models.padded_mlp import fill_masks_to_dense, freeze_gradient_mask
+from ..optim import EqxOptimizer
 from .base import ConnectivityAlgorithm
 
 
@@ -47,6 +55,7 @@ class DenseTransition(ConnectivityAlgorithm):
         transition_step: Optional[int],
         initial_hidden_units: int,
         forward_only_distractors: bool = False,
+        post_transition_learning_rate: Optional[float] = None,
     ):
         """
         Args:
@@ -59,10 +68,13 @@ class DenseTransition(ConnectivityAlgorithm):
                 carrying gradient back into the hidden layer, leaving them
                 active in the forward pass. Isolates the forward half of the
                 degradation.
+            post_transition_learning_rate: SGD step-size from the flip on.
+                ``None`` keeps the step-size unchanged.
         """
         self.transition_step = transition_step
         self.initial_hidden_units = int(initial_hidden_units)
         self.forward_only_distractors = bool(forward_only_distractors)
+        self.post_transition_learning_rate = post_transition_learning_rate
         self.applied = False
 
     def prepare_model(self, model: eqx.Module) -> eqx.Module:
@@ -83,6 +95,17 @@ class DenseTransition(ConnectivityAlgorithm):
         mode = 'forward-only' if self.forward_only_distractors else 'trainable'
         print(f'[dense_transition] filled masks to dense at step {step} '
               f'(target {self.transition_step}, new connections {mode})')
+
+        if self.post_transition_learning_rate is not None:
+            # Plain SGD keeps no state, so a fresh optimizer at the new
+            # step-size loses nothing. The scan retraces once for it.
+            assert optimizer.name == 'sgd' and not jax.tree.leaves(optimizer.state), (
+                'post_transition_learning_rate needs plain SGD')
+            optimizer = EqxOptimizer(
+                optax.sgd(self.post_transition_learning_rate), model,
+                optimizer.filter_spec, name=optimizer.name)
+            print(f'[dense_transition] step-size set to '
+                  f'{self.post_transition_learning_rate:g}')
         return model, optimizer, algo_state, {'dense_transition_applied_at_step': float(step)}
 
     @property

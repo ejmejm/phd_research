@@ -35,6 +35,10 @@ algorithm:
   # of the distractor effect is present. See sweep/forward_only.yaml.
   forward_only_distractors: false
 
+  # SGD step-size from the transition on; null keeps it unchanged. See
+  # sweep/step_size_drop.yaml.
+  post_transition_learning_rate: null
+
 optimizer:
   name: sgd
   learning_rate: ${eval:2**-9}   # overridden by the sweep

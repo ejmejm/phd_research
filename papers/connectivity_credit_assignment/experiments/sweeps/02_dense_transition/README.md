@@ -56,3 +56,19 @@ comet_sweep -c sweeps/02_dense_transition/sweep/forward_only.yaml
 ```
 
 Analysis: `analysis/02_dense_transition.ipynb`
+
+## `sweep/step_size_drop.yaml` — rebuttal: re-tuned step-size at the flip
+
+The transition at block-sparse's best step-size (2⁻⁸) until the flip and
+dense's best (2⁻¹¹) after it, set by `algorithm.post_transition_learning_rate`.
+Same 30 seeds as the main sweep, as six 5-seed blocks: 6 trials.
+
+Sweep `acb5f846433d432d825d75f08b346c7c`, run on Nibi as:
+
+```bash
+sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 \
+  --mem=10G --time=03:00:00 launch_comet_agent.sbatch \
+  -s acb5f846433d432d825d75f08b346c7c -p ~/scratch/phd_research/papers/connectivity_credit_assignment
+```
+
+Analysis: `analysis/05_rebuttal.ipynb`
