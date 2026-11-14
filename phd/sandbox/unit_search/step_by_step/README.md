@@ -60,8 +60,8 @@ Options to improve each component of the method, logged as they come up, to prio
 **GROW**
 - *Pruning* — done in `../pruning_and_depth/`: cut a connection whose weight changed sign since the last pruning (no
   threshold). Open: a few wrong inputs keep their sign for long stretches and stay (about 4 of 100 per LTU after 500k
-  steps, in its `old/1_useless_connections.ipynb`). For changing targets, two strikes (its
-  `old/5_changing_targets.ipynb`) keep weights that must change
+  steps, in its `old/1_useless_connections.ipynb` at commit c0d4d19). For changing targets, two strikes (its
+  `old/5_changing_targets.ipynb`, same commit) keep weights that must change
   sign, but cut wrong inputs more slowly (costs 0.014 RMSE on the unchanging deep target).
 
 **SWAP**

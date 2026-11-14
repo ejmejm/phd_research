@@ -49,5 +49,5 @@ NEW LTU u
 
 Neither change adds a threshold, and with the budget there is no fixed number of LTUs, at any depth.
 
-`old/` holds this folder's earlier notebooks, to delete once reviewed; `old/5_changing_targets.ipynb` starts the
+This folder's earlier notebooks are in `old/` at commit c0d4d19; its `5_changing_targets.ipynb` starts the
 extension to changing targets.
