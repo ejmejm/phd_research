@@ -58,12 +58,19 @@ Options to improve each component of the method, logged as they come up, to prio
 **LEARN**
 
 **GROW**
+- *Pruning* — done in `../pruning_and_depth/`: cut a connection whose weight changed sign since the last pruning (no
+  threshold). Open: a few wrong inputs keep their sign for long stretches and stay (about 4 of 100 per LTU after 500k
+  steps, in its `old/1_useless_connections.ipynb`). For changing targets, two strikes (its
+  `old/5_changing_targets.ipynb`) keep weights that must change
+  sign, but cut wrong inputs more slowly (costs 0.014 RMSE on the unchanging deep target).
 
 **SWAP**
 - *Depth from what a unit reads, instead of the swap* (2026-11-05). Units add and prune connections, so they are not
   connected to everything below them. A depth-2 unit that has pruned all its connections from depth-1 units, and reads
   only inputs, moves to max depth 1. Units may lower their depth, but never raise it. Needs pruning in GROW.
-- *Later: no prescribed number of units per depth*, or any other fixed depth structure; something more natural.
+  *Done in `../pruning_and_depth/`*: each LTU moves down to just above the deepest LTU it reads.
+- *No prescribed number of units per depth* — *done in `../pruning_and_depth/`*: a budget of connections replaces
+  the slots, so a new LTU starts one depth below its parent, and a move is just a move. Still fixed: the most depths.
 - *Thought:* in a pipelined network, where signals move forward and backward by one unit per step, depth costs delay,
   so a network might learn to trade depth for performance.
 

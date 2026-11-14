@@ -20,3 +20,7 @@ prunes whole units and generates new ones in the budget they free. Connection-le
 - `step_by_step/` — unit search step by step, from a new unit blocked in a trained network to the deep sparse target
   network: six short notebooks, each with one question, the simplest experiment that answers it, and a simple fix. Its
   README has the method in pseudocode and a log of options to improve each part.
+- `pruning_and_depth/` — two changes to that method, in two notebooks of the same kind: under a budget of
+  connections, LTUs prune connections whose weight changed sign since the last pruning, which frees room for the LTUs
+  a target network needs, and each LTU moves down to just above the deepest LTU it reads, instead of by the swap's
+  threshold.
