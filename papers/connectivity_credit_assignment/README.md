@@ -17,8 +17,8 @@ point makes it worse.
 ```bash
 pip install -e ".[analysis]"
 
-# A short run: 4-task multi-MNIST, block-sparse, 2000 steps on CPU.
-python experiments/train.py device=cpu train.total_steps=2000 train.log_freq=500
+# A short GPU run: 4-task multi-MNIST, block-sparse, 2000 steps.
+python experiments/train.py device=cuda train.total_steps=2000 train.log_freq=500
 ```
 
 MNIST downloads automatically on first run. To log to Comet, set
@@ -27,35 +27,39 @@ MNIST downloads automatically on first run. To log to Comet, set
 
 ## Repository layout
 
-| Path | What lives here |
-|---|---|
-| `src/multi_mnist/` | The library: problem, models, algorithms, training loop |
-| `experiments/` | `train.py`, its Hydra configs, and the sweep definitions |
-| `analysis/` | One notebook per figure, plus the downloaded run data |
-| `figures/` | `paper/` holds the published figures, `generated/` what you re-run |
+- `src/multi_mnist/` contains the models, algorithms, and training loop.
+- `experiments/sweeps/` contains the experiment configurations and run records.
+- `analysis/` contains the analyses and figure exports.
+- `figures/generated/` contains regenerated figures and remains ignored by Git.
+- `figures/paper/` retains the original paper figures, including the dense-width comparison.
+- `latex_paper/` is a separate Overleaf Git checkout. Commit and push its changes independently.
 
 ## Reproducing the figures
 
-Each figure comes from one sweep family and one notebook:
+The current manuscript uses these analyses:
 
-| Figure | Sweep | Notebook |
-|---|---|---|
-| 1 — matched connectivity, stationary and non-stationary | `experiments/sweeps/01_matched_and_scaling/` | `analysis/01_matched_and_scaling.ipynb` |
-| 2 — scaling the dense network, 1× to 64× | `experiments/sweeps/01_matched_and_scaling/` | `analysis/01_matched_and_scaling.ipynb` |
-| 3 — the dense transition | `experiments/sweeps/02_dense_transition/` | `analysis/02_dense_transition.ipynb` |
-| 4 — scaling the problem and the network | `experiments/sweeps/03_task_scaling/` | `analysis/03_task_scaling.ipynb` |
+- Figure 1 and Appendix C use `analysis/06_matched_width_and_permutations.ipynb`.
+- Figure 2 uses `analysis/02_dense_transition.ipynb`.
+- Figure 3 uses `analysis/03_task_scaling.ipynb`.
+- Figure 4 uses `analysis/04_connectivity_methods_sensitivity.ipynb`.
+- Appendix D uses `analysis/07_optimizers_batch_size.ipynb`.
 
-There are two ways to get the data the notebooks read.
+Retained experiments outside the current manuscript:
 
-**Run the sweeps yourself.** `experiments/sweeps/README.md` has the exact
-commands, in order, with the compute each one needs. This is the full
-reproduction path and takes GPU-days.
+- `analysis/01_matched_and_scaling.ipynb` contains the original matched-budget and dense-width comparisons.
+- `analysis/05_dense_width_controls.ipynb` contains stationary learning curves across all dense widths, non-stationary curves, and the wider-dense permutation control.
+- Notebook 06 also retains the dense-transition step-size-switch control.
 
-**Download ours.** Unpack the archive from
-`<ARCHIVE_URL>` into `analysis/data/`, then run the notebooks directly.
+Run notebooks from `analysis/`. Download Comet exports with the commented
+`download_project(...)` calls when needed. Exports and per-seed caches remain
+in the ignored `analysis/data/` directory. The original MLflow analyses in
+notebooks 05 and 06 also need the exports at
+`phd/structure_search/analysis/weight_pruning/data/` in the parent repository.
 
-Every notebook opens with a `download_project(...)` call, commented out, that
-re-fetches the results from Comet if you have access to the project.
+`experiments/sweeps/README.md` records the original experiment protocol.
+Each family README records its configurations and later additions.
+Historical figure numbers in those records refer to the original manuscript.
+No new training run is needed for the saved figure proposal below.
 
 ## The problem
 
@@ -101,19 +105,21 @@ Connectivity is decided by a **model** (how connections are stored) and an
 
 | Name | What it does | Used by |
 |---|---|---|
-| `static` | Connectivity never changes | Figures 1, 2, 4 |
-| `dense_transition` | Trains block-sparse, then makes the network dense at a chosen step | Figure 3 |
-| `set` | Sparse Evolutionary Training: prune the smallest weights, regrow at random | Follow-up work |
-| `deep_r` | DEEP-R: L1 + Langevin noise, prune on sign flip, regrow at random | Follow-up work |
+| `static` | Connectivity never changes | Fixed-connectivity baselines |
+| `dense_transition` | Trains block-sparse, then makes the network dense at a chosen step | Figure 2 |
+| `set` | Sparse Evolutionary Training, or Continual SET with contribution utilities | Figure 4 |
+| `deep_r` | DEEP-R: L1 + Langevin noise, prune on sign flip, regrow at random | Figure 4 |
 
 `set` and `deep_r` each have two implementations, chosen by `model.type`:
 `algorithms/{set,deep_r}.py` for `padded_mlp` and `algorithms/dynamic/` for
 `dynamic_network`. They are the same algorithm on different storage; keep them
 in step, or record in the config which one produced a result.
 
-SET and DEEP-R are not in the paper. They are here because the paper argues
-that learning connectivity is the promising direction, and this is the
-harness to test that in.
+Continual SET uses `prune_metric: utility`, `utility_reset: median`,
+and `regrow: layer_lecun` on `padded_mlp`. Its final configuration is
+`experiments/sweeps/04_connectivity_methods/best_2m/continual_set_median_global.yaml`.
+The preceding utility sweep used `row_lecun`; that implementation remains
+available to reproduce the sweep.
 
 ### Adding an algorithm
 
@@ -168,13 +174,9 @@ Four places, and no tooling:
   published runs live in, so the notebooks read the paper's data as shipped.
   Change them and your runs go somewhere else.
 
-Notebooks are committed with outputs cleared, which matters more than it
-sounds: a single traceback embeds absolute paths and a username. Before
-committing:
-
-```bash
-jupyter nbconvert --clear-output --inplace analysis/*.ipynb
-```
+Commit notebooks with outputs and execution counts cleared. Edit only the
+relevant JSON fields and cells. Preserve notebook metadata and unrelated source.
+Read each notebook from disk immediately before every edit.
 
 ## Citation
 
@@ -186,3 +188,25 @@ jupyter nbconvert --clear-output --inplace analysis/*.ipynb
   year      = {2026},
 }
 ```
+
+## Idea for the next revision
+
+Keep the revised Figure 1, which compares networks with equal hidden-unit counts.
+Then consider a figure with two panels, based on the original Figure 2.
+Keep the block-sparse network fixed and increase the dense network width.
+
+- Stationary targets. More width lets dense connectivity match and then exceed the fixed block-sparse reference.
+- Non-stationary targets. More width fails to close the gap and eventually reduces accuracy within the tested range.
+
+The question is whether extra width can compensate for slower adaptation.
+Equal width establishes that the dense network can represent the block-sparse solution.
+It does not establish that the dense network can learn that solution equally fast.
+The stationary panel makes the different effect of width under non-stationarity clear.
+
+Possible paper text:
+
+> The dense network can represent the block-sparse solution, but adapts more slowly. Could additional width compensate for this difference? We increase the dense network's width while keeping the block-sparse network fixed, and compare their performance on stationary and non-stationary problems.
+
+Place this result before the dense-transition experiment, then show how the cost changes with the number of subproblems.
+Preserve the dense-width experiments and their stationary learning curves for this possible revision.
+This is a saved proposal, not a change to the current manuscript.

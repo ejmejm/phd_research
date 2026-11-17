@@ -39,7 +39,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import PRNGKeyArray
 
-from ..models.padded_mlp import PaddedMLP
+from ..models.padded_mlp import PaddedMLP, lecun_uniform
 from ..utils import tree_replace
 from ._padded_optim import reset_optimizer_at
 from ._selection import (
@@ -61,7 +61,8 @@ class SETState(eqx.Module):
     step_w2: jax.Array
 
 
-def _evolve_layer(weights, mask, eligible, score, zeta, key, *, prune_metric):
+def _evolve_layer(weights, mask, eligible, score, zeta, key, *, prune_metric,
+                  regrow_mode='layer_zero'):
     """One prune-and-regrow pass over a layer."""
     active = mask.astype(jnp.bool_)
 
@@ -73,10 +74,33 @@ def _evolve_layer(weights, mask, eligible, score, zeta, key, *, prune_metric):
     after_prune = active & ~prune
     n_prune = prune.sum().astype(jnp.int32)
 
+    if regrow_mode == 'row_lecun':
+        # The old utility-SET runs (phd/structure_search/train_set.py): each
+        # row regrows as many as it lost, so every row keeps its fan-in, and
+        # new weights are LeCun uniform at that fan-in.
+        k_pos, k_val = jax.random.split(key)
+        taken = after_prune | ~eligible
+        draw = jnp.where(taken, -1.0, jax.random.uniform(k_pos, weights.shape))
+        rank = jnp.argsort(jnp.argsort(-draw, axis=1), axis=1)
+        regrow = (rank < prune.sum(axis=1, keepdims=True)) & ~taken
+        values = lecun_uniform(k_val, weights.shape, active.sum(axis=1, keepdims=True))
+        new_weights = jnp.where(regrow, values, jnp.where(prune, 0.0, weights))
+        return (new_weights, (after_prune | regrow).astype(mask.dtype),
+                prune | regrow, n_prune, regrow.sum().astype(jnp.int32))
+
     # Global regrowth: a replacement may land anywhere in the layer, subject
     # only to the receiving unit slot being in use.
+    if regrow_mode == 'layer_lecun':
+        key, k_val = jax.random.split(key)
     regrow = random_inactive_mask(after_prune | ~eligible, n_prune, key)
     new_active = after_prune | regrow
+
+    if regrow_mode == 'layer_lecun':
+        values = lecun_uniform(
+            k_val, weights.shape, new_active.sum(axis=1, keepdims=True))
+        new_weights = jnp.where(regrow, values, jnp.where(prune, 0.0, weights))
+        return (new_weights, new_active.astype(mask.dtype), prune | regrow,
+                n_prune, regrow.sum().astype(jnp.int32))
 
     # Regrown connections enter at exactly 0.
     #
@@ -114,15 +138,26 @@ class SET(ConnectivityAlgorithm):
         zeta: float,
         prune_metric: str = 'magnitude',
         utility_decay: float = 0.999,
+        regrow: str = 'layer_zero',
+        utility_reset: str = 'zero',
     ):
         if prune_metric not in ('magnitude', 'utility'):
             raise ValueError(
                 f"set.prune_metric must be 'magnitude' or 'utility', "
                 f"got {prune_metric!r}")
+        if regrow not in ('layer_zero', 'row_lecun', 'layer_lecun'):
+            raise ValueError(
+                f"set.regrow must be 'layer_zero', 'row_lecun', or 'layer_lecun', "
+                f"got {regrow!r}")
+        if utility_reset not in ('zero', 'median'):
+            raise ValueError(
+                f"set.utility_reset must be 'zero' or 'median', got {utility_reset!r}")
         self.event_period = int(evolve_frequency)
         self.zeta = float(zeta)
         self.prune_metric = prune_metric
         self.utility_decay = float(utility_decay)
+        self.regrow = regrow
+        self.utility_reset = utility_reset
 
     def init_state(self, model: PaddedMLP, *, key: PRNGKeyArray):
         if self.prune_metric != 'utility':
@@ -165,7 +200,9 @@ class SET(ConnectivityAlgorithm):
     def event(self, model: PaddedMLP, optimizer, algo_state, *, key):
         k1, k2 = jax.random.split(key)
 
-        if self.prune_metric == 'utility':
+        if self.prune_metric == 'utility' and self.utility_reset == 'median':
+            score_w1, score_w2 = algo_state.util_w1, algo_state.util_w2
+        elif self.prune_metric == 'utility':
             score_w1 = bias_corrected(
                 algo_state.util_w1, algo_state.step_w1, self.utility_decay)
             score_w2 = bias_corrected(
@@ -176,17 +213,33 @@ class SET(ConnectivityAlgorithm):
         # Only slots belonging to an active hidden unit are eligible.
         W1, w1_mask, touched_w1, p1, r1 = _evolve_layer(
             model.W1, model.w1_mask, model.unit_mask[:, None] > 0,
-            score_w1, self.zeta, k1, prune_metric=self.prune_metric)
+            score_w1, self.zeta, k1, prune_metric=self.prune_metric,
+            regrow_mode=self.regrow)
         W2, w2_mask, touched_w2, p2, r2 = _evolve_layer(
             model.W2, model.w2_mask, model.unit_mask[None, :] > 0,
-            score_w2, self.zeta, k2, prune_metric=self.prune_metric)
+            score_w2, self.zeta, k2, prune_metric=self.prune_metric,
+            regrow_mode=self.regrow)
 
         new_model = tree_replace(
             model, W1=W1, W2=W2, w1_mask=w1_mask, w2_mask=w2_mask)
         new_optimizer = reset_optimizer_at(optimizer, touched_w1, touched_w2)
 
         new_state = algo_state
-        if self.prune_metric == 'utility':
+        if self.prune_metric == 'utility' and self.utility_reset == 'median':
+            # The old dynamic-network runs (train_weight_pruning_dynamic.py):
+            # no bias correction, and a new connection's trace starts at the
+            # median trace of the connections that survived this event. The
+            # median is per layer, since each layer is pruned separately.
+            def reset(util, mask, touched):
+                med = jnp.nanmedian(jnp.where((mask > 0) & ~touched, util, jnp.nan))
+                return jnp.where(touched, med, util)
+            new_state = SETState(
+                util_w1=reset(algo_state.util_w1, w1_mask, touched_w1),
+                util_w2=reset(algo_state.util_w2, w2_mask, touched_w2),
+                step_w1=algo_state.step_w1,
+                step_w2=algo_state.step_w2,
+            )
+        elif self.prune_metric == 'utility':
             # A rewired slot holds a new connection, so its trace restarts.
             new_state = SETState(
                 util_w1=jnp.where(touched_w1, 0.0, algo_state.util_w1),

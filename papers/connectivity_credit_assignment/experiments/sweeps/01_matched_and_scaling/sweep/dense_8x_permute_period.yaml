@@ -1,0 +1,38 @@
+# Rebuttal addendum: 8x dense across permutation rates.
+#
+# The block-sparse side already exists: the pre-release sweep
+# 04_block_sparse_permute_period_lr ran 24 units at these periods and at 800,
+# 5 seeds (0-4), 2^-9 to 2^-6. This adds dense at 48 units (8x, ~152K
+# weights) at the same periods and seeds. Its 800-step cell already exists in
+# 02_dense_scaling_4task_nonstationary_lr over the same step-sizes.
+#
+# 2^-11 to 2^-8 brackets dense-48's best: 2^-9 at period 800, 2^-10 at 4000.
+#
+# 5 periods x 4 step-sizes = 20 trials, 5 seeds vmapped in each.
+name: 05_dense_8x_permute_period
+project: paper-weight-pruning-rebuttal
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_nonstationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  model.init_strategy: dense
+  model.initial_hidden_units: 48
+  task.permute_period: [200, 400, 1600, 3200, 6400]
+
+  optimizer.learning_rate:
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+
+  seed:
+    value: [0, 1, 2, 3, 4]

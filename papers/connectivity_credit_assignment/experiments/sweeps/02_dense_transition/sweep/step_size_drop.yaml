@@ -1,0 +1,36 @@
+# Rebuttal addendum: the dense transition with a step-size suited to dense.
+#
+# Same transition as sweep/main.yaml -- block-sparse to step 250,000, then the
+# masks are filled to all-ones -- trained at block-sparse's best step-size,
+# 2^-8, until the flip, and at dense's best, 2^-11, after it. Asks whether the
+# transition still hurts once the step-size is also moved to suit the dense
+# network.
+#
+# 30 seeds as six 5-seed blocks, as in sweep/forward_only.yaml: 6 trials.
+name: 05_dense_transition_step_size_drop_n16_h256
+project: paper-weight-pruning-rebuttal
+command: python experiments/train.py --config-path=sweeps/02_dense_transition --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  algorithm.transition_step: 250_000
+  optimizer.learning_rate: "${eval:2**-8}"
+  algorithm.post_transition_learning_rate: "${eval:2**-11}"
+
+  seed_offset: [0, 5, 10, 15, 20, 25]
+  seed:
+    value:
+      - "${eval:${seed_offset} + 0}"
+      - "${eval:${seed_offset} + 1}"
+      - "${eval:${seed_offset} + 2}"
+      - "${eval:${seed_offset} + 3}"
+      - "${eval:${seed_offset} + 4}"

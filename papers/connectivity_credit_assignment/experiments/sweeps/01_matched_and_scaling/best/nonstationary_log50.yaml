@@ -1,0 +1,31 @@
+# Revision: Figure 1's non-stationary runs logged every 50 steps.
+#
+# Block-sparse and dense at 24 units, each at its best non-stationary step-size
+# (2^-8 and 2^-9), same seeds (101-130) as best/. Logged every 50 steps instead
+# of every 1000 so the zoomed panel resolves each permutation's drop and
+# recovery; 800 is a multiple of 50, so every permutation lands on its exact
+# step. Besides each window's mean it saves the accuracy at the window's last
+# step alone (per_seed_last_accs). One trial per network vmaps all 30 seeds.
+name: 06_nonstationary_log50_last_step
+project: paper-weight-pruning-rebuttal
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_nonstationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  model.init_strategy: [block_sparse, dense]
+  model.initial_hidden_units: 24
+  optimizer.learning_rate: "${eval:'2**${switch:${model.init_strategy}, block_sparse, -8, dense, -9}'}"
+  train.log_freq: 50
+
+  seed:
+    value: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+            116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]

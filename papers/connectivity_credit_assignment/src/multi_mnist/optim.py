@@ -175,4 +175,12 @@ def prepare_optimizer(
             optimizer = optax.chain(optimizer, optax.add_decayed_weights(weight_decay))
         return EqxOptimizer(optimizer, model, filter_spec, name='adam')
 
+    elif optimizer_name == 'rmsprop':
+        # Static connectivity only (no per-weight state resets).
+        # decay 0.99 is PyTorch's default; optax's own is 0.9.
+        optimizer = optax.rmsprop(
+            learning_rate=optimizer_kwargs.learning_rate,
+            decay=optimizer_kwargs.get('decay', 0.99))
+        return EqxOptimizer(optimizer, model, filter_spec, name='rmsprop')
+
     raise ValueError(f'Invalid optimizer type: {optimizer_name}')

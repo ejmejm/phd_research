@@ -1,0 +1,31 @@
+# Rebuttal: Adam and RMSProp on Figure 1's non-stationary problem, 30 seeds.
+#
+# Each network at its step-size from sweep/optimizers_nonstationary.yaml, which
+# is the same for both optimizers: block-sparse 2^-10, dense 2^-11. Seeds and
+# logging match 01's best/nonstationary_log50.yaml (101-130, every 50 steps,
+# plus per_seed_last_accs), so these plot next to Figure 1's SGD runs.
+# One trial per (optimizer, network) vmaps all 30 seeds.
+name: 07_optimizers_nonstationary_log50
+project: paper-weight-pruning-rebuttal
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_nonstationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  optimizer.name: [adam, rmsprop]
+  model.init_strategy: [block_sparse, dense]
+  model.initial_hidden_units: 24
+  optimizer.learning_rate: "${eval:'2**${switch:${model.init_strategy}, block_sparse, -10, dense, -11}'}"
+  train.log_freq: 50
+
+  seed:
+    value: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+            116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]
