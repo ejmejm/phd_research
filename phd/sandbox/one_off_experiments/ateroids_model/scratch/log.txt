@@ -1,0 +1,175 @@
+m1_w600_mat50000: 3 runs x 200000 steps in 157s; last 10%: loss 0.1205, varying bytes right 0.777
+m1_w600_mat100000: 3 runs x 200000 steps in 154s; last 10%: loss 0.1247, varying bytes right 0.764
+  m1_w600_mat0                     loss 0.1234 | bytes right 0.766 | gap closed 25% (seeds 26%, 20%, 29%)
+  m1_w600_mat20000                 loss 0.1223 | bytes right 0.770 | gap closed 29% (seeds 26%, 30%, 31%)
+  m1_w600_mat50000                 loss 0.1205 | bytes right 0.777 | gap closed 36% (seeds 37%, 31%, 40%)
+  m1_w600_mat100000                loss 0.1247 | bytes right 0.764 | gap closed 22% (seeds 20%, 22%, 25%)
+s1_w150_mat50000: 3 runs x 200000 steps in 66s; last 10%: loss 0.1262, varying bytes right 0.755
+s1_w300_mat50000: 3 runs x 200000 steps in 99s; last 10%: loss 0.1237, varying bytes right 0.764
+s1_w1200_mat50000: 3 runs x 200000 steps in 365s; last 10%: loss 0.1207, varying bytes right 0.778
+  s1_w150_mat50000                 loss 0.1262 | bytes right 0.755 | gap closed 12% (seeds 16%, 11%, 8%)
+  s1_w300_mat50000                 loss 0.1237 | bytes right 0.764 | gap closed 21% (seeds 23%, 20%, 20%)
+  m1_w600_mat50000                 loss 0.1205 | bytes right 0.777 | gap closed 36% (seeds 37%, 31%, 40%)
+  s1_w1200_mat50000                loss 0.1207 | bytes right 0.778 | gap closed 40% (seeds 39%, 40%, 41%)
+    scores = g['run']([cfg])[cfg]
+NameError: name 'pickle' is not defined
+    scores = g['run']([cfg])[cfg]
+NameError: name 'pickle' is not defined
+  m1_w600_mat50000                 loss 0.1205 | bytes right 0.777 | gap closed 36% (seeds 37%, 31%, 40%)
+FileNotFoundError: [Errno 2] No such file or directory: 'g1_w600_mat50000_og.pkl'
+g1_w600_mat50000_og: 1 runs x 200000 steps in 38s; last 10%: loss 0.1155, varying bytes right 0.793
+  output connections per LTU: mean 3.8, median 1, max 98, LTUs with only their parent 61%
+g1_w1200_mat50000_og: 1 runs x 200000 steps in 89s; last 10%: loss 0.1127, varying bytes right 0.800
+  output connections per LTU: mean 3.0, median 1, max 99, LTUs with only their parent 65%
+  m1_w600_mat50000                 loss 0.1205 | bytes right 0.777 | gap closed 36% (seeds 37%, 31%, 40%)
+  g1_w600_mat50000_og              loss 0.1155 | bytes right 0.793 | gap closed 55% (seeds 55%)
+  s1_w1200_mat50000                loss 0.1207 | bytes right 0.778 | gap closed 40% (seeds 39%, 40%, 41%)
+  g1_w1200_mat50000_og             loss 0.1127 | bytes right 0.800 | gap closed 65% (seeds 65%)
+g2_w300_mat50000_og: 3 runs x 200000 steps in 101s; last 10%: loss 0.1211, varying bytes right 0.778
+g2_w600_mat50000_og: 3 runs x 200000 steps in 161s; last 10%: loss 0.1168, varying bytes right 0.789
+g2_w1200_mat50000_og: 3 runs x 200000 steps in 379s; last 10%: loss 0.1133, varying bytes right 0.798
+g2_w2400_mat50000_og: 3 runs x 200000 steps in 975s; last 10%: loss 0.1084, varying bytes right 0.808
+  g2_w300_mat50000_og              loss 0.1211 | bytes right 0.778 | gap closed 37% (seeds 42%, 29%, 40%)
+  g2_w600_mat50000_og              loss 0.1168 | bytes right 0.789 | gap closed 51% (seeds 55%, 44%, 54%)
+  g2_w1200_mat50000_og             loss 0.1133 | bytes right 0.798 | gap closed 62% (seeds 65%, 59%, 61%)
+  g2_w2400_mat50000_og             loss 0.1084 | bytes right 0.808 | gap closed 75% (seeds 75%, 76%, 74%)
+done
+p_random: 1 runs x 200000 steps in 39s; last 10%: loss 0.1177, varying bytes right 0.786
+  p_random                         loss 0.1177 | bytes right 0.786 | gap closed 48% (seeds 48%)
+p_catalog: 1 runs x 200000 steps in 38s; last 10%: loss 0.1133, varying bytes right 0.802
+  p_catalog                        loss 0.1133 | bytes right 0.802 | gap closed 92% (seeds 92%)
+batch1 done
+p_benefit: 1 runs x 200000 steps in 39s; last 10%: loss 0.1162, varying bytes right 0.790
+  p_benefit                        loss 0.1162 | bytes right 0.790 | gap closed 54% (seeds 54%)
+p_progress: 1 runs x 200000 steps in 40s; last 10%: loss 0.1160, varying bytes right 0.792
+  p_progress                       loss 0.1160 | bytes right 0.792 | gap closed 54% (seeds 54%)
+batch2 done
+p_loss: 1 runs x 200000 steps in 38s; last 10%: loss 0.1166, varying bytes right 0.790
+  p_loss                           loss 0.1166 | bytes right 0.790 | gap closed 49% (seeds 49%)
+p_progress_loss: 1 runs x 200000 steps in 39s; last 10%: loss 0.1181, varying bytes right 0.782
+  p_progress_loss                  loss 0.1181 | bytes right 0.782 | gap closed 49% (seeds 49%)
+p_benefit_loss: 1 runs x 200000 steps in 39s; last 10%: loss 0.1187, varying bytes right 0.785
+  p_benefit_loss                   loss 0.1187 | bytes right 0.785 | gap closed 54% (seeds 54%)
+batch3 done
+p_catalog_late: 1 runs x 200000 steps in 39s; last 10%: loss 0.1151, varying bytes right 0.797
+  p_catalog_late                   loss 0.1151 | bytes right 0.797 | gap closed 77% (seeds 77%)
+p_harm_loss: 1 runs x 200000 steps in 39s; last 10%: loss 0.1175, varying bytes right 0.788
+  p_harm_loss                      loss 0.1175 | bytes right 0.788 | gap closed 55% (seeds 55%)
+p_harm_uni: 1 runs x 200000 steps in 40s; last 10%: loss 0.1162, varying bytes right 0.791
+  p_harm_uni                       loss 0.1162 | bytes right 0.791 | gap closed 54% (seeds 54%)
+batch4 done
+p_curv: 1 runs x 200000 steps in 39s; last 10%: loss 0.1170, varying bytes right 0.788
+  p_curv                           loss 0.1170 | bytes right 0.788 | gap closed 50% (seeds 50%)
+p_curv_harm: 1 runs x 200000 steps in 40s; last 10%: loss 0.1179, varying bytes right 0.787
+  p_curv_harm                      loss 0.1179 | bytes right 0.787 | gap closed 56% (seeds 56%)
+batch5 done
+p3_harm: 3 runs x 200000 steps in 167s; last 10%: loss 0.1185, varying bytes right 0.784
+  p3_harm                          loss 0.1185 | bytes right 0.784 | gap closed 48% (seeds 56%, 42%, 47%)
+l_random: 1 runs x 400000 steps in 69s; last 10%: loss 0.1090, varying bytes right 0.801
+  l_random                         loss 0.1090 | bytes right 0.801 | gap closed 68% (seeds 68%)
+l_harm: 1 runs x 400000 steps in 67s; last 10%: loss 0.1053, varying bytes right 0.814
+  l_harm                           loss 0.1053 | bytes right 0.814 | gap closed 86% (seeds 86%)
+batch6 done
+l_curv: 1 runs x 400000 steps in 64s; last 10%: loss 0.1078, varying bytes right 0.802
+  l_curv                           loss 0.1078 | bytes right 0.802 | gap closed 67% (seeds 67%)
+l_harmabs: 1 runs x 400000 steps in 73s; last 10%: loss 0.1062, varying bytes right 0.811
+  l_harmabs                        loss 0.1062 | bytes right 0.811 | gap closed 80% (seeds 80%)
+l_harm_rising: 1 runs x 400000 steps in 71s; last 10%: loss 0.1046, varying bytes right 0.814
+  l_harm_rising                    loss 0.1046 | bytes right 0.814 | gap closed 82% (seeds 82%) | two-byte gap closed 61%
+l_harm_m100k: 1 runs x 400000 steps in 69s; last 10%: loss 0.1168, varying bytes right 0.784
+  l_harm_m100k                     loss 0.1168 | bytes right 0.784 | gap closed 47% (seeds 47%) | two-byte gap closed 34%
+l_harm_rising_oe: 1 runs x 400000 steps in 161s; last 10%: loss 0.1067, varying bytes right 0.806
+  l_harm_rising_oe                 loss 0.1067 | bytes right 0.806 | gap closed 71% (seeds 71%) | two-byte gap closed 54%
+l_harm_m100k_oe: 1 runs x 400000 steps in 159s; last 10%: loss 0.1096, varying bytes right 0.800
+  l_harm_m100k_oe                  loss 0.1096 | bytes right 0.800 | gap closed 70% (seeds 70%) | two-byte gap closed 51%
+l3_random: 3 runs x 400000 steps in 463s; last 10%: loss 0.1095, varying bytes right 0.800
+  l3_random                        loss 0.1095 | bytes right 0.800 | gap closed 65% (seeds 70%, 61%, 63%) | two-byte gap closed 47%
+l_harm_m50k_oe: 1 runs x 400000 steps in 117s; last 10%: loss 0.1060, varying bytes right 0.808
+  l_harm_m50k_oe                   loss 0.1060 | bytes right 0.808 | gap closed 78% (seeds 78%) | two-byte gap closed 58%
+batch8 done
+p_harm_rising: 1 runs x 200000 steps in 131s; last 10%: loss 0.1153, varying bytes right 0.789
+  p_harm_rising                    loss 0.1153 | bytes right 0.789 | gap closed 57% (seeds 57%) | two-byte gap closed 42%
+w_old_300: 1 runs x 400000 steps in 179s; last 10%: loss 0.1139, varying bytes right 0.790
+w_new_300: 1 runs x 400000 steps in 180s; last 10%: loss 0.1127, varying bytes right 0.796
+  w_old_300                        loss 0.1139 | bytes right 0.790 | gap closed 50% (seeds 50%) | two-byte gap closed 37%
+  w_new_300                        loss 0.1127 | bytes right 0.796 | gap closed 65% (seeds 65%) | two-byte gap closed 43%
+p_rising: 1 runs x 200000 steps in 137s; last 10%: loss 0.1189, varying bytes right 0.784
+  p_rising                         loss 0.1189 | bytes right 0.784 | gap closed 42% (seeds 42%) | two-byte gap closed 31%
+batch11 done
+  w_old_1200                       loss 0.1033 | bytes right 0.813 | gap closed 80% (seeds 80%) | two-byte gap closed 61%
+  l3_harm                          loss 0.1060 | bytes right 0.812 | gap closed 81% (seeds 85%, 80%, 78%) | two-byte gap closed 59%
+batch7 done
+  w_new_1200                       loss 0.0998 | bytes right 0.823 | gap closed 93% (seeds 93%) | two-byte gap closed 72%
+l3_harm_rising: 3 runs x 400000 steps in 976s; last 10%: loss 0.1050, varying bytes right 0.814
+  l3_harm_rising                   loss 0.1050 | bytes right 0.814 | gap closed 85% (seeds 85%, 86%, 83%) | two-byte gap closed 61%
+w_old_2400: 1 runs x 400000 steps in 1697s; last 10%: loss 0.0984, varying bytes right 0.824
+  w_old_2400                       loss 0.0984 | bytes right 0.824 | gap closed 90% (seeds 90%) | two-byte gap closed 72%
+batch10 done
+w_new_2400: 1 runs x 400000 steps in 1711s; last 10%: loss 0.0920, varying bytes right 0.841
+  w_new_2400                       loss 0.0920 | bytes right 0.841 | gap closed 113% (seeds 113%) | two-byte gap closed 90%
+batch9 done
+l3_harmabs_rising: 3 runs x 400000 steps in 789s; last 10%: loss 0.1125, varying bytes right 0.795
+  l3_harmabs_rising                loss 0.1125 | bytes right 0.795 | gap closed 63% (seeds 65%, 65%, 60%) | two-byte gap closed 42%
+batch12 done
+l_focus25: 1 runs x 400000 steps in 71s; last 10%: loss 0.1043, varying bytes right 0.815
+  l_focus25                        loss 0.1043 | bytes right 0.815 | gap closed 84% (seeds 84%) | two-byte gap closed 62%
+l_focus75: 1 runs x 400000 steps in 69s; last 10%: loss 0.1069, varying bytes right 0.807
+  l_focus75                        loss 0.1069 | bytes right 0.807 | gap closed 77% (seeds 77%) | two-byte gap closed 57%
+batch13 done
+l_progress: 1 runs x 400000 steps in 67s; last 10%: loss 0.1048, varying bytes right 0.815
+  l_progress                       loss 0.1048 | bytes right 0.815 | gap closed 84% (seeds 84%) | two-byte gap closed 63%
+l_benefit: 1 runs x 400000 steps in 68s; last 10%: loss 0.1056, varying bytes right 0.813
+  l_benefit                        loss 0.1056 | bytes right 0.813 | gap closed 85% (seeds 85%) | two-byte gap closed 59%
+batch14 done
+l_lossonly: 1 runs x 400000 steps in 68s; last 10%: loss 0.1024, varying bytes right 0.822
+  l_lossonly                       loss 0.1024 | bytes right 0.822 | gap closed 90% (seeds 90%) | two-byte gap closed 67%
+l_random_rising: 1 runs x 400000 steps in 64s; last 10%: loss 0.1082, varying bytes right 0.804
+  l_random_rising                  loss 0.1082 | bytes right 0.804 | gap closed 73% (seeds 73%) | two-byte gap closed 51%
+batch15 done
+l3_lossonly: 3 runs x 400000 steps in 324s; last 10%: loss 0.1030, varying bytes right 0.820
+  l3_lossonly                      loss 0.1030 | bytes right 0.820 | gap closed 88% (seeds 88%, 85%, 92%) | two-byte gap closed 65%
+w_loss_300: 1 runs x 400000 steps in 45s; last 10%: loss 0.1097, varying bytes right 0.803
+  w_loss_300                       loss 0.1097 | bytes right 0.803 | gap closed 72% (seeds 72%) | two-byte gap closed 49%
+w_loss_1200: 1 runs x 400000 steps in 175s; last 10%: loss 0.0967, varying bytes right 0.832
+  w_loss_1200                      loss 0.0967 | bytes right 0.832 | gap closed 103% (seeds 103%) | two-byte gap closed 78%
+w_loss_2400: 1 runs x 400000 steps in 607s; last 10%: loss 0.0911, varying bytes right 0.843
+  w_loss_2400                      loss 0.0911 | bytes right 0.843 | gap closed 112% (seeds 112%) | two-byte gap closed 90%
+batch16 done
+l3_lossfix: 3 runs x 400000 steps in 323s; last 10%: loss 0.1041, varying bytes right 0.815
+  l3_lossfix                       loss 0.1041 | bytes right 0.815 | gap closed 85% (seeds 86%, 85%, 86%) | two-byte gap closed 61%
+sw_new: 1 runs x 400000 steps in 64s; last 10%: loss 0.1015, varying bytes right 0.821
+sw_old: 1 runs x 400000 steps in 66s; last 10%: loss 0.1070, varying bytes right 0.803
+sw_lin: 1 runs x 400000 steps in 65s; last 10%: loss 0.1239, varying bytes right 0.757
+batch17 done
+fr_m1_new: 1 runs x 400000 steps in 70s; last 10%: loss 0.1021, varying bytes right 0.808
+sw_m1_new: 1 runs x 400000 steps in 71s; last 10%: loss 0.1021, varying bytes right 0.817
+fr_m1_old: 1 runs x 400000 steps in 73s; last 10%: loss 0.1057, varying bytes right 0.797
+sw_m1_old: 1 runs x 400000 steps in 73s; last 10%: loss 0.1070, varying bytes right 0.804
+fr_m1_lin: 1 runs x 400000 steps in 70s; last 10%: loss 0.1235, varying bytes right 0.746
+sw_m1_lin: 1 runs x 400000 steps in 71s; last 10%: loss 0.1243, varying bytes right 0.755
+fr_d3_new: 1 runs x 400000 steps in 70s; last 10%: loss 0.1069, varying bytes right 0.820
+sw_d3_new: 1 runs x 400000 steps in 74s; last 10%: loss 0.1101, varying bytes right 0.815
+fr_d3_old: 1 runs x 400000 steps in 72s; last 10%: loss 0.1137, varying bytes right 0.800
+sw_d3_old: 1 runs x 400000 steps in 72s; last 10%: loss 0.1154, varying bytes right 0.799
+fr_d3_lin: 1 runs x 400000 steps in 72s; last 10%: loss 0.1308, varying bytes right 0.754
+sw_d3_lin: 1 runs x 400000 steps in 73s; last 10%: loss 0.1322, varying bytes right 0.755
+batch18 done
+fr3_d3_new: 3 runs x 400000 steps in 343s; last 10%: loss 0.1086, varying bytes right 0.815
+sw3_d3_new: 3 runs x 400000 steps in 342s; last 10%: loss 0.1102, varying bytes right 0.813
+batch19 done
+x_loss: 3 runs x 400000 steps in 618s; last 10%: loss 0.1041, varying bytes right 0.815
+x_explained: 3 runs x 400000 steps in 619s; last 10%: loss 0.1052, varying bytes right 0.810
+  x_explained                      loss 0.1052 | bytes right 0.810 | gap closed 81% (seeds 82%, 78%, 83%) | two-byte gap closed 58%
+  x_loss                           loss 0.1041 | bytes right 0.815 | gap closed 85% (seeds 86%, 85%, 86%) | two-byte gap closed 61%
+batch20 done
+x_trials_fit: 3 runs x 400000 steps in 642s; last 10%: loss 0.1046, varying bytes right 0.813
+x_trials: 3 runs x 400000 steps in 643s; last 10%: loss 0.1057, varying bytes right 0.810
+  x_trials_fit                     loss 0.1046 | bytes right 0.813 | gap closed 80% (seeds 78%, 80%, 82%) | two-byte gap closed 60%
+  x_trials                         loss 0.1057 | bytes right 0.810 | gap closed 79% (seeds 86%, 77%, 75%) | two-byte gap closed 57%
+batch21 done
+x_fit_line (bug: no trials recorded): 3 runs x 400000 steps in 345s; last 10%: loss 0.1052, varying bytes right 0.810
+  x_fit_line (bug: no trials recorded, = explained)                       loss 0.1052 | bytes right 0.810 | gap closed 81% (seeds 82%, 78%, 83%) | two-byte gap closed 58%
+batch22 done
+x_fit_line2: 3 runs x 400000 steps in 322s; last 10%: loss 0.1042, varying bytes right 0.814
+  x_fit_line2                      loss 0.1042 | bytes right 0.814 | gap closed 82% (seeds 85%, 85%, 77%) | two-byte gap closed 60%
+batch22b done
