@@ -189,10 +189,15 @@ def init_model(
                 # symmetric about zero. See algorithms/deep_r.py:_init_signs.
                 v1 = jax.random.normal(kv1, (initial, input_dim)) / jnp.sqrt(float(input_dim))
                 v2 = jax.random.normal(kv2, (output_dim, initial)) / jnp.sqrt(float(initial))
+            elif weight_init == 'lecun_sparse':
+                # LeCun uniform at each row's realized sparse fan-in, as the
+                # old utility-SET runs (phd/structure_search/train_set.py) did.
+                v1 = lecun_uniform(kv1, (initial, input_dim), m1.sum(axis=1, keepdims=True))
+                v2 = lecun_uniform(kv2, (output_dim, initial), m2.sum(axis=1, keepdims=True))
             else:
                 raise ValueError(
-                    f"model.sparse.weight_init must be 'glorot' or 'normal', "
-                    f'got {weight_init!r}')
+                    f"model.sparse.weight_init must be 'glorot', 'normal' or "
+                    f"'lecun_sparse', got {weight_init!r}")
 
             W1 = W1.at[:initial].set(v1 * m1)
             W2 = W2.at[:, :initial].set(v2 * m2)
@@ -321,6 +326,9 @@ def structure_diagnostics(model: PaddedMLP, n_tasks: int) -> dict:
     pair count as multiple paths. Outputs with no paths are excluded from
     the mean. 1.0 = every output's paths land in its own task,
     1/n_tasks = uniform mixing. Trivially 1.0 when n_tasks == 1.
+
+    ``path_purity_all``: (#same-task paths) / (#total paths) over the whole
+    network, so outputs with more paths weigh more.
     """
     unit_active = model.unit_mask                      # (S, max_hidden)
     fan_in_per_unit = model.w1_mask.sum(axis=-1)        # (S, max_hidden)
@@ -361,7 +369,12 @@ def structure_diagnostics(model: PaddedMLP, n_tasks: int) -> dict:
         sum_purity = purity_per_output.sum(axis=(-1, -2))                   # (S,)
         n_active_outputs = output_active.sum(axis=(-1, -2)).astype(jnp.float32)
         stats['path_purity'] = sum_purity / jnp.maximum(n_active_outputs, 1.0)
+        # The same count pooled over all paths rather than averaged per output:
+        # the fraction of all paths whose input and output are in one task.
+        stats['path_purity_all'] = (same_per_output.sum(axis=(-1, -2))
+                                    / jnp.maximum(total_per_output.sum(axis=(-1, -2)), 1))
     else:
         stats['path_purity'] = jnp.ones_like(stats['active_units'], dtype=jnp.float32)
+        stats['path_purity_all'] = stats['path_purity']
 
     return stats

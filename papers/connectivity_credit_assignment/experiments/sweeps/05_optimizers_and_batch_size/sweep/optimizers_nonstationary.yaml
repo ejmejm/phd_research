@@ -1,0 +1,41 @@
+# Rebuttal: step-size sweep for Adam and RMSProp, nonstationary. Feeds the optimizer figure.
+#
+# Figure 1's setup (block-sparse vs dense, 24 hidden units each, batch size 1)
+# with the optimizer swapped. Adam is optim.py's (betas 0.9/0.999, eps 1e-8);
+# RMSProp is optax's with decay 0.99. Only the step-size is tuned.
+#
+# 2 optimizers x 2 networks x 11 step-sizes = 44 trials, 5 seeds vmapped in each.
+name: 07_optimizers_nonstationary_lr
+project: paper-weight-pruning-rebuttal
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_nonstationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  optimizer.name: [adam, rmsprop]
+  model.init_strategy: [block_sparse, dense]
+  model.initial_hidden_units: 24
+
+  optimizer.learning_rate:
+    - "${eval:2**-17}"
+    - "${eval:2**-16}"
+    - "${eval:2**-15}"
+    - "${eval:2**-14}"
+    - "${eval:2**-13}"
+    - "${eval:2**-12}"
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+
+  seed:
+    value: [0, 1, 2, 3, 4]

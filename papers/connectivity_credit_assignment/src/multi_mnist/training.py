@@ -291,7 +291,7 @@ def run_experiment(
     vmapped_event = jax.jit(jax.vmap(_apply_event)) if periods_per_event > 1 else None
 
     curves = {k: [] for k in (
-        'loss', 'accuracy', 'per_seed_loss', 'per_seed_accuracy',
+        'loss', 'accuracy', 'per_seed_loss', 'per_seed_accuracy', 'per_seed_last_accuracy',
         'test_loss', 'test_accuracy', 'per_seed_test_loss', 'per_seed_test_accuracy',
     )}
 
@@ -338,6 +338,7 @@ def run_experiment(
         # metrics: (n_seeds, log_freq, 2)
         per_seed_loss = metrics[..., 0].mean(axis=1)
         per_seed_acc = metrics[..., 1].mean(axis=1)
+        per_seed_last_acc = metrics[:, -1, 1]   # the period's final step alone, not averaged
         mean_loss, mean_acc = float(per_seed_loss.mean()), float(per_seed_acc.mean())
         std_loss, std_acc = float(per_seed_loss.std()), float(per_seed_acc.std())
         step = int(train_state.step[0].item())
@@ -400,6 +401,7 @@ def run_experiment(
         curves['accuracy'].append(mean_acc)
         curves['per_seed_loss'].append(np.array(per_seed_loss))
         curves['per_seed_accuracy'].append(np.array(per_seed_acc))
+        curves['per_seed_last_accuracy'].append(np.array(per_seed_last_acc))
 
         pbar.update(log_freq)
         postfix = {'loss': f'{mean_loss:.4f}', 'acc': f'{mean_acc:.4f}'}

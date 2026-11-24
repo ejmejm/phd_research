@@ -33,3 +33,6 @@ figures/generated/
 # Local editor state
 .vscode/
 .idea/
+
+# Separate Overleaf Git checkout. Commit and push it independently.
+/latex_paper/

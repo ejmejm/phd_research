@@ -1,0 +1,43 @@
+# Supporting Continual SET sweep with median utility resets.
+# This sweep preserves input counts per unit through row-based regrowth.
+# The final Figure 4 configuration reuses its parameters with layer-wide regrowth.
+# Utilities have no bias correction; replacements start at the surviving layer median.
+name: 04_set_utility_n16_median
+project: paper-weight-pruning-connectivity-sweep
+command: python experiments/train.py --config-path=sweeps/04_connectivity_methods --config-name=base
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 20
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  train.total_steps: 800000
+
+  model.type: padded_mlp
+  model.init_strategy: sparse
+  model.sparse.init_mode: epsilon
+  model.sparse.weight_init: lecun_sparse
+  algorithm.name: set
+  algorithm.prune_metric: utility
+  algorithm.regrow: row_lecun
+  algorithm.utility_reset: median
+  algorithm.evolve_frequency: 500
+
+  target_hidden_units: [128, 256, 512]
+  algorithm.zeta: [0.01, 0.003, 0.001, 0.0003, 0.0001]
+  algorithm.utility_decay: [0.99, 0.999, 0.9999]
+  optimizer.learning_rate:
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+
+  # 3 width x 5 zeta x 3 decay x 4 lr = 180 trials, 5 vmapped seeds each.
+  seed:
+    value: [0, 1, 2, 3, 4]

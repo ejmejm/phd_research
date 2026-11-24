@@ -240,6 +240,7 @@ def _log_per_seed(cfg: DictConfig, curves: Dict[str, list]) -> None:
     if cfg.get('log_individual_seeds', False):
         log_np_array(per_seed_losses, 'per_seed_losses', cfg)
         log_np_array(per_seed_accs, 'per_seed_accs', cfg)
+        log_np_array(np.stack(curves['per_seed_last_accuracy']), 'per_seed_last_accs', cfg)
 
     child_summary = {
         'average_loss': per_seed_losses.mean(axis=0).tolist(),

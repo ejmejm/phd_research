@@ -63,7 +63,8 @@ def build_algorithm(cfg: DictConfig) -> ConnectivityAlgorithm:
         if on_dynamic:
             from .dynamic import SETDynamic
             return SETDynamic(**kwargs)
-        return SET(**kwargs)
+        return SET(**kwargs, regrow=str(cfg.algorithm.get('regrow', 'layer_zero')),
+                   utility_reset=str(cfg.algorithm.get('utility_reset', 'zero')))
 
     if name == 'deep_r':
         kwargs = dict(

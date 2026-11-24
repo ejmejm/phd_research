@@ -1,0 +1,48 @@
+# Rebuttal: step-size sweep for SGD across batch sizes, nonstationary. Feeds the batch-size figure.
+#
+# Figure 1's networks (block-sparse vs dense, 24 hidden units each) trained with
+# SGD on minibatches. The problem is held fixed in samples, not updates: 500K
+# samples in total and a permutation every 800 samples, so every interval
+# given in steps is divided by the batch size. Logging every 800 samples keeps
+# each interval an integer number of steps at every batch size.
+#
+# 6 batch sizes x 2 networks x 11 step-sizes = 132 trials, 5 seeds vmapped in each.
+name: 07_batch_size_nonstationary_lr
+project: paper-weight-pruning-rebuttal
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_nonstationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: false
+
+  model.init_strategy: [block_sparse, dense]
+  model.initial_hidden_units: 24
+
+  train.batch_size: [1, 2, 4, 8, 16, 32]
+  train.total_steps: "${eval:500000 // ${train.batch_size}}"
+  train.log_freq: "${eval:800 // ${train.batch_size}}"
+  task.permute_period: "${eval:800 // ${train.batch_size}}"
+
+  # Wide because the best step-size should grow with the batch size.
+  optimizer.learning_rate:
+    - "${eval:2**-12}"
+    - "${eval:2**-11}"
+    - "${eval:2**-10}"
+    - "${eval:2**-9}"
+    - "${eval:2**-8}"
+    - "${eval:2**-7}"
+    - "${eval:2**-6}"
+    - "${eval:2**-5}"
+    - "${eval:2**-4}"
+    - "${eval:2**-3}"
+    - "${eval:2**-2}"
+
+  seed:
+    value: [0, 1, 2, 3, 4]

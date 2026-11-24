@@ -10,9 +10,8 @@
 #   SET            padded_mlp (sparse)        set
 #   DEEP-R         padded_mlp (sparse)        deep_r
 #
-# Every arm but dense holds the same weight budget: the 203,264 connections of
-# the block-sparse reference (16 units/task x 794 weights). Dense is 16x
-# larger at the same width, exactly as in Figure 3.
+# Final configurations share approximately 203,264 connections.
+# The dense baseline uses 16 hidden units to match this budget.
 
 project: paper-weight-pruning
 device: cuda
@@ -92,6 +91,8 @@ model:
     # Weight values, drawn at the DENSE fan-in and then masked, as both papers
     # do. glorot: SET's Keras default, uniform +-sqrt(6/(n_in+n_out)).
     # normal:  DEEP-R Appendix A, N(0,1)/sqrt(n_in) at the dense afferent count.
+    # lecun_sparse: LeCun uniform at each row's sparse fan-in, as the old
+    #          utility-SET runs did (not a published-method default).
     weight_init: glorot
     connection_budget: ${eval:${block_sparse_units_per_task} * ${task.n_tasks} * 794}
     # derive_sizes() computes hidden = floor((budget/epsilon - I - O) / 2), so
@@ -109,8 +110,7 @@ algorithm:
   name: static
 
   # --- set ---
-  # magnitude is published SET. utility is this repository's variant and is not
-  # part of the comparison.
+  # magnitude is the SET baseline; utility is Continual SET.
   prune_metric: magnitude
 
   # Steps between prune-and-regrow events. Must divide train.log_freq. This is
@@ -128,6 +128,18 @@ algorithm:
   zeta: "${eval:'${algorithm.turnover_per_example} * ${algorithm.evolve_frequency} * ${train.batch_size}'}"
 
   utility_decay: 0.999        # read only when prune_metric: utility
+
+  # layer_zero is published SET: regrow anywhere in the layer, at exactly 0.
+  # row_lecun reproduces the supporting utility sweep: regrow in the row
+  # that lost the connection, with LeCun uniform weights. padded_mlp only.
+  # layer_lecun regrows anywhere in the layer, with LeCun weights scaled by
+  # each receiving unit's input count after regrowth. padded_mlp only.
+  regrow: layer_zero
+
+  # utility only. zero: a new connection's trace restarts at 0 and pruning
+  # reads the bias-corrected trace. median: no bias correction, and a new
+  # connection's trace starts at the layer's median. padded_mlp only.
+  utility_reset: zero
 
   # --- deep_r ---
   l1: 1.0e-3                  # alpha in the paper; see sweep/deep_r.yaml

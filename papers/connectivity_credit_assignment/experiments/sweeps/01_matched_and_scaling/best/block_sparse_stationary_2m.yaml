@@ -1,0 +1,29 @@
+# Revision: stationary ceiling for Figure 1, run to 2M steps.
+#
+# Same network, step-size and seeds (101-130) as block_sparse_stationary.yaml at 24
+# units, run four times longer: at 500k steps dense is still climbing, so its
+# last-10% accuracy is not yet the value it converges to. The first 500k steps
+# should reproduce the existing runs. One trial vmaps all 30 seeds.
+name: 06_block_sparse_stationary_2m
+project: paper-weight-pruning-rebuttal
+command: python experiments/train.py --config-path=sweeps/01_matched_and_scaling --config-name=base_stationary
+algorithm: grid
+
+spec:
+  metric: asymptotic_test_accuracy
+  objective: maximize
+  retryAssignLimit: 4
+
+parameters:
+  comet_ml: true
+  mlflow: false
+  log_individual_seeds: true
+
+  model.init_strategy: block_sparse
+  model.initial_hidden_units: 24
+  optimizer.learning_rate: "${eval:2**-10}"  # best at 500k, from sweep/
+  train.total_steps: 2_000_000
+
+  seed:
+    value: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+            116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130]

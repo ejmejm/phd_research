@@ -71,4 +71,4 @@ sbatch --array=1-6 --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1 --cpus-per-task=1 \
   -s acb5f846433d432d825d75f08b346c7c -p ~/scratch/phd_research/papers/connectivity_credit_assignment
 ```
 
-Analysis: `analysis/05_rebuttal.ipynb`
+Analysis: `analysis/06_matched_width_and_permutations.ipynb`
