@@ -74,3 +74,33 @@ def signal_noise_grid(levels: int = 10) -> tuple[Float[Array, 'outputs'], Float[
     values = jnp.linspace(0.0, 1.0, levels)
     signal, noise_std = jnp.meshgrid(values, values, indexing='ij')
     return signal.reshape(-1), noise_std.reshape(-1)
+
+
+class SignLTUTarget:
+    """The target of connection_slots/, with no reversals.
+
+    `n_inputs` standard normal inputs. `n_target_ltus` target LTUs, each reading `fan_in` distinct inputs drawn
+    uniformly, with weights of +1 or -1 and a zero threshold. Each target LTU outputs +1 or -1. One output sums the
+    target LTUs through weights of +1 or -1, with no scaling, and gets noise of std `noise_std`.
+    """
+    n_outputs = 1
+
+    def __init__(self, n_inputs: int = 108, n_target_ltus: int = 4, fan_in: int = 4, noise_std: float = 0.1,
+                 seed: int = 123):
+        self.n_inputs, self.noise_std = n_inputs, noise_std
+        keys = jax.random.split(jax.random.PRNGKey(seed), 3)
+        self.reads = jax.vmap(lambda k: jax.random.choice(k, n_inputs, (fan_in,), replace=False))(
+            jax.random.split(keys[0], n_target_ltus))                                    # (target LTUs, fan_in)
+        self.hidden_w = jax.random.rademacher(keys[1], self.reads.shape, dtype=jnp.float32)
+        self.output_w = jax.random.rademacher(keys[2], (n_target_ltus,), dtype=jnp.float32)
+
+    def outputs(self, x: Float[Array, 'inputs']) -> Float[Array, 'outputs']:
+        """The target network's output for input x, without noise."""
+        bits = jnp.where((x[self.reads] * self.hidden_w).sum(1) > 0, 1.0, -1.0)
+        return (bits @ self.output_w)[None]
+
+    def sample(self, key: PRNGKeyArray) -> tuple[Float[Array, 'inputs'], Float[Array, 'outputs']]:
+        """One example: standard normal inputs, and the output plus noise."""
+        x_key, noise_key = jax.random.split(key)
+        x = jax.random.normal(x_key, (self.n_inputs,))
+        return x, self.outputs(x) + self.noise_std * jax.random.normal(noise_key, (1,))

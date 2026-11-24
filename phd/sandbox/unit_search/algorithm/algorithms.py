@@ -7,8 +7,8 @@ Each algorithm is an equinox module, and its static fields are its hyperparamete
         learn_step(network, x, y)          network Autostep, then update_measures for the structure changes
     every connection_period steps          change_connections
         add_connections(network)
-    every unit_period steps                change_units, which returns the new LTUs
         prune_connections(network)
+    every unit_period steps                change_units, which returns the new LTUs
         move_units(network)
         prune_units(network)               returns the slots for new LTUs
         add_units(network, key, slots)
@@ -59,6 +59,7 @@ class Network(NamedTuple):
     gradient_sums: Float[Array, 'ltus layer_inputs']    # sum of dL/d(pre-activation) * layer input since last growth
     utility: Float[Array, 'ltus']                       # sum of |outgoing weights|
     signs: Float[Array, 'ltus layer_inputs']            # the LTUs' weight signs at the last connection pruning
+    step: Int[Array, '']                                # the learn steps so far
     error_traces: Any = None                            # the measures that an algorithm keeps of the units' errors
 
 
@@ -97,9 +98,11 @@ class Algorithm(eqx.Module):
     # --- the main loop ---
 
     def run(self, problem, key: PRNGKeyArray,
-            steps: int) -> tuple[Float[Array, 'windows'], Int[Array, 'unit_periods outputs'], Network]:
-        """`steps` online steps on examples of `problem`. Returns the mean squared error of each window, the number
-        of new LTUs with each output as parent at each unit period, and the final network.
+            steps: int) -> tuple[Float[Array, 'windows'], dict[str, Int[Array, '...']], Network]:
+        """`steps` online steps on examples of `problem`. Returns the mean squared error of each window, the records
+        {'new_parents': the number of new LTUs with each output as parent at each unit period, 'ltus' and
+        'connections': the number of LTUs and n_connections at the end of each connection period}, and the final
+        network.
         Three nested scans, so that each structure change runs only at the end of its period. The window divides
         connection_period, connection_period divides unit_period, and unit_period divides `steps`."""
         structure_key, key = jax.random.split(key)
@@ -109,27 +112,33 @@ class Algorithm(eqx.Module):
             network, squared_errors = jax.lax.scan(
                 lambda network, key: self.learn_step(network, *problem.sample(key)), network,
                 jax.random.split(key, self.connection_period))
-            return self.change_connections(network), squared_errors.reshape(-1, self.window).mean(1)
+            network = self.change_connections(network)
+            sizes = (network.depth > 0).sum(), self.n_connections(network)
+            return network, (squared_errors.reshape(-1, self.window).mean(1), sizes)
 
         def learn_unit_period(network, inputs):
             index, keys = inputs
-            network, mean_squared_errors = jax.lax.scan(learn_connection_period, network, keys)
+            network, (mean_squared_errors, sizes) = jax.lax.scan(learn_connection_period, network, keys)
             network, new = self.change_units(network, jax.random.fold_in(structure_key, index))
             output_parent = jnp.where(new, network.parent - self.n_ltus, -1)   # -1 for no output parent
             new_parents = (output_parent[:, None] == jnp.arange(self.n_outputs)).sum(0)
-            return network, (mean_squared_errors, new_parents)
+            return network, (mean_squared_errors, new_parents, sizes)
 
         n_unit_periods = steps // self.unit_period
         keys = jax.random.split(key, (n_unit_periods, self.unit_period // self.connection_period))
-        network, (mean_squared_errors, new_parents) = jax.lax.scan(learn_unit_period, network,
-                                                                   (jnp.arange(n_unit_periods), keys))
-        return mean_squared_errors.reshape(-1), new_parents, network
+        network, (mean_squared_errors, new_parents, (ltus, connections)) = jax.lax.scan(
+            learn_unit_period, network, (jnp.arange(n_unit_periods), keys))
+        records = dict(new_parents=new_parents, ltus=ltus.reshape(-1), connections=connections.reshape(-1))
+        return mean_squared_errors.reshape(-1), records, network
+
+    def n_connections(self, network: Network) -> Int[Array, '']:
+        """The connections that count against a budget: here the LTUs' connections from x and LTUs."""
+        return network.ltus.connections[:, :-1].sum()
 
     def change_connections(self, network: Network) -> Network:
-        return self.add_connections(network)
+        return self.prune_connections(self.add_connections(network))
 
     def change_units(self, network: Network, key: PRNGKeyArray) -> tuple[Network, Bool[Array, 'ltus']]:
-        network = self.prune_connections(network)
         network = self.move_units(network)
         network, slots = self.prune_units(network)
         network = self.add_units(network, key, slots)
@@ -175,7 +184,7 @@ class Algorithm(eqx.Module):
         network = network._replace(
             ltus=self.update_weights(network.ltus, ltu_gradients, layer_inputs),
             outputs=self.update_weights(network.outputs, output_gradients, layer_inputs),
-            norm=network.norm.update_statistics(activations, norm_gradients))
+            norm=network.norm.update_statistics(activations, norm_gradients), step=network.step + 1)
         pre_activation_gradients = jnp.concatenate([ltu_gradients[:, -1], output_gradients[:, -1]])   # from the bias
         return self.update_measures(network, pre_activation_gradients, layer_inputs), 2 * loss / self.n_outputs
 
@@ -234,7 +243,7 @@ class Algorithm(eqx.Module):
             norm=Standardize(self.n_ltus, self.running_average_rate, self.variance_floor), depth=depth,
             parent=jnp.zeros(self.n_ltus, int), shadow=jnp.zeros(self.n_ltus),
             gradient_sums=jnp.zeros_like(ltu_weights), utility=jnp.zeros(self.n_ltus),
-            signs=jnp.zeros_like(ltu_weights), error_traces=self.new_error_traces())
+            signs=jnp.zeros_like(ltu_weights), step=jnp.zeros((), int), error_traces=self.new_error_traces())
 
     def new_error_traces(self):
         """The error traces at step 0: none here."""
@@ -332,10 +341,6 @@ class UnitSearch(Algorithm):
         new = (jnp.arange(self.n_layer_inputs) == jnp.argmax(sums, 1)[:, None]) & grows[:, None]
         network = self.connect(network, new)
         return network._replace(gradient_sums=jnp.where(grows[:, None], 0.0, network.gradient_sums))
-
-    def n_connections(self, network: Network) -> Int[Array, '']:
-        """The LTUs' connections from x and LTUs, which count against the budget."""
-        return network.ltus.connections[:, :-1].sum()
 
     def connect(self, network: Network, new: Bool[Array, 'ltus layer_inputs']) -> Network:
         """The LTUs read the `new` layer inputs, from weight 0 at the new-weight step size."""
@@ -457,8 +462,8 @@ class PruneAndMove(UnitSearch):
     `max_ltus` slots, each empty (depth 0) or holding an LTU. At step 0, `depths` depths of `width` LTUs. The number of
     LTUs changes with the room in the budget.
 
-    prune_connections  PRUNE: each LTU stops reading every layer input whose weight changed sign since the last PRUNE.
-                       Connections made since then, and the bias, stay.
+    prune_connections  PRUNE, every prune_period steps: each LTU stops reading every layer input whose weight changed
+                       sign since the last PRUNE. Connections made since then, and the bias, stay.
     move_units         MOVE: each LTU moves down to one depth above the deepest LTU it reads (depth 1 if it reads only
                        x). This replaces SWAP.
     prune_units        SEARCH: removes the replaced_fraction of the LTUs with the lowest utility. Their slots and
@@ -468,6 +473,7 @@ class PruneAndMove(UnitSearch):
                        depth 1, the outputs included, and the LTU's depth is one below its parent's.
     """
     max_ltus: int = eqx.field(static=True, default=240)
+    prune_period: int = eqx.field(static=True, default=10_000)            # steps between PRUNEs
 
     @property
     def n_ltus(self) -> int:
@@ -492,12 +498,12 @@ class PruneAndMove(UnitSearch):
     # --- prune_connections ---
 
     def prune_connections(self, network: Network) -> Network:
-        """PRUNE, then keep the signs for the next PRUNE (0 on the bias)."""
+        """PRUNE, then keep the signs for the next PRUNE (0 on the bias). Nothing between PRUNEs."""
         weight_signs = jnp.sign(network.ltus.weights)
         cut = network.ltus.connections & (network.signs != 0) & (weight_signs != network.signs)
         ltus = self.reset(network.ltus, cut, 0.0)._replace(connections=network.ltus.connections & ~cut)
         signs = (weight_signs * ltus.connections).at[:, -1].set(0.0)
-        return network._replace(ltus=ltus, signs=signs)
+        return select(network.step % self.prune_period == 0, network._replace(ltus=ltus, signs=signs), network)
 
     # --- move_units ---
 
