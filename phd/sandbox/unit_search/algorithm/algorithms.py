@@ -6,8 +6,8 @@ Each algorithm is an equinox module, and its static fields are its hyperparamete
     every step
         learn_step(network, x, y)          network Autostep, then update_measures for the structure changes
     every connection_period steps          change_connections
-        add_connections(network)
         prune_connections(network)
+        add_connections(network)
     every unit_period steps                change_units, which returns the new LTUs
         move_units(network)
         prune_units(network)               returns the slots for new LTUs
@@ -101,8 +101,8 @@ class Algorithm(eqx.Module):
             steps: int) -> tuple[Float[Array, 'windows'], dict[str, Int[Array, '...']], Network]:
         """`steps` online steps on examples of `problem`. Returns the mean squared error of each window, the records
         {'new_parents': the number of new LTUs with each output as parent at each unit period, 'ltus' and
-        'connections': the number of LTUs and n_connections at the end of each connection period}, and the final
-        network.
+        'connections': the number of LTUs and n_connections at the end of each connection period, after its
+        structure changes (the unit changes included)}, and the final network.
         Three nested scans, so that each structure change runs only at the end of its period. The window divides
         connection_period, connection_period divides unit_period, and unit_period divides `steps`."""
         structure_key, key = jax.random.split(key)
@@ -113,13 +113,13 @@ class Algorithm(eqx.Module):
                 lambda network, key: self.learn_step(network, *problem.sample(key)), network,
                 jax.random.split(key, self.connection_period))
             network = self.change_connections(network)
-            sizes = (network.depth > 0).sum(), self.n_connections(network)
-            return network, (squared_errors.reshape(-1, self.window).mean(1), sizes)
+            return network, (squared_errors.reshape(-1, self.window).mean(1), self.sizes(network))
 
         def learn_unit_period(network, inputs):
             index, keys = inputs
             network, (mean_squared_errors, sizes) = jax.lax.scan(learn_connection_period, network, keys)
             network, new = self.change_units(network, jax.random.fold_in(structure_key, index))
+            sizes = jax.tree.map(lambda period_sizes, size: period_sizes.at[-1].set(size), sizes, self.sizes(network))
             output_parent = jnp.where(new, network.parent - self.n_ltus, -1)   # -1 for no output parent
             new_parents = (output_parent[:, None] == jnp.arange(self.n_outputs)).sum(0)
             return network, (mean_squared_errors, new_parents, sizes)
@@ -135,8 +135,12 @@ class Algorithm(eqx.Module):
         """The connections that count against a budget: here the LTUs' connections from x and LTUs."""
         return network.ltus.connections[:, :-1].sum()
 
+    def sizes(self, network: Network) -> tuple[Int[Array, ''], Int[Array, '']]:
+        """The number of LTUs and n_connections."""
+        return (network.depth > 0).sum(), self.n_connections(network)
+
     def change_connections(self, network: Network) -> Network:
-        return self.prune_connections(self.add_connections(network))
+        return self.add_connections(self.prune_connections(network))
 
     def change_units(self, network: Network, key: PRNGKeyArray) -> tuple[Network, Bool[Array, 'ltus']]:
         network = self.move_units(network)

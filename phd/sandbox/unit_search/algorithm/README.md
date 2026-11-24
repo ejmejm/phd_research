@@ -13,8 +13,8 @@ change that shows why the new rule is needed.
 
 **Code.** `algorithms.py` has one equinox class per step, and the static fields of each class are its
 hyperparameters. The base class `Algorithm` holds network Autostep (`learn_step`) and the main loop (`run`), which
-calls the same parts in every algorithm: `update_measures` in each learn step, `add_connections` then
-`prune_connections` every `connection_period` steps (1k; PRUNE acts only every `prune_period` steps, 10k), and
+calls the same parts in every algorithm: `update_measures` in each learn step, `prune_connections` then
+`add_connections` every `connection_period` steps (1k; PRUNE acts only every `prune_period` steps, 10k), and
 `move_units`, `prune_units` and `add_units` every `unit_period` steps (10k). Each later class inherits from the class before it and overrides only the parts that change. The fully connected baseline uses the
 same network and learn step, with fixed layer-to-layer connections. `problems.py` has the problems, and
 `experiment.py` runs the algorithms over seeds and plots them.

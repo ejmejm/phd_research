@@ -1,5 +1,9 @@
 """Runs algorithms on a problem over seeds, and plots their errors and where they put new LTUs."""
 
+import hashlib
+import pickle
+import sys
+from pathlib import Path
 from time import perf_counter
 
 import jax
@@ -7,22 +11,40 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def run(methods, problem, steps, seeds=5):
+def run(methods, problem, steps, seeds=5, cache_dir=None):
     """Each method of {label: algorithm} on `seeds` seeds, vmapped. Seed s gives every method the same examples.
     Returns {label: the RMSE of each window, shaped (seed, window)} and {label: the records of Algorithm.run, each
-    shaped (seed, ...)}."""
+    shaped (seed, ...)}. With a `cache_dir`, a method's results are loaded from it if nothing has changed since they
+    were saved there (see cache_key)."""
     keys = jax.random.split(jax.random.PRNGKey(1), seeds)
     rmse, records = {}, {}
     for label, method in methods.items():
         started = perf_counter()
-        mse, method_records, network = jax.jit(jax.vmap(lambda key: method.run(problem, key, steps)))(keys)
-        rmse[label] = np.sqrt(np.asarray(mse))
-        records[label] = {name: np.asarray(values) for name, values in method_records.items()}
-        print(f'{label}: RMSE over the last 10% {rmse[label][:, -len(mse[0]) // 10:].mean():.3f} '
-              f'; at the end, {(network.depth > 0).sum(1).mean():.0f} LTUs and '
+        path = Path(cache_dir) / f'{cache_key(method, problem, steps, seeds)}.pkl' if cache_dir else None
+        cached = path is not None and path.exists()
+        if cached:
+            rmse[label], records[label] = pickle.loads(path.read_bytes())
+        else:
+            mse, method_records, _ = jax.jit(jax.vmap(lambda key: method.run(problem, key, steps)))(keys)
+            rmse[label] = np.sqrt(np.asarray(mse))
+            records[label] = {name: np.asarray(values) for name, values in method_records.items()}
+            if path is not None:
+                path.parent.mkdir(exist_ok=True)
+                path.write_bytes(pickle.dumps((rmse[label], records[label])))
+        print(f'{label}: RMSE over the last 10% {rmse[label][:, -rmse[label].shape[1] // 10:].mean():.3f} '
+              f'; at the end, {records[label]["ltus"][:, -1].mean():.0f} LTUs and '
               f'{records[label]["connections"][:, -1].mean():.0f} connections in the budget '
-              f'({perf_counter() - started:.0f}s)')
+              f'({"cached" if cached else f"{perf_counter() - started:.0f}s"})')
     return rmse, records
+
+
+def cache_key(method, problem, steps, seeds):
+    """A hash of the method's fields, the problem's state, the run's length and the source of every loaded phd
+    module."""
+    sources = sorted((name, Path(module.__file__).read_bytes()) for name, module in list(sys.modules.items())
+                     if name.startswith('phd') and getattr(module, '__file__', None))
+    problem_state = {name: np.asarray(value) for name, value in vars(problem).items()}
+    return hashlib.sha256(pickle.dumps((repr(method), problem_state, steps, seeds, sources))).hexdigest()[:16]
 
 
 def plot(rmse, problem, title, window=1_000):
@@ -30,7 +52,7 @@ def plot(rmse, problem, title, window=1_000):
     outputs' noise stds."""
     floor = np.sqrt(np.mean(np.square(problem.noise_std)))
     fig, ax = plt.subplots(figsize=(9, 5), layout='constrained')
-    for (label, values), color in zip(rmse.items(), ['tab:red', 'tab:blue']):
+    for (label, values), color in zip(rmse.items(), ['tab:red', 'tab:blue', 'tab:green', 'tab:orange']):
         steps = (np.arange(values.shape[1]) + 1) * window
         ax.plot(steps / 1000, values.mean(0), color=color, lw=1, label=label)
     ax.axhline(floor, color='black', ls=':', label='noise: the lowest RMSE possible')
@@ -73,7 +95,7 @@ def plot_new_parents(records, problem, title, unit_period=10_000, bins=5, period
 def plot_sizes(records, title, connection_period=1_000):
     """Mean over seeds of the number of LTUs and of the connections that count against the budget, against steps."""
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), layout='constrained')
-    for (label, method_records), color in zip(records.items(), ['tab:red', 'tab:blue']):
+    for (label, method_records), color in zip(records.items(), ['tab:red', 'tab:blue', 'tab:green', 'tab:orange']):
         for ax, name in zip(axes, ['ltus', 'connections']):
             values = method_records[name]
             steps = (np.arange(values.shape[1]) + 1) * connection_period
