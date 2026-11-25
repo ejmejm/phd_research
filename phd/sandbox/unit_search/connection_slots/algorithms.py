@@ -1,6 +1,6 @@
 """The algorithms of the connection_slots progression, from the algorithm of step 2 of the meta progression."""
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import equinox as eqx
 import jax
@@ -109,6 +109,7 @@ class Slots(NamedTuple):
     output_signs: Float[Array, 'outputs layer_inputs']   # the output's weight signs at the last connection pruning
     unit_bucket: Float[Array, '']                        # the free connections kept for new LTUs
     key: PRNGKeyArray                                    # for the uniform draws of add_connections
+    traces: Any = None                                   # what a subclass keeps for its connection pruning
 
 
 SlotNetwork = NamedTuple('SlotNetwork', [*Network.__annotations__.items(), ('slots', Slots)])
@@ -192,14 +193,22 @@ class OutputBudget(PruneAndMove):
         pruned = super().prune_connections(network)
         signs = pruned.slots.output_signs
         weight_signs = jnp.sign(pruned.outputs.weights)
-        cut = pruned.outputs.connections & (signs != 0) & (weight_signs != signs)
-        outputs = self.reset(pruned.outputs, cut, 0.0)._replace(connections=pruned.outputs.connections & ~cut)
-        output_signs = (weight_signs * outputs.connections).at[:, -1].set(0.0)
-        pruned = pruned._replace(outputs=outputs, slots=pruned.slots._replace(output_signs=output_signs))
-        read = (pruned.outputs.connections[:, self.ltu_activation_idxs].any(0)
-                | pruned.ltus.connections[:, self.ltu_activation_idxs].any(0))
-        pruned = self.split_freed(network, self.empty(pruned, (pruned.depth > 0) & ~read))
+        output_cut = pruned.outputs.connections & (signs != 0) & (weight_signs != signs)
+        pruned = self.cut(pruned, jnp.zeros_like(pruned.ltus.connections), output_cut)
+        output_signs = (weight_signs * pruned.outputs.connections).at[:, -1].set(0.0)
+        pruned = pruned._replace(slots=pruned.slots._replace(output_signs=output_signs))
         return select(network.step % self.prune_period == 0, pruned, network)
+
+    def cut(self, network, ltu_cut: Bool[Array, 'ltus layer_inputs'], output_cut: Bool[Array, 'outputs layer_inputs']):
+        """The LTUs and the output stop reading the cut layer inputs. Then the LTUs that no unit reads are removed,
+        and half of the connections that the output frees go to the unit bucket."""
+        cut = network._replace(
+            ltus=self.reset(network.ltus, ltu_cut, 0.0)._replace(connections=network.ltus.connections & ~ltu_cut),
+            outputs=self.reset(network.outputs, output_cut, 0.0)._replace(
+                connections=network.outputs.connections & ~output_cut))
+        read = (cut.outputs.connections[:, self.ltu_activation_idxs].any(0)
+                | cut.ltus.connections[:, self.ltu_activation_idxs].any(0))
+        return self.split_freed(network, self.empty(cut, (cut.depth > 0) & ~read))
 
     # --- add_connections ---
 
@@ -254,13 +263,11 @@ class OutputBudget(PruneAndMove):
         scores = jnp.where(parent_weights != 0, jnp.log(parent_weights ** 2) + gumbel, gumbel - 1e4)
         scores = jnp.where(self.may_read(network.depth).at[:, -1].set(False), scores, -jnp.inf)
         rank = jnp.argsort(jnp.argsort(-scores))
-        drawn, random = rank < self.initial_fan_in, rank < self.n_random_weights
-        lecun = jax.random.uniform(weight_key, drawn.shape, minval=-1.0, maxval=1.0) * jnp.sqrt(
-            3.0 / self.n_random_weights)
-        weights = jnp.where(parent_weights != 0, jnp.abs(lecun) * jnp.sign(parent_weights), lecun) * random
+        drawn = rank < self.initial_fan_in
+        weights, fast = self.initial_weights(weight_key, parent_weights, rank)
 
-        ltus = self.reset(network.ltus, new[:, None], weights)
-        step_sizes = jnp.where(new[:, None] & random, jnp.log(self.new_weight_step_size), ltus.optimizer_state.beta)
+        ltus = self.reset(network.ltus, new[:, None], weights * drawn)
+        step_sizes = jnp.where(new[:, None] & fast, jnp.log(self.new_weight_step_size), ltus.optimizer_state.beta)
         ltus = ltus._replace(connections=jnp.where(new[:, None], drawn.at[:, -1].set(True), ltus.connections),
                              optimizer_state=ltus.optimizer_state._replace(beta=step_sizes))
         columns = jnp.zeros(self.n_layer_inputs, bool).at[self.ltu_activation_idxs].set(new)
@@ -270,3 +277,83 @@ class OutputBudget(PruneAndMove):
         return network._replace(ltus=ltus, outputs=outputs._replace(connections=outputs.connections | links),
                                 norm=network.norm.restart(new),
                                 gradient_sums=jnp.where(new[:, None], 0.0, network.gradient_sums))
+
+    def initial_weights(self, key: PRNGKeyArray, parent_weights, rank: Int[Array, 'ltus layer_inputs']):
+        """A new LTU's weights on the inputs it draws, and where they start at the new-weight step size (the others
+        start at Autostep's initial step size): LeCun uniform weights with the signs of the parent weights on the
+        n_random_weights inputs drawn first, and 0 on the others."""
+        fast = rank < self.n_random_weights
+        lecun = jax.random.uniform(key, rank.shape, minval=-1.0, maxval=1.0) * jnp.sqrt(3.0 / self.n_random_weights)
+        weights = jnp.where(parent_weights != 0, jnp.abs(lecun) * jnp.sign(parent_weights), lecun) * fast
+        return weights, fast
+
+
+class SoftCandidates(OutputBudget):
+    """OutputBudget in which a new LTU starts every input as a soft candidate: weights from
+    U(-initial_step_size, initial_step_size), at Autostep's initial step size."""
+
+    def initial_weights(self, key: PRNGKeyArray, parent_weights, rank: Int[Array, 'ltus layer_inputs']):
+        weights = jax.random.uniform(key, rank.shape, minval=-self.initial_step_size, maxval=self.initial_step_size)
+        return weights, jnp.zeros(rank.shape, bool)
+
+
+class SiftingTraces(NamedTuple):
+    """What Sifting keeps, for the LTUs then the output."""
+    log_immaturity: Float[Array, 'units layer_inputs']   # log(1 - maturity) of each connection, 0 at its creation
+    delta_squared: Float[Array, 'units']                 # running mean of dL/d(pre-activation)^2, before bias correction
+
+
+class Sifting(OutputBudget):
+    """OutputBudget whose prune_connections is the CI rule of ../../feature_sifting/networks/
+    parallel_mnist_label_changes.ipynb in place of the sign rule. Every step, after the weight update, each connection
+    of the LTUs and the output (not the biases) is cut if |w| + |h| is below the bound that a dead weight's stays under
+    68% of the time at the same age: sqrt(alpha E[delta^2] / 2 * m) (1.61 + 0.39 (1 - m)^0.75). delta is the unit's
+    dL/d(pre-activation), E[delta^2] its running mean (bias-corrected), and m the connection's maturity before this
+    step. m = 1 - prod_k (1 - alpha_k c_k)^2, with c_k = 1 - (1 - running_average_rate)^k. The cuts then act as in
+    OutputBudget: an LTU that the output stops reading is removed, and the freed connections go to the buckets. A new
+    LTU starts with E[delta^2] = 0."""
+
+    def new_network(self, depth, ltu_weights, ltu_connections, output_connections):
+        network = super().new_network(depth, ltu_weights, ltu_connections, output_connections)
+        n_units = self.n_ltus + self.n_outputs
+        traces = SiftingTraces(jnp.zeros((n_units, self.n_layer_inputs)), jnp.zeros(n_units))
+        return network._replace(slots=network.slots._replace(traces=traces))
+
+    def prune_connections(self, network):
+        return network
+
+    def update_measures(self, network, pre_activation_gradients, layer_inputs):
+        network = super().update_measures(network, pre_activation_gradients, layer_inputs)
+        traces = network.slots.traces
+        rate = self.running_average_rate
+        delta_squared = traces.delta_squared + rate * (pre_activation_gradients ** 2 - traces.delta_squared)
+        warmed = -jnp.expm1(network.step * jnp.log1p(-rate))   # 1 - (1 - rate)^step
+        layers = (network.ltus, network.outputs)
+        weights, connections = (jnp.concatenate([getattr(layer, name) for layer in layers])
+                                for name in ('weights', 'connections'))
+        h, step_sizes = (jnp.concatenate([getattr(layer.optimizer_state, name) for layer in layers])
+                         for name in ('h', 'beta'))
+        step_sizes = jnp.exp(step_sizes)
+        log_immaturity = traces.log_immaturity
+        bound = (jnp.sqrt(step_sizes * (delta_squared / warmed)[:, None] / 2 * -jnp.expm1(log_immaturity))
+                 * (1.61 + 0.39 * jnp.exp(0.75 * log_immaturity)))
+        cut = (connections & (jnp.abs(weights) + jnp.abs(h) < bound)).at[:, -1].set(False)
+        network = self.cut(network, cut[:self.n_ltus], cut[self.n_ltus:])
+        connections = jnp.concatenate([network.ltus.connections, network.outputs.connections])
+        log_immaturity = jnp.where(connections, log_immaturity + 2 * jnp.log1p(-jnp.minimum(step_sizes * warmed, 1.0)),
+                                   0.0)
+        return network._replace(slots=network.slots._replace(traces=SiftingTraces(log_immaturity, delta_squared)))
+
+    def empty(self, network, removed: Bool[Array, 'ltus']):
+        """As in OutputBudget, and the removed LTUs' connections in and out lose their maturity."""
+        network = super().empty(network, removed)
+        columns = jnp.zeros(self.n_layer_inputs, bool).at[self.ltu_activation_idxs].set(removed)
+        rows = jnp.append(removed, jnp.zeros(self.n_outputs, bool))
+        traces = network.slots.traces
+        traces = traces._replace(log_immaturity=jnp.where(rows[:, None] | columns[None], 0.0, traces.log_immaturity),
+                                 delta_squared=jnp.where(rows, 0.0, traces.delta_squared))
+        return network._replace(slots=network.slots._replace(traces=traces))
+
+
+class SiftingSoftCandidates(Sifting, SoftCandidates):
+    """SoftCandidates with the connection pruning of Sifting."""

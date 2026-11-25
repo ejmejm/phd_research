@@ -1,5 +1,84 @@
 # Connection Slots
 
+## Methods of notebooks 1 and 2
+
+All methods have 1 depth of LTUs and one output, and a budget of `MAX_CONNECTIONS` (2048). The biases never count.
+The code is in `algorithms.py`.
+
+### Connection and unit search (`CountAllConnections`)
+
+The budget counts every connection: the LTUs' inputs, and the output's connections to x and to the LTUs. The output
+reads all of x and every LTU.
+
+- **prune_connections** (every 10k steps, on the LTUs only): it cuts each connection whose weight sign changed since
+  the previous check. New connections are exempt.
+- **add_connections** (every 1k steps): each LTU keeps a gradient sum for each input it does not read. It connects the
+  input with the largest sum if that sum is more than 6 times the root mean square of the sums. This happens only
+  while the budget has room. A new connection starts at weight 0 with a step size of 0.03.
+- **prune_units** (every 10k steps): it removes the 1/8 of the LTUs with the smallest |outgoing weight|.
+- **add_units** (every 10k steps): it creates LTUs while the budget has room for 21 connections each. A new LTU reads
+  20 inputs, drawn in proportion to the output's weights squared. They get random weights with a step size of 0.03.
+  The output reads the new LTU from weight 0, with a shadow weight of ±1.
+
+### No connection search (`NoConnectionSearch`, baseline)
+
+- **prune_connections**: none.
+- **add_connections**: none.
+- **prune_units**: as in `CountAllConnections`.
+- **add_units**: as in `CountAllConnections`.
+
+### Static (`Static`, baseline)
+
+- **prune_connections**: none.
+- **add_connections**: none.
+- **prune_units**: none.
+- **add_units**: none. The network of step 0 never changes.
+
+### Candidates in the budget (`CountCandidates`, baseline)
+
+The budget also counts the candidates: the inputs whose gradient sums an LTU keeps but does not read. So each LTU
+counts all of x, and a new LTU costs `N_INPUTS` + 1 connections.
+
+- **prune_connections**: as in `CountAllConnections`. It frees no budget.
+- **add_connections**: as in `CountAllConnections`. It uses no budget.
+- **prune_units**: as in `CountAllConnections`.
+- **add_units**: as in `CountAllConnections`, while the budget has room for `N_INPUTS` + 1 connections each.
+
+### Output budget (`OutputBudget`, proposed)
+
+Each unit owns its incoming connections. The output holds the budget and pays for its own connections and for each
+LTU, at 31 connections each. Half of each freed amount goes to a connection bucket, and half goes to a unit bucket.
+
+- **prune_connections** (every 10k steps, on the LTUs and the output): it cuts each connection whose weight sign
+  changed since the previous check. New connections are exempt. An LTU that the output stops reading is removed.
+- **add_connections** (every 1k steps): each LTU refills its free slots up to 30, with uniform draws from x. The
+  output reads uniform draws from the sources it does not read, as many as the connection bucket holds. The part of
+  the connection bucket that has nothing left to read goes to the unit bucket. A new connection starts at weight 0
+  with a step size of 1e-4.
+- **prune_units** (every 10k steps): it removes the 1/8 of the LTUs with the smallest |outgoing weight|.
+- **add_units** (every 10k steps): it creates as many LTUs as the unit bucket holds. A new LTU reads 30 inputs,
+  drawn in proportion to the output's weights squared, then uniformly where those weights are 0. 15 inputs get
+  random weights with a step size of 0.03, and 15 inputs get weight 0 with a step size of 1e-4. The output reads the
+  new LTU from weight 0, with a shadow weight of ±1.
+
+### Output budget, soft candidates (`SoftCandidates`, proposed)
+
+- **prune_connections**: as in `OutputBudget`.
+- **add_connections**: as in `OutputBudget`.
+- **prune_units**: as in `OutputBudget`.
+- **add_units**: as in `OutputBudget`, but all 30 inputs of a new LTU get weights from U(−1e-4, 1e-4), with a step
+  size of 1e-4.
+
+### Output budget with the |w| + |h| rule (`Sifting` and `SiftingSoftCandidates`, proposed)
+
+- **prune_connections** (every step, after the weight update, on the LTUs and the output): it cuts each connection
+  whose |w| + |h| is below the bound for a dead weight of the same age and step size. This is the CI rule of
+  `../../feature_sifting/networks/parallel_mnist_label_changes.ipynb`. Biases are exempt. An LTU that the output stops
+  reading is removed.
+- **add_connections**: as in `OutputBudget`.
+- **prune_units**: as in `OutputBudget`.
+- **add_units**: as in `OutputBudget` (`Sifting`) or `SoftCandidates` (`SiftingSoftCandidates`).
+
 ## Agreed environment
 
 - Each example has 108 independent Gaussian inputs, with mean zero and variance one.
